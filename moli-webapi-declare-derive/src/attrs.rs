@@ -33,7 +33,7 @@ pub(crate) enum ValueInitAttr {
 #[derive(Clone)]
 pub(crate) enum ConstructorDefaultAttr {
     Default,
-    Expr(Expr),
+    Expr(Box<Expr>),
 }
 
 #[derive(Clone, Copy, Default)]
@@ -502,7 +502,7 @@ pub(crate) fn parse_field_attrs(field: &Field) -> Result<FieldAttrs, Error> {
             }
             if meta.path.is_ident("constructor_default") {
                 let default = if meta.input.peek(Token![=]) {
-                    ConstructorDefaultAttr::Expr(meta.value()?.parse()?)
+                    ConstructorDefaultAttr::Expr(Box::new(meta.value()?.parse()?))
                 } else {
                     ConstructorDefaultAttr::Default
                 };
