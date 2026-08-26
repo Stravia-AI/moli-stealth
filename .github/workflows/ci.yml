@@ -324,11 +324,10 @@ jobs:
           uv sync --project moli-cdp-smoke --locked
           npm ci --prefix moli-cdp-smoke
       - name: Run full CDP smoke
-        env:
-          MOLI_BIN: ${{ github.workspace }}/target/ci-bin/moli-release-head/moli
-        run: >-
-          uv run --project moli-cdp-smoke --no-sync moli-cdp-smoke
-          --jobs 4 --output-dir target/smoke/cdp-ci
+        run: |
+          export MOLI_BIN="$PWD/target/ci-bin/moli-release-head/moli"
+          uv run --project moli-cdp-smoke --no-sync moli-cdp-smoke \
+            --jobs 4 --output-dir target/smoke/cdp-ci
       - name: Upload diagnostics
         if: ${{ always() }}
         continue-on-error: true
@@ -365,10 +364,9 @@ jobs:
       - name: Install dependencies
         run: uv sync --project moli-webdriver-smoke --locked
       - name: Run full WebDriver smoke
-        env:
-          MOLI_BIN: ${{ github.workspace }}/target/ci-bin/moli-release-head/moli
         shell: bash
         run: |
+          export MOLI_BIN="$PWD/target/ci-bin/moli-release-head/moli"
           mkdir -p target/smoke/webdriver-ci
           set -o pipefail
           uv run --project moli-webdriver-smoke --no-sync \
@@ -428,7 +426,7 @@ jobs:
           chromium_bin=$(uv run --project moli-cdp-smoke --no-sync python -c \
             'from playwright.sync_api import sync_playwright; p = sync_playwright().start(); print(p.chromium.executable_path); p.stop()')
           test -x "$chromium_bin"
-          wrapper="$GITHUB_WORKSPACE/target/ci-bin/chromium-ci"
+          wrapper="$PWD/target/ci-bin/chromium-ci"
           printf '%s\n' '#!/bin/sh' "exec \"$chromium_bin\" --no-sandbox \"\$@\"" > "$wrapper"
           chmod 0755 "$wrapper"
           echo "binary=$wrapper" >> "$GITHUB_OUTPUT"
@@ -438,7 +436,7 @@ jobs:
         run: >-
           uv run --project moli-frontend-smoke --no-sync moli-frontend-smoke
           --chromium-bin "${{ steps.chromium.outputs.binary }}"
-          --moli-bin "${{ github.workspace }}/target/ci-bin/moli-release-head/moli"
+          --moli-bin "$PWD/target/ci-bin/moli-release-head/moli"
           --output target/frontend-smoke
       - name: Validate frontend artifacts
         id: analysis
@@ -493,12 +491,12 @@ jobs:
       - name: Run deterministic fetch contracts
         run: >-
           uv run --project moli-benchmark --no-sync moli-benchmark synthetic
-          --moli-bin "${{ github.workspace }}/target/ci-bin/moli-release-head/moli"
+          --moli-bin "$PWD/target/ci-bin/moli-release-head/moli"
           --runs 5 --output-dir target/benchmark/runtime-synthetic
       - name: Run long-lived CDP session contracts
         run: >-
           uv run --project moli-benchmark --no-sync moli-benchmark cdp-session
-          --moli-bin "${{ github.workspace }}/target/ci-bin/moli-release-head/moli"
+          --moli-bin "$PWD/target/ci-bin/moli-release-head/moli"
           --target moli-cdp --gate-target moli-cdp --runs 3
           --output-dir target/benchmark/cdp-session
       - name: Upload evidence
@@ -550,13 +548,13 @@ jobs:
       - name: Run fast cross-engine contract
         run: >-
           uv run --project moli-benchmark --no-sync moli-benchmark agent-episode
-          --moli-bin "${{ github.workspace }}/target/ci-bin/moli-release-head/moli"
+          --moli-bin "$PWD/target/ci-bin/moli-release-head/moli"
           --chrome-bin "${{ steps.chromium.outputs.binary }}"
           --step-dwell-ms 0 --output-dir target/benchmark/agent-fast
       - name: Run idle-resource episode
         run: >-
           uv run --project moli-benchmark --no-sync moli-benchmark agent-episode
-          --moli-bin "${{ github.workspace }}/target/ci-bin/moli-release-head/moli"
+          --moli-bin "$PWD/target/ci-bin/moli-release-head/moli"
           --chrome-bin "${{ steps.chromium.outputs.binary }}"
           --output-dir target/benchmark/agent-resource
       - name: Upload evidence
@@ -603,24 +601,24 @@ jobs:
         continue-on-error: true
         run: >-
           uv run --project moli-benchmark --no-sync moli-benchmark startup
-          --moli-bin "${{ github.workspace }}/target/ci-bin/moli-release-base/moli"
+          --moli-bin "$PWD/target/ci-bin/moli-release-base/moli"
           --profile formal --output-dir target/release-regression/base-startup
       - name: Require HEAD startup and package workflow
         run: >-
           uv run --project moli-benchmark --no-sync moli-benchmark startup
-          --moli-bin "${{ github.workspace }}/target/ci-bin/moli-release-head/moli"
+          --moli-bin "$PWD/target/ci-bin/moli-release-head/moli"
           --profile formal --baseline-report target/release-regression/base-startup
           --output-dir target/release-regression/head-startup
       - name: Measure common-ancestor concurrency matrix
         continue-on-error: true
         run: >-
           uv run --project moli-benchmark --no-sync moli-benchmark synthetic-matrix
-          --moli-bin "${{ github.workspace }}/target/ci-bin/moli-release-base/moli"
+          --moli-bin "$PWD/target/ci-bin/moli-release-base/moli"
           --profile smoke --output-dir target/release-regression/base-matrix
       - name: Require HEAD concurrency matrix
         run: >-
           uv run --project moli-benchmark --no-sync moli-benchmark synthetic-matrix
-          --moli-bin "${{ github.workspace }}/target/ci-bin/moli-release-head/moli"
+          --moli-bin "$PWD/target/ci-bin/moli-release-head/moli"
           --profile smoke --baseline-report target/release-regression/base-matrix
           --output-dir target/release-regression/head-matrix
       - name: Upload evidence
@@ -660,7 +658,7 @@ jobs:
         run: >-
           node moli-benchmark/browser-spider-local/bench.mjs
           --target moli
-          --moli-bin "${{ github.workspace }}/target/ci-bin/moli-release-head/moli"
+          --moli-bin "$PWD/target/ci-bin/moli-release-head/moli"
           --workers 1 --parallelism 1 --runs 1
           --site-source fixture --goto-timeout-ms 1500 --server-hang-ms 3000
           --sample-interval-ms 100 --assert-fixture-contract
@@ -724,8 +722,8 @@ jobs:
       - name: Run deterministic and public-web A/B
         run: >-
           node moli-benchmark/browser-spider-local/compare.mjs run
-          --base-bin "${{ github.workspace }}/target/ci-bin/moli-release-base/moli"
-          --head-bin "${{ github.workspace }}/target/ci-bin/moli-release-head/moli"
+          --base-bin "$PWD/target/ci-bin/moli-release-base/moli"
+          --head-bin "$PWD/target/ci-bin/moli-release-head/moli"
           --base-sha "${{ needs.resolve-refs.outputs.base_sha }}"
           --head-sha "${{ needs.resolve-refs.outputs.head_sha }}"
           --execution-order "${{ needs.resolve-refs.outputs.execution_order }}"
@@ -821,11 +819,11 @@ jobs:
             echo "${side}_exit_code=$status" >> "$GITHUB_OUTPUT"
           }
           if [[ "$EXECUTION_ORDER" == head-first ]]; then
-            run_side head "${{ github.workspace }}/target/ci-bin/moli-release-head/moli"
-            run_side base "${{ github.workspace }}/target/ci-bin/moli-release-base/moli"
+            run_side head "$PWD/target/ci-bin/moli-release-head/moli"
+            run_side base "$PWD/target/ci-bin/moli-release-base/moli"
           else
-            run_side base "${{ github.workspace }}/target/ci-bin/moli-release-base/moli"
-            run_side head "${{ github.workspace }}/target/ci-bin/moli-release-head/moli"
+            run_side base "$PWD/target/ci-bin/moli-release-base/moli"
+            run_side head "$PWD/target/ci-bin/moli-release-head/moli"
           fi
       - name: Compare resilience and memory evidence
         id: comparison
