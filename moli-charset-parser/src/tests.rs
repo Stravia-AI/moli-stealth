@@ -88,12 +88,15 @@ fn ignores_invalid_label_and_continues_to_later_valid_meta() {
 }
 
 #[test]
-fn ignores_meta_after_1024_bytes_even_while_still_in_head() {
+fn finds_meta_after_1024_bytes_while_still_in_head() {
     let mut input = spaces(HTML_META_CHARSET_PRESCAN_LIMIT);
     input.extend_from_slice(br#"<meta charset="gbk">"#);
     let mut parser = HtmlMetaCharsetParser::new();
 
-    assert_eq!(parser.feed(&input), HtmlMetaCharsetScanResult::NotFound);
+    assert_eq!(
+        parser.feed(&input),
+        HtmlMetaCharsetScanResult::Found(encoding_rs::GBK)
+    );
 }
 
 #[test]
@@ -119,14 +122,17 @@ fn split_meta_before_1024_bytes_is_scanned() {
 }
 
 #[test]
-fn ignores_meta_tag_that_crosses_1024_byte_boundary() {
+fn finds_meta_tag_that_crosses_1024_byte_boundary_while_in_head() {
     let partial_meta = b"<meta char";
     let mut input = spaces(HTML_META_CHARSET_PRESCAN_LIMIT - partial_meta.len());
     input.extend_from_slice(partial_meta);
     input.extend_from_slice(br#"set="gbk">"#);
     let mut parser = HtmlMetaCharsetParser::new();
 
-    assert_eq!(parser.feed(&input), HtmlMetaCharsetScanResult::NotFound);
+    assert_eq!(
+        parser.feed(&input),
+        HtmlMetaCharsetScanResult::Found(encoding_rs::GBK)
+    );
 }
 
 #[test]
@@ -140,6 +146,49 @@ fn ignores_meta_after_1024_bytes_after_head_is_over() {
 }
 
 #[test]
+fn accepts_meta_starting_before_1024_bytes_after_head_is_over() {
+    let mut input = b"</head>".to_vec();
+    input.extend(spaces(HTML_META_CHARSET_PRESCAN_LIMIT - 1 - input.len()));
+    input.extend_from_slice(br#"<meta charset="gbk">"#);
+    let mut parser = HtmlMetaCharsetParser::new();
+
+    assert_eq!(
+        parser.feed(&input),
+        HtmlMetaCharsetScanResult::Found(encoding_rs::GBK)
+    );
+}
+
+#[test]
+fn accepts_split_meta_starting_before_1024_bytes_after_head_is_over() {
+    let partial_meta = b"<meta char";
+    let mut prefix = b"</head>".to_vec();
+    prefix.extend(spaces(
+        HTML_META_CHARSET_PRESCAN_LIMIT - partial_meta.len() - prefix.len(),
+    ));
+    prefix.extend_from_slice(partial_meta);
+    let mut parser = HtmlMetaCharsetParser::new();
+
+    assert_eq!(parser.feed(&prefix), HtmlMetaCharsetScanResult::Pending);
+    assert_eq!(
+        parser.feed(br#"set="gbk">"#),
+        HtmlMetaCharsetScanResult::Found(encoding_rs::GBK)
+    );
+}
+
+#[test]
+fn rejects_split_meta_starting_at_1024_bytes_after_head_is_over() {
+    let mut prefix = b"</head>".to_vec();
+    prefix.extend(spaces(HTML_META_CHARSET_PRESCAN_LIMIT - prefix.len()));
+    let mut parser = HtmlMetaCharsetParser::new();
+
+    assert_eq!(parser.feed(&prefix), HtmlMetaCharsetScanResult::NotFound);
+    assert_eq!(
+        parser.feed(br#"<meta charset="gbk">"#),
+        HtmlMetaCharsetScanResult::NotFound
+    );
+}
+
+#[test]
 fn accepts_meta_after_body_before_1024_bytes_like_chromium_prescan() {
     assert_eq!(
         sniff_html_meta_charset(br#"<body><meta charset="gbk">"#),
@@ -148,16 +197,25 @@ fn accepts_meta_after_body_before_1024_bytes_like_chromium_prescan() {
 }
 
 #[test]
-fn split_meta_after_1024_bytes_is_not_scanned() {
+fn split_meta_after_1024_bytes_is_scanned_while_in_head() {
     let mut parser = HtmlMetaCharsetParser::new();
     assert_eq!(
         parser.feed(&spaces(HTML_META_CHARSET_PRESCAN_LIMIT)),
-        HtmlMetaCharsetScanResult::NotFound
+        HtmlMetaCharsetScanResult::Pending
     );
     assert_eq!(
         parser.feed(br#"<meta charset="shift_jis">"#),
-        HtmlMetaCharsetScanResult::NotFound
+        HtmlMetaCharsetScanResult::Found(encoding_rs::SHIFT_JIS)
     );
+}
+
+#[test]
+fn stops_after_head_ends_beyond_1024_bytes() {
+    let mut input = spaces(HTML_META_CHARSET_PRESCAN_LIMIT);
+    input.extend_from_slice(br#"</head><meta charset="gbk">"#);
+    let mut parser = HtmlMetaCharsetParser::new();
+
+    assert_eq!(parser.feed(&input), HtmlMetaCharsetScanResult::NotFound);
 }
 
 #[test]

@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use encoding_rs::Encoding;
 use html5ever::{
@@ -9,6 +9,9 @@ use html5ever::{
     },
 };
 
+/// Minimum number of input bytes inspected even after the tokenizer has left
+/// the document head. While it is still in the head, scanning continues past
+/// this boundary to match Blink's `kBytesToCheckUnconditionally` behavior.
 pub const HTML_META_CHARSET_PRESCAN_LIMIT: usize = 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -21,6 +24,7 @@ pub enum HtmlMetaCharsetScanResult {
 pub struct HtmlMetaCharsetParser {
     tokenizer: Tokenizer<MetaCharsetTokenSink>,
     bytes_fed_to_tokenizer: usize,
+    boundary_markup_tracker: MarkupBoundaryTracker,
 }
 
 impl Default for HtmlMetaCharsetParser {
@@ -34,6 +38,7 @@ impl HtmlMetaCharsetParser {
         Self {
             tokenizer: Tokenizer::new(MetaCharsetTokenSink::default(), TokenizerOpts::default()),
             bytes_fed_to_tokenizer: 0,
+            boundary_markup_tracker: MarkupBoundaryTracker::default(),
         }
     }
 
@@ -42,17 +47,25 @@ impl HtmlMetaCharsetParser {
             return self.status();
         }
 
+        let mut remaining = bytes;
         if self.bytes_fed_to_tokenizer < HTML_META_CHARSET_PRESCAN_LIMIT {
             let prefix_len =
                 (HTML_META_CHARSET_PRESCAN_LIMIT - self.bytes_fed_to_tokenizer).min(bytes.len());
+            self.boundary_markup_tracker.feed(&bytes[..prefix_len]);
             self.feed_bytes(&bytes[..prefix_len]);
+            remaining = &bytes[prefix_len..];
             if self.is_done() {
                 return self.status();
             }
             if self.bytes_fed_to_tokenizer >= HTML_META_CHARSET_PRESCAN_LIMIT {
-                self.tokenizer.sink.finish_without_charset();
-                return self.status();
+                self.tokenizer.sink.start_scanning_only_while_in_head(
+                    self.boundary_markup_tracker.has_open_markup(),
+                );
             }
+        }
+
+        if !self.is_done() {
+            self.feed_bytes(remaining);
         }
         self.status()
     }
@@ -100,12 +113,18 @@ pub fn sniff_html_meta_charset(bytes: &[u8]) -> Option<&'static Encoding> {
 
 struct MetaCharsetTokenSink {
     result: RefCell<HtmlMetaCharsetScanResult>,
+    in_head_section: Cell<bool>,
+    scanning_only_while_in_head: Cell<bool>,
+    finish_token_started_before_limit: Cell<bool>,
 }
 
 impl Default for MetaCharsetTokenSink {
     fn default() -> Self {
         Self {
             result: RefCell::new(HtmlMetaCharsetScanResult::Pending),
+            in_head_section: Cell::new(true),
+            scanning_only_while_in_head: Cell::new(false),
+            finish_token_started_before_limit: Cell::new(false),
         }
     }
 }
@@ -121,14 +140,41 @@ impl MetaCharsetTokenSink {
         }
     }
 
-    fn process_start_tag(&self, tag: &Tag) {
+    fn start_scanning_only_while_in_head(&self, token_started_before_limit: bool) {
+        self.scanning_only_while_in_head.set(true);
+        if !self.in_head_section.get() {
+            if token_started_before_limit {
+                self.finish_token_started_before_limit.set(true);
+            } else {
+                self.finish_without_charset();
+            }
+        }
+    }
+
+    fn process_tag(&self, tag: &Tag) {
         if self.is_done() {
             return;
         }
-        if tag.name.as_ref() == "meta"
+
+        if tag.kind == TagKind::StartTag
+            && tag.name.as_ref() == "meta"
             && let Some(encoding) = meta_charset_from_token(tag)
         {
             *self.result.borrow_mut() = HtmlMetaCharsetScanResult::Found(encoding);
+            return;
+        }
+
+        let tag_name = tag.name.as_ref();
+        let is_head_compatible = matches!(
+            tag_name,
+            "script" | "noscript" | "style" | "link" | "meta" | "object" | "title" | "base"
+        ) || (tag.kind == TagKind::StartTag
+            && matches!(tag_name, "html" | "head"));
+        if !is_head_compatible {
+            self.in_head_section.set(false);
+            if self.scanning_only_while_in_head.get() {
+                self.finish_without_charset();
+            }
         }
     }
 
@@ -141,12 +187,19 @@ impl TokenSink for MetaCharsetTokenSink {
     type Handle = ();
 
     fn process_token(&self, token: Token, _line_number: u64) -> TokenSinkResult<Self::Handle> {
+        let finishes_token_started_before_limit = self.finish_token_started_before_limit.get();
         let Token::TagToken(tag) = token else {
+            if finishes_token_started_before_limit {
+                self.finish_token_started_before_limit.set(false);
+                self.finish_without_charset();
+            }
             return TokenSinkResult::Continue;
         };
 
-        if tag.kind == TagKind::StartTag {
-            self.process_start_tag(&tag);
+        self.process_tag(&tag);
+        if finishes_token_started_before_limit && !self.is_done() {
+            self.finish_token_started_before_limit.set(false);
+            self.finish_without_charset();
         }
 
         if tag.kind != TagKind::StartTag {
@@ -161,6 +214,48 @@ impl TokenSink for MetaCharsetTokenSink {
             "plaintext" => TokenSinkResult::Plaintext,
             _ => TokenSinkResult::Continue,
         }
+    }
+}
+
+#[derive(Default)]
+struct MarkupBoundaryTracker {
+    in_markup: bool,
+    quote: Option<u8>,
+}
+
+impl MarkupBoundaryTracker {
+    fn feed(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            if !self.in_markup {
+                if *byte == b'<' {
+                    self.in_markup = true;
+                }
+                continue;
+            }
+
+            if let Some(quote) = self.quote {
+                if *byte == quote {
+                    self.quote = None;
+                }
+                continue;
+            }
+
+            match *byte {
+                b'\'' | b'"' => self.quote = Some(*byte),
+                b'>' => self.in_markup = false,
+                b'<' => {
+                    // A malformed new opening delimiter supersedes the prior
+                    // candidate just as the tokenizer returns to tag-open
+                    // processing.
+                    self.quote = None;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn has_open_markup(&self) -> bool {
+        self.in_markup
     }
 }
 

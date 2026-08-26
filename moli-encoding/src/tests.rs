@@ -78,7 +78,7 @@ fn later_meta_charset_decodes_unemitted_non_ascii_after_ascii_prefix() {
 }
 
 #[test]
-fn meta_charset_after_1024_bytes_still_in_head_is_ignored() {
+fn meta_charset_after_1024_bytes_still_in_head_is_selected() {
     let headers = vec![("Content-Type".to_owned(), "text/html".to_owned())];
     let mut input = vec![b' '; HTML_META_CHARSET_PRESCAN_LIMIT];
     input.extend_from_slice(b"<meta charset=\"gbk\"><p>");
@@ -87,12 +87,12 @@ fn meta_charset_after_1024_bytes_still_in_head_is_ignored() {
 
     let decoded = decoder.push(&input).join("");
 
-    assert_eq!(decoder.selected_encoding_name(), Some("windows-1252"));
-    assert!(!decoded.contains("家居"));
+    assert_eq!(decoder.selected_encoding_name(), Some("GBK"));
+    assert!(decoded.contains("家居"));
 }
 
 #[test]
-fn meta_charset_crossing_1024_byte_boundary_is_ignored() {
+fn meta_charset_crossing_1024_byte_boundary_is_selected_while_in_head() {
     let headers = vec![("Content-Type".to_owned(), "text/html".to_owned())];
     let partial_meta = b"<meta char";
     let mut input = vec![b' '; HTML_META_CHARSET_PRESCAN_LIMIT - partial_meta.len()];
@@ -103,8 +103,8 @@ fn meta_charset_crossing_1024_byte_boundary_is_ignored() {
 
     let decoded = decoder.push(&input).join("");
 
-    assert_eq!(decoder.selected_encoding_name(), Some("windows-1252"));
-    assert!(!decoded.contains("家居"));
+    assert_eq!(decoder.selected_encoding_name(), Some("GBK"));
+    assert!(decoded.contains("家居"));
 }
 
 #[test]
@@ -120,6 +120,25 @@ fn meta_charset_after_1024_bytes_after_head_is_ignored() {
 
     assert_eq!(decoder.selected_encoding_name(), Some("windows-1252"));
     assert!(!decoded.contains("家居"));
+}
+
+#[test]
+fn meta_charset_starting_before_1024_bytes_after_head_is_selected() {
+    let headers = vec![("Content-Type".to_owned(), "text/html".to_owned())];
+    let mut input = b"</head>".to_vec();
+    input.extend(vec![
+        b' ';
+        HTML_META_CHARSET_PRESCAN_LIMIT - 1 - input.len()
+    ]);
+    input.extend_from_slice(b"<meta charset=\"gbk\"><p>");
+    input.extend_from_slice(&gbk_bytes("家居"));
+    let mut decoder =
+        HtmlDocumentStreamingDecoder::new_with_fallback(&headers, Some("windows-1252"));
+
+    let decoded = decoder.push(&input).join("");
+
+    assert_eq!(decoder.selected_encoding_name(), Some("GBK"));
+    assert!(decoded.contains("家居"));
 }
 
 #[test]
