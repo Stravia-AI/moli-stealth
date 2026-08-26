@@ -4,6 +4,7 @@ use super::parser_blocking_pending::main_parser_blocking_classic_script_item;
 use super::scaffold::continue_phase_one_until_streaming_boundary_on_execution_context;
 use super::*;
 use moli_encoding::HtmlDocumentStreamingDecoder;
+use moli_encoding_detector::detect_legacy_html_encoding;
 use moli_web_mime::response_headers_indicate_attachment_download;
 use tokio::sync::{mpsc, oneshot};
 
@@ -123,8 +124,11 @@ impl ConcurrentParseTimeRuntime {
                 )
             });
         state.service_worker_preload_context = service_worker_preload_context.clone();
-        let mut decoder =
-            HtmlDocumentStreamingDecoder::new_for_url(&response_headers, state.final_url.as_str());
+        let mut decoder = HtmlDocumentStreamingDecoder::new_with_legacy_encoding_detector(
+            &response_headers,
+            state.final_url.as_str(),
+            detect_legacy_html_encoding,
+        );
         // Raw navigation bodies are decoded during prebootstrap scan. The decoder
         // is carried forward so split multibyte sequences are not decoded twice or
         // lost between the scan and parser handoff.
@@ -358,8 +362,11 @@ impl ConcurrentParseTimeRuntime {
                 )
             });
         state.service_worker_preload_context = service_worker_preload_context.clone();
-        let mut decoder =
-            HtmlDocumentStreamingDecoder::new_for_url(&response_headers, state.final_url.as_str());
+        let mut decoder = HtmlDocumentStreamingDecoder::new_with_legacy_encoding_detector(
+            &response_headers,
+            state.final_url.as_str(),
+            detect_legacy_html_encoding,
+        );
         // External raw bodies replay captured chunks. Pre-scan only what is already
         // buffered before bootstrap so the producer's backpressure boundary still
         // controls how far ahead the parser can get.

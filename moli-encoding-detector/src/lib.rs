@@ -1,7 +1,13 @@
+//! Heuristic detection of legacy encodings used by web documents.
+
 use compact_enc_det::{DetectHints, Encoding as CedEncoding, TextCorpusType, detect_encoding};
 use encoding_rs::Encoding;
 
-pub(crate) fn detect_legacy_html_encoding(
+/// Detects a legacy HTML encoding using Chromium's CED configuration.
+///
+/// UTF encodings are deliberately excluded: browser-side heuristics exist for
+/// legacy content, not as a substitute for labelling modern UTF-8 documents.
+pub fn detect_legacy_html_encoding(
     bytes: &[u8],
     url_hint: Option<&str>,
 ) -> Option<&'static Encoding> {

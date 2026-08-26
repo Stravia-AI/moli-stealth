@@ -19,6 +19,7 @@ members = [
     "moli-dns-resolver",
     "moli-protocol",
     "moli-encoding",
+    "moli-encoding-detector",
     "moli-core",
     "moli-import-map",
     "moli-image",

@@ -1,13 +1,17 @@
 use encoding_rs::{CoderResult, Decoder, Encoding};
 use moli_charset_parser::{HtmlMetaCharsetParser, HtmlMetaCharsetScanResult};
 
-use crate::{
-    detector::detect_legacy_html_encoding, encoding_for_label, encoding_from_response_headers,
-};
+use crate::{encoding_for_label, encoding_from_response_headers};
 
 const DEFAULT_HTML_DOCUMENT_ENCODING: &str = "windows-1252";
 const UTF16LE_XML_PREFIX: &[u8; 6] = b"<\0?\0x\0";
 const UTF16BE_XML_PREFIX: &[u8; 6] = b"\0<\0?\0x";
+
+/// Stateless hook for optional, heuristic detection of legacy document
+/// encodings. Deterministic BOM, transport and in-document declarations are
+/// resolved before this hook is called.
+pub type LegacyEncodingDetector =
+    fn(bytes: &[u8], url_hint: Option<&str>) -> Option<&'static Encoding>;
 
 pub fn decode_html_document(bytes: &[u8], headers: &[(String, String)]) -> (String, &'static str) {
     decode_html_document_with_fallback(bytes, headers, None)
@@ -39,7 +43,7 @@ pub struct HtmlDocumentStreamingDecoder {
     emitted_sniff_len: usize,
     meta_prescan_fed_len: usize,
     meta_charset_parser: HtmlMetaCharsetParser,
-    allow_legacy_content_detection: bool,
+    legacy_encoding_detector: Option<LegacyEncodingDetector>,
     url_hint: Option<String>,
     decoder: Option<Decoder>,
     selected_encoding: Option<&'static Encoding>,
@@ -47,24 +51,29 @@ pub struct HtmlDocumentStreamingDecoder {
 
 impl HtmlDocumentStreamingDecoder {
     pub fn new(headers: &[(String, String)]) -> Self {
-        Self::new_with_fallback_and_url(headers, None, None)
+        Self::new_with_options(headers, None, None, None)
     }
 
-    pub fn new_for_url(headers: &[(String, String)], url_hint: &str) -> Self {
-        Self::new_with_fallback_and_url(headers, None, Some(url_hint))
+    pub fn new_with_legacy_encoding_detector(
+        headers: &[(String, String)],
+        url_hint: &str,
+        detector: LegacyEncodingDetector,
+    ) -> Self {
+        Self::new_with_options(headers, None, Some(url_hint), Some(detector))
     }
 
     pub fn new_with_fallback(
         headers: &[(String, String)],
         fallback_encoding: Option<&str>,
     ) -> Self {
-        Self::new_with_fallback_and_url(headers, fallback_encoding, None)
+        Self::new_with_options(headers, fallback_encoding, None, None)
     }
 
-    fn new_with_fallback_and_url(
+    fn new_with_options(
         headers: &[(String, String)],
         fallback_encoding: Option<&str>,
         url_hint: Option<&str>,
+        legacy_encoding_detector: Option<LegacyEncodingDetector>,
     ) -> Self {
         Self {
             transport_encoding: encoding_from_response_headers(headers),
@@ -75,10 +84,7 @@ impl HtmlDocumentStreamingDecoder {
             emitted_sniff_len: 0,
             meta_prescan_fed_len: 0,
             meta_charset_parser: HtmlMetaCharsetParser::new(),
-            // A supplied fallback represents an inherited or otherwise
-            // authoritative default. Blink only lets content detection replace
-            // its own default, not an ordinary parent-frame encoding.
-            allow_legacy_content_detection: fallback_encoding.is_none(),
+            legacy_encoding_detector,
             url_hint: url_hint.map(str::to_owned),
             decoder: None,
             selected_encoding: None,
@@ -162,9 +168,8 @@ impl HtmlDocumentStreamingDecoder {
     }
 
     fn detected_legacy_content_encoding(&self) -> Option<&'static Encoding> {
-        self.allow_legacy_content_detection
-            .then(|| detect_legacy_html_encoding(&self.sniff_buffer, self.url_hint.as_deref()))
-            .flatten()
+        self.legacy_encoding_detector
+            .and_then(|detector| detector(&self.sniff_buffer, self.url_hint.as_deref()))
     }
 
     fn feed_meta_charset_prescan(&mut self, finishing: bool) -> HtmlMetaCharsetScanResult {

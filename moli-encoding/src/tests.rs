@@ -9,6 +9,21 @@ fn gbk_bytes(input: &str) -> Vec<u8> {
     encoding_rs::GBK.encode(input).0.into_owned()
 }
 
+fn test_legacy_encoding_detector(
+    bytes: &[u8],
+    url_hint: Option<&str>,
+) -> Option<&'static Encoding> {
+    (!bytes.is_empty() && url_hint == Some("https://legacy.example/"))
+        .then_some(encoding_rs::IBM866)
+}
+
+fn unexpected_legacy_encoding_detector(
+    _bytes: &[u8],
+    _url_hint: Option<&str>,
+) -> Option<&'static Encoding> {
+    panic!("declared encoding must take precedence over heuristic detection")
+}
+
 #[test]
 fn content_type_charset_is_selected() {
     let headers = vec![(
@@ -114,10 +129,7 @@ fn meta_charset_after_1024_bytes_after_head_is_ignored() {
     input.extend(vec![b' '; HTML_META_CHARSET_PRESCAN_LIMIT - input.len()]);
     input.extend_from_slice(b"<meta charset=\"gbk\"><p>");
     input.extend_from_slice(&gbk_bytes("家居"));
-    // Suppress heuristic detection so this test isolates the meta prescan's
-    // head boundary rather than CED independently recognizing the GBK body.
-    let mut decoder =
-        HtmlDocumentStreamingDecoder::new_with_fallback(&headers, Some("windows-1252"));
+    let mut decoder = HtmlDocumentStreamingDecoder::new(&headers);
 
     let decoded = decoder.push(&input).join("");
 
@@ -222,15 +234,64 @@ fn unknown_charset_falls_back_to_html_default_on_finish() {
 }
 
 #[test]
-fn unlabelled_html_document_uses_legacy_content_detection() {
+fn unlabelled_html_document_without_detector_uses_html_default() {
     let (text, encoding) = decode_html_document(b"\x80\x80 Hello", &[]);
 
+    assert_eq!(encoding, "windows-1252");
+    assert_eq!(text, "\u{20ac}\u{20ac} Hello");
+}
+
+#[test]
+fn injected_legacy_content_detector_receives_url_hint() {
+    let headers = vec![(
+        "Content-Type".to_owned(),
+        "text/html; charset=x-unknown".to_owned(),
+    )];
+    let mut decoder = HtmlDocumentStreamingDecoder::new_with_legacy_encoding_detector(
+        &headers,
+        "https://legacy.example/",
+        test_legacy_encoding_detector,
+    );
+    let mut text = decoder.push(b"\x80\x80 Hello").join("");
+    if let Some(tail) = decoder.finish() {
+        text.push_str(&tail);
+    }
+
+    let encoding = decoder
+        .selected_encoding_name()
+        .expect("finishing must select an encoding");
     assert_eq!(encoding, "IBM866");
     assert_eq!(text, "\u{410}\u{410} Hello");
 }
 
 #[test]
-fn inherited_fallback_suppresses_legacy_content_detection() {
+fn declared_encodings_precede_injected_legacy_detector() {
+    let headers = vec![(
+        "Content-Type".to_owned(),
+        "text/html; charset=gbk".to_owned(),
+    )];
+    let mut header_decoder = HtmlDocumentStreamingDecoder::new_with_legacy_encoding_detector(
+        &headers,
+        "https://legacy.example/",
+        unexpected_legacy_encoding_detector,
+    );
+    assert_eq!(header_decoder.push(&gbk_bytes("太平洋")), vec!["太平洋"]);
+
+    let mut meta_decoder = HtmlDocumentStreamingDecoder::new_with_legacy_encoding_detector(
+        &[],
+        "https://legacy.example/",
+        unexpected_legacy_encoding_detector,
+    );
+    let mut input = b"<meta charset=\"gbk\">".to_vec();
+    input.extend_from_slice(&gbk_bytes("太平洋"));
+    assert_eq!(
+        meta_decoder.push(&input),
+        vec!["<meta charset=\"gbk\">太平洋"]
+    );
+}
+
+#[test]
+fn explicit_fallback_keeps_core_decoder_deterministic() {
     let (text, encoding) =
         decode_html_document_with_fallback(b"\x80\x80 Hello", &[], Some("windows-1252"));
 
@@ -804,7 +865,7 @@ fn header_charset_exact_lookup_rejects_non_http_whitespace() {
         assert_eq!(encoding_from_response_headers(&headers), None);
         assert_eq!(
             decode_html_document(&gbk_bytes("太平洋"), &headers).1,
-            "GBK"
+            "windows-1252"
         );
     }
 }

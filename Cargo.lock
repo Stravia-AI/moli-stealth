@@ -2447,10 +2447,17 @@ dependencies = [
 name = "moli-encoding"
 version = "0.1.0"
 dependencies = [
- "compact-enc-det",
  "encoding_rs",
  "moli-charset-parser",
  "moli-content-type",
+]
+
+[[package]]
+name = "moli-encoding-detector"
+version = "0.1.0"
+dependencies = [
+ "compact-enc-det",
+ "encoding_rs",
 ]
 
 [[package]]
@@ -2828,6 +2835,7 @@ dependencies = [
  "moli-css-parse",
  "moli-dom",
  "moli-encoding",
+ "moli-encoding-detector",
  "moli-fetch",
  "moli-file-api",
  "moli-geometry",

@@ -1,6 +1,5 @@
 //! Browser-compatible text, document, form, script, and URL encoding helpers.
 
-mod detector;
 mod document;
 mod form;
 mod labels;
@@ -10,7 +9,8 @@ mod query;
 mod script;
 
 pub use document::{
-    HtmlDocumentStreamingDecoder, decode_html_document, decode_html_document_with_fallback,
+    HtmlDocumentStreamingDecoder, LegacyEncodingDetector, decode_html_document,
+    decode_html_document_with_fallback,
 };
 pub use form::{
     encode_text_for_legacy_web, form_output_encoding, form_output_encoding_for_label,

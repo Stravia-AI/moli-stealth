@@ -45,6 +45,7 @@ moli-storage-service = { path = "../moli-storage-service" }
 moli-cookie-jar = { path = "../moli-cookie-jar" }
 moli-canvas = { path = "../moli-canvas" }
 moli-encoding = { path = "../moli-encoding" }
+moli-encoding-detector = { path = "../moli-encoding-detector" }
 moli-fetch = { path = "../moli-fetch" }
 moli-file-api = { path = "../moli-file-api" }
 moli-geometry = { path = "../moli-geometry" }
