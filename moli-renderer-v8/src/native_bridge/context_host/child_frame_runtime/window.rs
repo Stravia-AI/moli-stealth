@@ -4603,13 +4603,21 @@ fn cross_origin_location_navigate_raw<'s>(
     }
 
     let handle = child_handle.expect("cross-origin child navigation must retain its handle");
-    let host = unsafe { &mut *host_ptr };
     let target = target_url;
     match kind {
         LocationNavigationKind::Assign => {
-            if cross_origin_location_target_is_same_document(host, handle, &target)
-                && let Some(window) =
-                    host.existing_child_browsing_context_window_wrapper(target_scope, handle)
+            let same_document = cross_origin_location_target_is_same_document(
+                unsafe { &*host_ptr },
+                handle,
+                &target,
+            );
+            let target_window = if same_document {
+                unsafe { &mut *host_ptr }
+                    .existing_child_browsing_context_window_wrapper(target_scope, handle)
+            } else {
+                None
+            };
+            if let Some(window) = target_window
                 && !dispatch_cross_document_navigation_navigate_event_for_window(
                     target_scope,
                     window,
@@ -4621,15 +4629,21 @@ fn cross_origin_location_navigate_raw<'s>(
             {
                 return false;
             }
-            let _ =
-                host.navigate_child_browsing_context_to_url(target_scope, handle, target.as_str());
-        }
-        LocationNavigationKind::Replace => {
-            let _ = host.queue_child_browsing_context_navigation_from_existing_seed(
+            // The target NavigateEvent can synchronously execute native DOM
+            // callbacks in this host. Reborrow only after author code returns.
+            let _ = unsafe { &mut *host_ptr }.navigate_child_browsing_context_to_url(
+                target_scope,
                 handle,
                 target.as_str(),
-                true,
             );
+        }
+        LocationNavigationKind::Replace => {
+            let _ = unsafe { &mut *host_ptr }
+                .queue_child_browsing_context_navigation_from_existing_seed(
+                    handle,
+                    target.as_str(),
+                    true,
+                );
         }
         LocationNavigationKind::Reload => return false,
     }

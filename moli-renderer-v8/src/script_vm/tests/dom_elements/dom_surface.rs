@@ -13515,6 +13515,65 @@ __lmDataFrameForWindowLocation.contentWindow.location = 'about:blank';
     assert_eq!(result, "true|true");
 }
 
+#[tokio::test]
+async fn cross_origin_child_location_reborrows_host_after_target_navigate_event() {
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    let mut vm = new_storage_page_task_executor_test_vm_with_loader(
+        "https://cross-origin-child-reentry.test/",
+        &loader,
+    );
+
+    vm.exec(
+        r#"
+const childUrl = "data:text/html,<script>navigation.onnavigate=()=>{const marker=document.createElement('span');marker.id='reentrant-cross-origin-location';document.body.append(marker);parent.postMessage(marker.id,'*')}</script>";
+const frame = document.createElement("iframe");
+frame.src = childUrl;
+(document.body || document.documentElement || document).appendChild(frame);
+globalThis.__lmCrossOriginChildUrl = childUrl;
+globalThis.__lmCrossOriginChildFrame = frame;
+globalThis.__lmCrossOriginChildNavigationEvent = null;
+addEventListener("message", event => {
+  if (event.data === "reentrant-cross-origin-location") {
+    globalThis.__lmCrossOriginChildNavigationEvent = event.data;
+  }
+});
+"#,
+        None,
+    )
+    .expect("cross-origin child reentry fixture should initialize");
+    vm.drain_ready_page_task_executor_turns_for_setup(&loader, 128)
+        .await
+        .expect("cross-origin child fixture should finish loading");
+
+    vm.exec(
+        r##"
+__lmCrossOriginChildFrame.contentWindow.location.href =
+  __lmCrossOriginChildUrl + "#same-document";
+"##,
+        None,
+    )
+    .expect("cross-origin child fragment navigation should dispatch in the target realm");
+
+    for _ in 0..4 {
+        if vm
+            .eval("globalThis.__lmCrossOriginChildNavigationEvent")
+            .expect("cross-origin child event observation should evaluate")
+            == "reentrant-cross-origin-location"
+        {
+            break;
+        }
+        let _ = vm
+            .run_one_window_message_executor_turn(&loader)
+            .await
+            .expect("cross-origin child event message should drain");
+    }
+    assert_eq!(
+        vm.eval("globalThis.__lmCrossOriginChildNavigationEvent")
+            .expect("cross-origin child event observation should evaluate"),
+        "reentrant-cross-origin-location"
+    );
+}
+
 #[test]
 fn same_origin_child_window_migration_to_cross_origin_installs_denied_surface() {
     let mut vm = new_storage_test_vm("https://child-cross-origin-migration.test/");
