@@ -1,35 +1,6 @@
-[test-groups.navigation-child-browser-runtime]
-max-threads = 1
-
-# These cases intentionally exercise the process-level OS resolver. Running
-# several together can make the external resolver exceed their existing
-# contract timeout even though each request completes promptly in isolation.
-[test-groups.external-dns-failure-runtime]
-max-threads = 1
-
-[[profile.default.overrides]]
-filter = 'package(moli-core) & binary(wpt_compat) & test(/navigation_child_browsing_context/)'
-test-group = 'navigation-child-browser-runtime'
-threads-required = "num-test-threads"
-
-[[profile.default.overrides]]
-filter = 'package(moli-renderer-v8) & test(/dns_failure/)'
-test-group = 'external-dns-failure-runtime'
-threads-required = "num-test-threads"
-
 [profile.ci]
 fail-fast = false
 retries = 2
 status-level = "fail"          
 final-status-level = "fail"    
 success-output = "never"       
-
-[[profile.ci.overrides]]
-filter = 'package(moli-core) & binary(wpt_compat) & test(/navigation_child_browsing_context/)'
-test-group = 'navigation-child-browser-runtime'
-threads-required = "num-test-threads"
-
-[[profile.ci.overrides]]
-filter = 'package(moli-renderer-v8) & test(/dns_failure/)'
-test-group = 'external-dns-failure-runtime'
-threads-required = "num-test-threads"
