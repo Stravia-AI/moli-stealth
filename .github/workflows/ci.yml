@@ -138,7 +138,7 @@ jobs:
           uv run --project moli-cdp-smoke --no-sync
           moli-cdp-smoke
           --jobs 4
-          --output-dir ${{ github.workspace }}/target/smoke/cdp-ci
+          --output-dir target/smoke/cdp-ci
 
       - name: Upload CDP smoke diagnostics
         if: ${{ always() && steps.cdp.outcome != 'skipped' }}
