@@ -144,6 +144,14 @@ def test_moli_endpoint_parser_accepts_only_server_listening_log() -> None:
     )
     assert (
         browsers._moli_endpoint_from_log(
+            "\x1b[2m2026-08-26T21:42:18Z\x1b[0m \x1b[32m INFO\x1b[0m "
+            "protocol server listening \x1b[3maddr\x1b[0m\x1b[2m=\x1b[0m"
+            "127.0.0.1:33577"
+        )
+        == "http://127.0.0.1:33577"
+    )
+    assert (
+        browsers._moli_endpoint_from_log(
             "INFO request complete addr=127.0.0.1:44723"
         )
         is None

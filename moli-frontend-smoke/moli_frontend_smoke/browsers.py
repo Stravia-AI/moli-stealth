@@ -22,6 +22,7 @@ from .config import REPO_ROOT, clear_proxy_env
 EndpointParser = Callable[[str], str | None]
 _BROWSER_START_TIMEOUT_SECONDS = 15.0
 _CHROMIUM_ENDPOINT_MARKER = "DevTools listening on "
+_ANSI_CONTROL_SEQUENCE_PATTERN = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _MOLI_ENDPOINT_PATTERN = re.compile(
     r"\baddr=(?P<host>127\.0\.0\.1|localhost):(?P<port>[0-9]+)\b"
 )
@@ -37,6 +38,7 @@ def _loopback_http_endpoint(host: str | None, port: int | None) -> str | None:
 
 
 def _chromium_endpoint_from_log(text: str) -> str | None:
+    text = _ANSI_CONTROL_SEQUENCE_PATTERN.sub("", text)
     marker_offset = text.find(_CHROMIUM_ENDPOINT_MARKER)
     if marker_offset < 0:
         return None
@@ -57,6 +59,7 @@ def _chromium_endpoint_from_log(text: str) -> str | None:
 
 
 def _moli_endpoint_from_log(text: str) -> str | None:
+    text = _ANSI_CONTROL_SEQUENCE_PATTERN.sub("", text)
     if "protocol server listening" not in text:
         return None
     match = _MOLI_ENDPOINT_PATTERN.search(text)
