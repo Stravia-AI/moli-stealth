@@ -2,7 +2,7 @@ name: Sequential Navigation Soak Comment
 
 on:
   workflow_run:
-    workflows: [Sequential Navigation Soak]
+    workflows: [CI]
     types: [completed]
 
 # This workflow runs from the default branch. It never executes the measured
@@ -48,10 +48,16 @@ jobs:
           EVIDENCE_OUTCOME: ${{ steps.evidence.outcome }}
         run: |
           if [[ "$EVIDENCE_OUTCOME" == success && -f sequential-navigation-soak-results/comparison.json ]]; then
+            if python3 -m moli_benchmark.sequential_navigate_ci check \
+              --input sequential-navigation-soak-results/comparison.json; then
+              benchmark_conclusion=success
+            else
+              benchmark_conclusion=failure
+            fi
             python3 -m moli_benchmark.sequential_navigate_ci comment \
               --input sequential-navigation-soak-results/comparison.json \
               --run-url "$RUN_URL" \
-              --conclusion "$CONCLUSION" \
+              --conclusion "$benchmark_conclusion" \
               --output sequential-navigation-soak-comment.md
             echo "has_comparison=true" >> "$GITHUB_OUTPUT"
           else

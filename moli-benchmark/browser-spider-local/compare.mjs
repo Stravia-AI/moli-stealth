@@ -544,14 +544,14 @@ function fixtureContractSummary(suite) {
 
 function assessmentSummary(assessment) {
   if (assessment.clean) {
-    return '✅ Deterministic fixture diagnostic is clean.';
+    return '✅ Deterministic fixture contract is clean.';
   }
   const reasons = assessment.reasons
     .slice(0, 8)
     .map((reason) => ASSESSMENT_REASON_LABELS[reason] ?? 'unknown fixture diagnostic')
     .map((reason) => `  - ${reason}`)
     .join('\n');
-  return `⚠️ Deterministic fixture recorded diagnostic issues (non-blocking):\n${reasons}`;
+  return `❌ Deterministic fixture contract recorded issues:\n${reasons}`;
 }
 
 function observationSummary(comparison) {
@@ -636,7 +636,7 @@ export function renderSpiderComparison(comparison, { runUrl, conclusion }) {
     'Public-site content, timing, and memory are noisy. This single A/B run reports evidence only; site outcome counts explain missing rows without treating them as a deterministic regression.',
     ...(resourceTimelines ? ['', resourceTimelines] : []),
     '',
-    '### Deterministic fixture · diagnostic',
+    '### Deterministic fixture · required contract',
     '',
     fixtureContractSummary(fixture),
     '',
@@ -644,7 +644,7 @@ export function renderSpiderComparison(comparison, { runUrl, conclusion }) {
     '',
     `Full HTML, JSON, CSV, logs, and page snapshots: ${workflowLink}.`,
     '',
-    '_Spider Bench is informational: site failures, missing benchmark reports, failed browser service runs, fixture diagnostics, timing, and performance deltas do not fail the workflow. Build, runner, and artifact infrastructure errors can still fail it._'
+    '_The public-web A/B is informational. The exact HEAD fixture contract runs as a separate required CI check; timing and public-site content deltas remain non-blocking._'
   ].join('\n');
 }
 

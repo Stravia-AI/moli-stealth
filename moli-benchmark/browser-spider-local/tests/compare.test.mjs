@@ -305,15 +305,15 @@ test('comment labels browser execution and public content as informational evide
 
   assert.ok(comment.startsWith(SPIDER_CI_COMMENT_MARKER));
   assert.match(comment, /All benchmark browser service runs completed; results are informational/);
-  assert.match(comment, /Deterministic fixture diagnostic is clean/);
-  assert.match(comment, /Deterministic fixture · diagnostic/);
+  assert.match(comment, /Deterministic fixture contract is clean/);
+  assert.match(comment, /Deterministic fixture · required contract/);
   assert.match(comment, /Public 48-site run · informational/);
   assert.ok(
     comment.indexOf('Public 48-site run · informational')
-      < comment.indexOf('Deterministic fixture · diagnostic')
+      < comment.indexOf('Deterministic fixture · required contract')
   );
   assert.match(comment, /### Public 48-site run · informational/);
-  assert.match(comment, /### Deterministic fixture · diagnostic/);
+  assert.match(comment, /### Deterministic fixture · required contract/);
   assert.doesNotMatch(comment, /<details/);
   assert.match(comment, /Public HEAD:\*\* 174 \/ 240 rows; 36 \/ 48 sites produced rows/);
   assert.match(comment, /fixture exercises 15 routes: 8 are expected to emit rows and 7 intentionally/);
@@ -323,8 +323,8 @@ test('comment labels browser execution and public content as informational evide
   assert.match(comment, /\| sports \| 27 \/ 40 \| 27 \/ 40 \| 0 \|/);
   assert.match(comment, /\+3\.00 MiB \(\+0\.67%\)/);
   assert.match(comment, /actions\/runs\/123/);
-  assert.match(comment, /missing benchmark reports, failed browser service runs/);
-  assert.match(comment, /do not fail the workflow/);
+  assert.match(comment, /public-web A\/B is informational/);
+  assert.match(comment, /exact HEAD fixture contract runs as a separate required CI check/);
   assert.match(comment, /Common ancestor `111111111111` → HEAD `222222222222`/);
   assert.match(comment, /### CPU and memory timelines/);
   assert.match(comment, /bounded 40-point views of the same complete process-tree samples/);
@@ -434,9 +434,9 @@ test('infrastructure-comment command writes the trusted fallback comment', () =>
   }
 });
 
-test('CI resolves a common-ancestor baseline and restores the target-base harness', () => {
+test('CI resolves a common ancestor and reuses exact release artifacts', () => {
   const benchmarkWorkflow = fs.readFileSync(
-    fileURLToPath(new URL('../../../.github/workflows/spider-bench.yml', import.meta.url)),
+    fileURLToPath(new URL('../../../.github/workflows/ci.yml', import.meta.url)),
     'utf8'
   );
   const commentWorkflow = fs.readFileSync(
@@ -448,7 +448,13 @@ test('CI resolves a common-ancestor baseline and restores the target-base harnes
     benchmarkWorkflow,
     /base_sha=\$\(git merge-base "\$target_base_sha" "\$head_sha"\)/
   );
-  assert.match(benchmarkWorkflow, /restore_harness\(\)[\s\S]*TARGET_BASE_SHA/);
+  assert.match(benchmarkWorkflow, /build-release-head:[\s\S]*name: moli-release-head/);
+  assert.match(benchmarkWorkflow, /build-release-base:[\s\S]*name: moli-release-base/);
+  assert.match(
+    benchmarkWorkflow,
+    /spider-bench:[\s\S]*needs: \[resolve-refs, build-release-head, build-release-base\]/
+  );
+  assert.match(benchmarkWorkflow, /ref: \$\{\{ needs\.resolve-refs\.outputs\.head_sha \}\}/);
   assert.match(commentWorkflow, /compareCommitsWithBasehead/);
   assert.match(commentWorkflow, /comparison\.base\?\.sha !== expectedCommonAncestor/);
 });

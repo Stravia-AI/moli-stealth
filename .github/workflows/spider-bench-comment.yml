@@ -2,7 +2,7 @@ name: Spider Bench Comment
 
 on:
   workflow_run:
-    workflows: [Spider Bench]
+    workflows: [CI]
     types: [completed]
 
 # This trusted workflow runs from the default branch. It never executes code
@@ -55,7 +55,7 @@ jobs:
             node moli-benchmark/browser-spider-local/compare.mjs comment \
               --input spider-bench-results/comparison.json \
               --run-url "$RUN_URL" \
-              --conclusion "$CONCLUSION" \
+              --conclusion success \
               --output spider-bench-comment.md
             echo "has_comparison=true" >> "$GITHUB_OUTPUT"
           else
