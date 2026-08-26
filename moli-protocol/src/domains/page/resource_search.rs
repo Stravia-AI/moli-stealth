@@ -5,8 +5,8 @@ use moli_core::page::{
     SubresourceResourceType,
 };
 use moli_encoding::{
-    charset_from_headers, decode_classic_script_source, decode_html_document_with_fallback,
-    decode_text_for_legacy_web,
+    decode_classic_script_source, decode_html_document_with_fallback, decode_text_for_legacy_web,
+    encoding_from_response_headers,
 };
 use moli_web_mime::{
     effective_response_mime_essence, is_dom_parser_xml_mime, is_html_document_mime,
@@ -384,18 +384,18 @@ fn decode_resource_content(
     {
         return decode_classic_script_source(bytes, headers, None, None);
     }
+    let response_charset = encoding_from_response_headers(headers).map(|encoding| encoding.name());
     if matches!(
         kind,
         ResourceContentKind::Subresource(SubresourceResourceType::Stylesheet)
     ) {
-        return decode_text_for_legacy_web(bytes, charset_from_headers(headers).as_deref());
+        return decode_text_for_legacy_web(bytes, response_charset);
     }
     if is_dom_parser_xml_mime(&mime) || is_json_module_mime(&mime) {
-        return decode_text_for_legacy_web(bytes, charset_from_headers(headers).as_deref());
+        return decode_text_for_legacy_web(bytes, response_charset);
     }
     if is_text_mime_essence(&mime) {
-        let charset = charset_from_headers(headers);
-        return decode_text_for_legacy_web(bytes, charset.as_deref().or(Some("windows-1252")));
+        return decode_text_for_legacy_web(bytes, response_charset.or(Some("windows-1252")));
     }
     BASE64_STANDARD.encode(bytes)
 }
@@ -439,6 +439,23 @@ mod tests {
         assert_eq!(
             decode_resource_content(b"<p>\x80</p>", &headers, ResourceContentKind::MainDocument,),
             "<p>\u{20ac}</p>"
+        );
+    }
+
+    #[test]
+    fn stylesheet_resource_rejects_invalid_response_charset_whitespace() {
+        let headers = vec![(
+            "content-type".to_owned(),
+            "text/css; charset=\nshift_jis".to_owned(),
+        )];
+
+        assert_eq!(
+            decode_resource_content(
+                "body::after { content: '目次'; }".as_bytes(),
+                &headers,
+                ResourceContentKind::Subresource(SubresourceResourceType::Stylesheet),
+            ),
+            "body::after { content: '目次'; }"
         );
     }
 

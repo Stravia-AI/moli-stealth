@@ -127,6 +127,31 @@ fn response_parser_preserves_parameter_name_and_quote_semantics() {
 }
 
 #[test]
+fn response_parser_http_lws_is_only_space_and_tab() {
+    for newline in ['\r', '\n'] {
+        let unquoted = format!("text/html; charset={newline}gbk");
+        let quoted = format!("text/html; charset=\"{newline}gbk\"");
+        let prefixed_name = format!("text/html;{newline}charset=gbk");
+        let expected = format!("{newline}gbk");
+
+        assert_eq!(
+            response_charset(&unquoted).as_deref(),
+            Some(expected.as_str())
+        );
+        assert_eq!(
+            response_charset(&quoted).as_deref(),
+            Some(expected.as_str())
+        );
+        assert_eq!(response_charset(&prefixed_name), None);
+    }
+
+    assert_eq!(
+        response_charset("text/html; charset= \tgbk\t ").as_deref(),
+        Some("gbk")
+    );
+}
+
+#[test]
 fn response_parser_has_a_distinct_network_level_validity_boundary() {
     assert!(parse_response_content_type("garbage; charset=utf-8").is_none());
     assert!(parse_response_content_type("*/*").is_none());

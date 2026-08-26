@@ -360,6 +360,17 @@ fn classic_script_charset_attribute_is_fallback_before_document_character_set() 
 }
 
 #[test]
+fn classic_script_charset_uses_encoding_standard_label_preprocessing() {
+    let script = r#"document.body.textContent = "目次";"#;
+    let bytes = encoding_rs::SHIFT_JIS.encode(script).0.into_owned();
+
+    assert_eq!(
+        decode_classic_script_source(&bytes, &[], Some(" shift_jis "), Some("utf-8")),
+        script
+    );
+}
+
+#[test]
 fn classic_script_bom_wins_over_labels() {
     let script = r#"document.body.textContent = "目次";"#;
     let mut bytes = vec![0xEF, 0xBB, 0xBF];
@@ -717,7 +728,7 @@ fn header_charset_matches_chromium_network_tolerances() {
         assert_eq!(
             charset_from_content_type(header)
                 .as_deref()
-                .and_then(encoding_for_label)
+                .and_then(encoding_for_response_charset)
                 .map(Encoding::name),
             Some("UTF-8"),
             "header={header}"
@@ -737,7 +748,7 @@ fn header_charset_matches_chromium_network_tolerances() {
     assert!(
         charset_from_content_type("text/html; charset='utf-8'")
             .as_deref()
-            .and_then(encoding_for_label)
+            .and_then(encoding_for_response_charset)
             .is_none()
     );
     assert_eq!(
@@ -747,8 +758,9 @@ fn header_charset_matches_chromium_network_tolerances() {
 }
 
 #[test]
-fn header_charset_does_not_trim_non_http_ascii_whitespace() {
-    for whitespace in ['\u{000b}', '\u{000c}'] {
+fn header_charset_exact_lookup_rejects_non_http_whitespace() {
+    for whitespace in ['\u{000b}', '\u{000c}', '\r', '\n'] {
+        let expected_label = format!("{whitespace}gbk");
         let headers = vec![(
             "Content-Type".to_owned(),
             format!("text/html; charset={whitespace}gbk"),
@@ -756,8 +768,9 @@ fn header_charset_does_not_trim_non_http_ascii_whitespace() {
 
         assert_eq!(
             charset_from_headers(&headers).as_deref(),
-            Some(format!("{whitespace}gbk").as_str())
+            Some(expected_label.as_str())
         );
+        assert_eq!(encoding_from_response_headers(&headers), None);
         assert_eq!(
             decode_html_document(&gbk_bytes("太平洋"), &headers).1,
             "windows-1252"
@@ -766,8 +779,21 @@ fn header_charset_does_not_trim_non_http_ascii_whitespace() {
 }
 
 #[test]
-fn encoding_label_lookup_requires_callers_to_preprocess_whitespace() {
+fn encoding_label_lookup_applies_encoding_standard_whitespace_preprocessing() {
     assert_eq!(encoding_for_label("gbk"), Some(encoding_rs::GBK));
+    for label in [" gbk", "gbk ", "\tgbk", "gbk\n", "\u{000c}gbk", "gbk\r"] {
+        assert_eq!(
+            encoding_for_label(label),
+            Some(encoding_rs::GBK),
+            "label={label:?}"
+        );
+    }
+    assert_eq!(encoding_for_label("\u{000b}gbk"), None);
+}
+
+#[test]
+fn response_charset_lookup_is_exact_after_http_lws_preprocessing() {
+    assert_eq!(encoding_for_response_charset("gbk"), Some(encoding_rs::GBK));
     for label in [
         " gbk",
         "gbk ",
@@ -776,7 +802,11 @@ fn encoding_label_lookup_requires_callers_to_preprocess_whitespace() {
         "\u{000b}gbk",
         "gbk\u{000c}",
     ] {
-        assert_eq!(encoding_for_label(label), None, "label={label:?}");
+        assert_eq!(
+            encoding_for_response_charset(label),
+            None,
+            "label={label:?}"
+        );
     }
 }
 

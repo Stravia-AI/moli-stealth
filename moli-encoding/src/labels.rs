@@ -1,14 +1,23 @@
 use encoding_rs::Encoding;
 use moli_content_type::parse_response_content_type;
 
-/// Looks up an encoding label after the caller has applied its own whitespace
-/// rules, matching Blink's exact `TextEncoding` registry lookup.
+/// Gets an encoding from a label using the Encoding Standard's preprocessing.
+///
+/// `encoding_rs` removes leading and trailing ASCII whitespace before matching
+/// the label. Use this for web-platform label sources such as a classic
+/// script's `charset` attribute.
 pub fn encoding_for_label(label: &str) -> Option<&'static Encoding> {
+    Encoding::for_label(label.as_bytes())
+}
+
+/// Looks up a charset extracted from Chromium response transport metadata.
+///
+/// Chromium's network parser has already removed its HTTP LWS set (SP and HT)
+/// before Blink performs an exact encoding-name lookup. `encoding_rs` would
+/// apply additional Encoding Standard whitespace preprocessing, so reject any
+/// remaining leading or trailing ASCII whitespace first.
+pub fn encoding_for_response_charset(label: &str) -> Option<&'static Encoding> {
     let bytes = label.as_bytes();
-    // `encoding_rs` implements the Encoding Standard's preprocessing and
-    // trims ASCII whitespace itself. Blink's response path has already
-    // removed HTTP LWS, so accepting anything still present here (notably VT
-    // and FF) would turn an invalid response charset into a valid label.
     if bytes.first().is_some_and(|byte| byte.is_ascii_whitespace())
         || bytes.last().is_some_and(|byte| byte.is_ascii_whitespace())
     {
@@ -34,4 +43,11 @@ pub fn charset_from_headers(headers: &[(String, String)]) -> Option<String> {
         .iter()
         .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
         .and_then(|(_, value)| charset_from_content_type(value))
+}
+
+/// Selects Chromium's transport encoding from HTTP response headers.
+pub fn encoding_from_response_headers(headers: &[(String, String)]) -> Option<&'static Encoding> {
+    charset_from_headers(headers)
+        .as_deref()
+        .and_then(encoding_for_response_charset)
 }

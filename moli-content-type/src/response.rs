@@ -142,9 +142,11 @@ fn trim_trailing_http_lws(bytes: &[u8], start: usize, mut end: usize) -> usize {
 }
 
 fn trim_http_lws(value: &str) -> &str {
-    value.trim_matches(|character: char| matches!(character, ' ' | '\t' | '\r' | '\n'))
+    value.trim_matches(|character: char| matches!(character, ' ' | '\t'))
 }
 
 fn is_http_lws(byte: u8) -> bool {
-    matches!(byte, b' ' | b'\t' | b'\r' | b'\n')
+    // Chromium's HTTP_LWS is exactly SP | HT and deliberately excludes
+    // newlines.
+    matches!(byte, b' ' | b'\t')
 }
