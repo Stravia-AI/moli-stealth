@@ -12,6 +12,7 @@ members = [
     "moli-cookie-cache",
     "moli-protocol-cdp",
     "moli-cookie-store",
+    "moli-content-type",
     "moli-css-parse",
     "moli-crypto",
     "moli-curl",

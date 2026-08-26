@@ -705,15 +705,13 @@ fn header_charset_removes_quoting_backslashes() {
 }
 
 #[test]
-fn header_charset_keeps_its_existing_tolerances() {
+fn header_charset_matches_chromium_network_tolerances() {
     for header in [
         "text/html; charset=utf-8",
         "text/html;charset=utf-8",
         "TEXT/HTML; CHARSET=UTF-8",
-        "text/html; charset = utf-8 ",
         "text/html; charset=\"utf-8\"",
         "text/html;charset=utf-8;",
-        "text/html; charset='utf-8'",
         "text/html; charset=\"utf-8",
     ] {
         assert_eq!(
@@ -729,7 +727,45 @@ fn header_charset_keeps_its_existing_tolerances() {
     assert_eq!(charset_from_content_type("text/html; charset="), None);
     assert_eq!(charset_from_content_type("charset=utf-8"), None);
     assert_eq!(
+        charset_from_content_type("text/html; charset = utf-8"),
+        None
+    );
+    assert_eq!(
+        charset_from_content_type("text/html; charset='utf-8'").as_deref(),
+        Some("'utf-8'")
+    );
+    assert!(
+        charset_from_content_type("text/html; charset='utf-8'")
+            .as_deref()
+            .and_then(encoding_for_label)
+            .is_none()
+    );
+    assert_eq!(
         charset_from_content_type("text/html; charset=gbk; boundary=x").as_deref(),
+        Some("gbk")
+    );
+}
+
+#[test]
+fn header_charset_preserves_chromium_empty_parameter_precedence() {
+    assert_eq!(
+        charset_from_content_type("text/html; charset=; charset=gbk").as_deref(),
+        Some("gbk")
+    );
+    assert_eq!(
+        charset_from_content_type("text/html; charset=\"\"; charset=gbk"),
+        None
+    );
+}
+
+#[test]
+fn header_charset_does_not_reopen_quotes_after_a_value_started() {
+    assert_eq!(
+        charset_from_content_type("text/html; x=a=\"unterminated; charset=gbk").as_deref(),
+        Some("gbk")
+    );
+    assert_eq!(
+        charset_from_content_type("text/html; x=\"ok\"junk=\"unterminated; charset=gbk").as_deref(),
         Some("gbk")
     );
 }

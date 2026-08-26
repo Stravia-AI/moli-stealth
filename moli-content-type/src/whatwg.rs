@@ -1,0 +1,73 @@
+use data_url::mime::Mime as WhatwgMime;
+use std::fmt;
+
+/// A MIME type parsed according to the WHATWG MIME Sniffing Standard.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MimeType {
+    inner: WhatwgMime,
+}
+
+impl MimeType {
+    /// The lower-case MIME top-level type.
+    pub fn type_(&self) -> &str {
+        &self.inner.type_
+    }
+
+    /// The lower-case MIME subtype.
+    pub fn subtype(&self) -> &str {
+        &self.inner.subtype
+    }
+
+    /// The lower-case `type/subtype` MIME essence.
+    pub fn essence(&self) -> String {
+        format!("{}/{}", self.type_(), self.subtype())
+    }
+
+    /// Parsed parameters in header order.
+    pub fn parameters(&self) -> &[(String, String)] {
+        &self.inner.parameters
+    }
+
+    /// The first parameter with the given ASCII-case-insensitive name.
+    pub fn parameter(&self, name: &str) -> Option<&str> {
+        self.inner
+            .parameters
+            .iter()
+            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+}
+
+impl fmt::Display for MimeType {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.inner.fmt(formatter)
+    }
+}
+
+/// Parses a MIME value using WHATWG validation and parameter recovery rules.
+pub fn parse_mime_type(input: &str) -> Option<MimeType> {
+    input.parse().ok().map(|inner| MimeType { inner })
+}
+
+/// Returns the MIME essence of a valid WHATWG MIME value.
+pub fn mime_essence(input: &str) -> Option<String> {
+    parse_mime_type(input).map(|mime| mime.essence())
+}
+
+/// Returns one parsed MIME parameter by ASCII-case-insensitive name.
+pub fn mime_parameter(input: &str, name: &str) -> Option<String> {
+    parse_mime_type(input)?.parameter(name).map(str::to_owned)
+}
+
+/// Returns the parsed `charset` MIME parameter.
+pub fn mime_charset(input: &str) -> Option<String> {
+    mime_parameter(input, "charset")
+}
+
+/// Normalizes a Web API MIME string without parsing its structure.
+pub fn normalize_web_api_mime_type(raw: &str) -> String {
+    if raw.is_empty() || raw.bytes().any(|byte| !(0x20..=0x7e).contains(&byte)) {
+        return String::new();
+    }
+    raw.to_ascii_lowercase()
+}

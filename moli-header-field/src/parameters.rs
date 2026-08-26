@@ -1,5 +1,15 @@
 use std::borrow::Cow;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ParameterScanState {
+    #[default]
+    BeforeValue,
+    AtValueStart,
+    UnquotedValue,
+    QuotedValue,
+    AfterQuotedValue,
+}
+
 /// Splits `value` on every `separator` that is not inside a quoted parameter
 /// value.
 ///
@@ -25,14 +35,13 @@ pub fn split_outside_quoted_strings(value: &str, separator: char) -> Vec<&str> {
     let bytes = value.as_bytes();
     let mut segments = Vec::new();
     let mut segment_start = 0;
-    let mut at_value_start = false;
-    let mut inside_quotes = false;
+    let mut state = ParameterScanState::BeforeValue;
     let mut index = 0;
 
     while index < bytes.len() {
         let byte = bytes[index];
 
-        if inside_quotes {
+        if state == ParameterScanState::QuotedValue {
             if byte == b'\\' {
                 // Step over the escaped byte so a quoted `\"` does not close
                 // the value.
@@ -40,7 +49,7 @@ pub fn split_outside_quoted_strings(value: &str, separator: char) -> Vec<&str> {
                 continue;
             }
             if byte == b'"' {
-                inside_quotes = false;
+                state = ParameterScanState::AfterQuotedValue;
             }
             index += 1;
             continue;
@@ -49,16 +58,15 @@ pub fn split_outside_quoted_strings(value: &str, separator: char) -> Vec<&str> {
         if byte == separator {
             segments.push(&value[segment_start..index]);
             segment_start = index + 1;
-            at_value_start = false;
-        } else if byte == b'=' {
-            at_value_start = true;
-        } else if byte == b'"' && at_value_start {
-            inside_quotes = true;
-            at_value_start = false;
-        } else if !matches!(byte, b' ' | b'\t') || !at_value_start {
-            // Whitespace between `=` and the value keeps the value still to
-            // come; anything else means the value was not quoted.
-            at_value_start = false;
+            state = ParameterScanState::BeforeValue;
+        } else {
+            state = match state {
+                ParameterScanState::BeforeValue if byte == b'=' => ParameterScanState::AtValueStart,
+                ParameterScanState::AtValueStart if matches!(byte, b' ' | b'\t') => state,
+                ParameterScanState::AtValueStart if byte == b'"' => ParameterScanState::QuotedValue,
+                ParameterScanState::AtValueStart => ParameterScanState::UnquotedValue,
+                _ => state,
+            };
         }
         index += 1;
     }

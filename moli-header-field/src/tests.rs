@@ -224,3 +224,15 @@ fn a_trailing_backslash_is_kept_rather_than_dropped() {
 fn an_escaped_quote_survives_as_data() {
     assert_eq!(unquote_parameter_value("\"utf-8\\\"\""), "utf-8\"");
 }
+
+#[test]
+fn equals_inside_a_value_does_not_reopen_quoted_string_mode() {
+    assert_eq!(
+        split_outside_quoted_strings("token=a=\"unterminated, next=value", ','),
+        vec!["token=a=\"unterminated", " next=value"]
+    );
+    assert_eq!(
+        split_outside_quoted_strings("token=\"ok\"junk=\"unterminated, next=value", ','),
+        vec!["token=\"ok\"junk=\"unterminated", " next=value"]
+    );
+}

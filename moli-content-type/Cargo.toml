@@ -1,15 +1,11 @@
 [package]
 license.workspace = true
-name = "moli-web-mime"
+name = "moli-content-type"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-content_disposition = "0.4.0"
 data-url = "0.3.2"
-http = "1"
-mime = "0.3"
-moli-content-type = { path = "../moli-content-type" }
 
 [lints]
 workspace = true
