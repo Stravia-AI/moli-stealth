@@ -3546,15 +3546,32 @@ async fn direct_browser_owner_drives_related_auxiliary_page_and_remote_opener_me
     let root_page_id = page.renderer_page_id();
     let popup_relative_path = "location-nav/target?from=standalone-related-relative-first";
     let popup_second_relative_path = "location-nav/target?from=standalone-related-relative-second";
-    let popup_document = "data:text/html,%3Cscript%3Eopener.postMessage(%22standalone-auxiliary-ready%22,%22*%22)%3C/script%3E";
+    let burst_size = 256;
+    let popup_document_source = format!(
+        r#"<script>
+opener.postMessage("standalone-auxiliary-ready", "*");
+for (let index = 0; index < {burst_size}; index += 1) {{
+  opener.postMessage(`standalone-order:${{index}}`, "*");
+}}
+</script>"#
+    );
+    let popup_document = format!(
+        "data:text/html,{}",
+        url::form_urlencoded::byte_serialize(popup_document_source.as_bytes())
+            .collect::<String>()
+            .replace('+', "%20")
+    );
 
     let open_result = page
         .evaluate_runtime_expression_async(&format!(
             r#"
 globalThis.__standaloneAuxiliaryReady = false;
+globalThis.__standaloneAuxiliaryMessageOrder = [];
 addEventListener("message", event => {{
   if (event.data === "standalone-auxiliary-ready") {{
     globalThis.__standaloneAuxiliaryReady = true;
+  }} else if (typeof event.data === "string" && event.data.startsWith("standalone-order:")) {{
+    globalThis.__standaloneAuxiliaryMessageOrder.push(Number(event.data.slice(17)));
   }}
 }});
 globalThis.__standaloneAuxiliaryChild = window.open("about:blank", "standalone-auxiliary-child");
@@ -3612,6 +3629,25 @@ __standaloneAuxiliaryChild !== null
             Duration::from_secs(5),
         )
         .await?;
+    browser
+        .wait_for_script_truthy(
+            &mut page,
+            &format!("globalThis.__standaloneAuxiliaryMessageOrder.length === {burst_size}"),
+            Duration::from_secs(5),
+        )
+        .await?;
+    let expected_message_order = (0..burst_size)
+        .map(|index| index.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    assert_eq!(
+        page.evaluate_runtime_expression_async(
+            "globalThis.__standaloneAuxiliaryMessageOrder.join(',')",
+        )
+        .await?["value"],
+        serde_json::json!(expected_message_order),
+        "standalone owner output order must become external Page ingress order before waiters are spawned",
+    );
     assert_eq!(
         renderer_owner.len(),
         2,

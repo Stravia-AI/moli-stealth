@@ -460,15 +460,9 @@ fn dispatch_external_page_owner_command(
     operation: &'static str,
 ) {
     let renderer_owner = environment.js_runtime.renderer_owner_handle();
+    let pending = enqueue_external_page_owner_command(&renderer_owner, residence, command);
     tokio::task::spawn_local(async move {
-        match renderer_owner
-            .dispatch_browser_owner_page_command(
-                residence.owner_local_host_id,
-                residence.page_id,
-                command,
-            )
-            .await
-        {
+        match await_external_page_owner_command(pending).await {
             Ok(output) => tracing::trace!(
                 target: "moli_standalone_auxiliary",
                 ?residence,
@@ -497,18 +491,16 @@ fn dispatch_external_navigation_command(
 ) {
     let request = apply_navigation_referrer(request, navigation_referrer.as_deref());
     let renderer_owner = environment.js_runtime.renderer_owner_handle();
+    let pending = enqueue_external_page_owner_command(
+        &renderer_owner,
+        residence,
+        RendererPageCommand::FollowTopLevelNavigationInStandaloneAdapter {
+            request,
+            navigation_history_entry_seed,
+        },
+    );
     tokio::task::spawn_local(async move {
-        let output = match renderer_owner
-            .dispatch_browser_owner_page_command(
-                residence.owner_local_host_id,
-                residence.page_id,
-                RendererPageCommand::FollowTopLevelNavigationInStandaloneAdapter {
-                    request,
-                    navigation_history_entry_seed,
-                },
-            )
-            .await
-        {
+        let output = match await_external_page_owner_command(pending).await {
             Ok(output) => output,
             Err(error) => {
                 if let Some(continuation) = continuation {
@@ -550,6 +542,35 @@ fn dispatch_external_navigation_command(
             }
         }
     });
+}
+
+fn enqueue_external_page_owner_command(
+    renderer_owner: &crate::renderer::RendererOwnerHandle,
+    residence: StandalonePageResidence,
+    command: RendererPageCommand,
+) -> Result<oneshot::Receiver<Result<crate::renderer::RendererOwnerReply>>> {
+    // Owner output records are admitted synchronously in stream order. Put
+    // the command on the renderer queue in that same stack; a spawned waiter
+    // must not become the owner of ingress ordering.
+    renderer_owner.enqueue_command_with_reply(RendererOwnerCommand::RunBrowserOwnerPageCommand {
+        owner_local_host_id: residence.owner_local_host_id,
+        page_id: residence.page_id,
+        command,
+    })
+}
+
+async fn await_external_page_owner_command(
+    pending: Result<oneshot::Receiver<Result<crate::renderer::RendererOwnerReply>>>,
+) -> Result<crate::page::RendererCommandTurnOutput> {
+    let reply = pending?
+        .await
+        .map_err(|_| anyhow!("render runtime reply channel closed"))??;
+    match reply {
+        crate::renderer::RendererOwnerReply::AsyncPageCommandRan(output) => Ok(*output),
+        _ => Err(anyhow!(
+            "renderer owner returned non-page-command reply for standalone browser-owner action"
+        )),
+    }
 }
 
 fn admit_popup_activation(
