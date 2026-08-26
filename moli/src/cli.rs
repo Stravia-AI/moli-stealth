@@ -1,4 +1,4 @@
-use std::{ffi::OsString, num::NonZeroU32};
+use std::{ffi::OsString, num::NonZeroU32, path::PathBuf};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use regex::Regex;
@@ -50,9 +50,24 @@ pub struct FetchArgs {
     #[arg(
         long,
         value_name = "EXPRESSION",
-        conflicts_with_all = ["dump", "with_base", "with_frames", "strip_mode"]
+        conflicts_with_all = [
+            "eval_file",
+            "dump",
+            "with_base",
+            "with_frames",
+            "strip_mode"
+        ]
     )]
     pub eval: Option<String>,
+
+    /// Read the JavaScript expression from a UTF-8 file. This avoids command-line
+    /// argument length limits for large or multiline scripts. Promises are awaited.
+    #[arg(
+        long,
+        value_name = "PATH",
+        conflicts_with_all = ["eval", "dump", "with_base", "with_frames", "strip_mode"]
+    )]
+    pub eval_file: Option<PathBuf>,
 
     #[arg(short = 'H', long = "header", value_name = "HEADER", value_parser = parse_request_header_arg)]
     pub headers: Vec<RequestHeaderArg>,

@@ -75,6 +75,7 @@ fn parses_explicit_fetch_command_with_compatibility_flags() {
         Commands::Fetch(Box::new(FetchArgs {
             dump: Some(DumpFormat::SemanticTree),
             eval: None,
+            eval_file: None,
             headers: vec![
                 RequestHeaderArg {
                     name: "X-Test".to_owned(),
@@ -418,6 +419,7 @@ fn infers_fetch_mode_from_bare_url() {
         Commands::Fetch(Box::new(FetchArgs {
             dump: None,
             eval: None,
+            eval_file: None,
             headers: vec![],
             disable_js: false,
             with_base: false,
@@ -459,6 +461,7 @@ fn parses_bare_dump_with_explicit_fetch_command_and_defaults_to_html() {
         Commands::Fetch(Box::new(FetchArgs {
             dump: Some(DumpFormat::Html),
             eval: None,
+            eval_file: None,
             headers: vec![],
             disable_js: false,
             with_base: false,
@@ -501,6 +504,7 @@ fn parses_header_flag_with_explicit_fetch_command() {
         Commands::Fetch(Box::new(FetchArgs {
             dump: None,
             eval: None,
+            eval_file: None,
             headers: vec![RequestHeaderArg {
                 name: "X-Test".to_owned(),
                 value: "one".to_owned(),
@@ -908,21 +912,65 @@ fn parses_fetch_eval_expression() {
         panic!("expected fetch command");
     };
     assert_eq!(args.eval.as_deref(), Some("document.title"));
+    assert!(args.eval_file.is_none());
+}
+
+#[test]
+fn parses_fetch_eval_file() {
+    let cli = Cli::try_parse_from(normalize_args_for_compat([
+        "moli",
+        "fetch",
+        "--eval-file",
+        "extract.js",
+        "https://example.com",
+    ]))
+    .unwrap();
+
+    let Commands::Fetch(args) = cli.command else {
+        panic!("expected fetch command");
+    };
+    assert!(args.eval.is_none());
+    assert_eq!(
+        args.eval_file.as_deref(),
+        Some(std::path::Path::new("extract.js"))
+    );
+}
+
+#[test]
+fn fetch_eval_sources_are_mutually_exclusive() {
+    let error = Cli::try_parse_from(normalize_args_for_compat([
+        "moli",
+        "fetch",
+        "--eval",
+        "document.title",
+        "--eval-file",
+        "extract.js",
+        "https://example.com",
+    ]))
+    .unwrap_err();
+
+    assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
 }
 
 #[test]
 fn fetch_eval_rejects_page_dump_output_options() {
-    for conflicting_args in [
-        &["--dump", "json"][..],
-        &["--with-base"][..],
-        &["--with-frames"][..],
-        &["--strip-mode", "js"][..],
+    for eval_args in [
+        &["--eval", "document.title"][..],
+        &["--eval-file", "extract.js"][..],
     ] {
-        let mut args = vec!["moli", "fetch", "--eval", "document.title"];
-        args.extend_from_slice(conflicting_args);
-        args.push("https://example.com");
-        let error = Cli::try_parse_from(normalize_args_for_compat(args)).unwrap_err();
-        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+        for conflicting_args in [
+            &["--dump", "json"][..],
+            &["--with-base"][..],
+            &["--with-frames"][..],
+            &["--strip-mode", "js"][..],
+        ] {
+            let mut args = vec!["moli", "fetch"];
+            args.extend_from_slice(eval_args);
+            args.extend_from_slice(conflicting_args);
+            args.push("https://example.com");
+            let error = Cli::try_parse_from(normalize_args_for_compat(args)).unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+        }
     }
 }
 

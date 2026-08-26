@@ -41,7 +41,15 @@ pub async fn run_cli_with_config<W: Write>(
     stdout: &mut W,
 ) -> Result<()> {
     match cli.command {
-        Commands::Fetch(args) => {
+        Commands::Fetch(mut args) => {
+            let eval_expression =
+                if let Some(path) = args.eval_file.as_deref() {
+                    Some(std::fs::read_to_string(path).with_context(|| {
+                        format!("failed to read --eval-file `{}`", path.display())
+                    })?)
+                } else {
+                    args.eval.take()
+                };
             let request = build_fetch_request(&args.url, &config)?;
             if config.browser.fetch().obey_robots() {
                 // Checked before the browser starts so a refused fetch costs
@@ -66,10 +74,12 @@ pub async fn run_cli_with_config<W: Write>(
             let mut page = match fetched_document {
                 FetchedDocument::Page(page) => page,
                 FetchedDocument::Raw(raw_document) => {
-                    if args.eval.is_some() {
+                    if eval_expression.is_some() {
                         finalize_fetch_browser(browser);
                         return Err(with_fetch_context(
-                            anyhow!("raw non-HTML document fetch does not support --eval"),
+                            anyhow!(
+                                "raw non-HTML document fetch does not support --eval or --eval-file"
+                            ),
                             &args.url,
                         ));
                     }
@@ -114,7 +124,7 @@ pub async fn run_cli_with_config<W: Write>(
                     .map_err(|error| with_fetch_context(error, &args.url))?;
             }
 
-            let rendered = if let Some(expression) = args.eval.as_deref() {
+            let rendered = if let Some(expression) = eval_expression.as_deref() {
                 eval_output::evaluate(&mut page, expression).await
             } else {
                 fetch_dump::render_page_output_async(&mut page, &config.fetch).await
