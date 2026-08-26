@@ -431,6 +431,7 @@ function parseArgs(argv) {
     moliBin: process.env.MOLI_BIN || '',
     chromeBin: process.env.CHROME_BIN || '',
     assertNoStalePageLeakage: false,
+    assertFixtureContract: false,
     sampleResources: true,
     sampleIntervalMs: 500
   };
@@ -466,6 +467,8 @@ function parseArgs(argv) {
       args.chromeBin = next();
     } else if (value === '--assert-no-stale-page-leakage') {
       args.assertNoStalePageLeakage = true;
+    } else if (value === '--assert-fixture-contract') {
+      args.assertFixtureContract = true;
     } else if (value === '--sample-interval-ms') {
       args.sampleIntervalMs = Number.parseInt(next(), 10);
     } else if (value === '--no-resource-sampling') {
@@ -489,6 +492,9 @@ function parseArgs(argv) {
   }
   if (!['fixture', 'real'].includes(args.siteSource)) {
     throw new Error(`unknown site source: ${args.siteSource}`);
+  }
+  if (args.assertFixtureContract && args.siteSource !== 'fixture') {
+    throw new Error('--assert-fixture-contract requires --site-source fixture');
   }
   args.cases = [...new Set(args.cases)];
   for (const caseName of args.cases) {
@@ -530,8 +536,9 @@ Options:
   --assert-no-stale-page-leakage
                                  Opt in to a local correctness assertion: exit non-zero when a
                                  service run fails or timed-out navigations / mismatched item links
-                                 indicate stale previous-page scraping. CI does not enable this;
-                                 Spider Bench results are informational.
+                                 indicate stale previous-page scraping.
+  --assert-fixture-contract      Require every deterministic fixture route to return its exact
+                                 expected row count, with no service failure or stale-page output.
   --sample-interval-ms N         Process-tree CPU/RSS/PSS sample interval (minimum 100ms).
   --no-resource-sampling         Disable resource sampling; the HTML report is still generated.`);
 }
@@ -1632,6 +1639,54 @@ function serviceRunFailures(results) {
     }));
 }
 
+export function fixtureContractFailures(results) {
+  const failures = [];
+  for (const result of results) {
+    if (!result.success) {
+      continue;
+    }
+    const cases = result.metadata?.cases;
+    const summary = result.report?.summary;
+    if (!Array.isArray(cases) || !summary) {
+      failures.push({
+        service: result.service,
+        reason: 'fixture evidence is incomplete'
+      });
+      continue;
+    }
+
+    const sites = cases.flatMap((caseResult) => (
+      Array.isArray(caseResult.siteMeta) ? caseResult.siteMeta : []
+    ));
+    if (sites.length !== summary.totalSites) {
+      failures.push({
+        service: result.service,
+        reason: 'fixture site count mismatch',
+        actualSites: sites.length,
+        expectedSites: summary.totalSites
+      });
+    }
+    for (const site of sites) {
+      if (
+        !Number.isInteger(site.expectedItemCount)
+        || !Number.isInteger(site.itemCount)
+        || site.itemCount !== site.expectedItemCount
+      ) {
+        failures.push({
+          service: result.service,
+          caseName: site.caseName ?? null,
+          site: site.site ?? null,
+          actualItems: Number.isInteger(site.itemCount) ? site.itemCount : null,
+          expectedItems: Number.isInteger(site.expectedItemCount)
+            ? site.expectedItemCount
+            : null
+        });
+      }
+    }
+  }
+  return failures;
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const taskId = randomUUID();
@@ -1649,6 +1704,7 @@ async function main() {
     gotoTimeoutMs: args.gotoTimeoutMs,
     serverHangMs: args.serverHangMs,
     assertNoStalePageLeakage: args.assertNoStalePageLeakage,
+    assertFixtureContract: args.assertFixtureContract,
     sampleResources: args.sampleResources,
     sampleIntervalMs: args.sampleIntervalMs
   });
@@ -1715,6 +1771,16 @@ async function main() {
     const failures = stalePageLeakageFailures(allResults);
     if (failures.length > 0) {
       throw new Error(`stale page leakage detected: ${JSON.stringify(failures)}`);
+    }
+  }
+  if (args.assertFixtureContract) {
+    const failures = [
+      ...serviceRunFailures(allResults),
+      ...stalePageLeakageFailures(allResults),
+      ...fixtureContractFailures(allResults)
+    ];
+    if (failures.length > 0) {
+      throw new Error(`fixture contract failed: ${JSON.stringify(failures)}`);
     }
   }
 }
