@@ -1637,6 +1637,18 @@ fn serialize_for_wire_with_policy<'s>(
     let Some(true) = serializer.write_value(context, value) else {
         return None;
     };
+    // Blob attachments are discovered only while V8 walks the value. Reject
+    // an oversized remote set before committing any transfer-list side
+    // effects, just as the caller does for attachments known up front.
+    if policy.requires_process_neutral_attachments()
+        && !remote_structured_clone_attachment_count_is_supported(blobs.borrow().blobs.len())
+    {
+        throw_data_clone_exception(
+            scope,
+            "Blob attachment count exceeds the remote transport limit.",
+        );
+        return None;
+    }
     for buffer in array_buffer_transfers {
         if buffer.detach(None) != Some(true) {
             throw_data_clone_exception(scope, "Failed to transfer ArrayBuffer.");

@@ -6661,6 +6661,37 @@ addEventListener("messageerror", event => {
         "a rejected author payload must not enter the browser-owned command stream"
     );
 
+    output_rx.drain();
+    let (oversized_blob_message, _) = opener
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"(() => {
+  const transfer = new ArrayBuffer(1);
+  const blobs = Array.from({ length: 4097 }, () => new Blob());
+  try {
+    __g5RemotePopup.postMessage({ blobs }, "*", [transfer]);
+    return "missing-error";
+  } catch (error) {
+    return JSON.stringify([
+      error instanceof DOMException,
+      error.name,
+      transfer.byteLength
+    ]);
+  }
+})()"#
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("remote Blob transport limits should return to JavaScript");
+    assert_eq!(
+        renderer_json_value(oversized_blob_message),
+        Some(serde_json::json!(r#"[true,"DataCloneError",1]"#))
+    );
+    assert!(
+        remote_window_proxy_commands_for_page(&output_rx.drain(), &opener).is_empty(),
+        "a rejected Blob payload must not enter the browser-owned command stream"
+    );
+
     // Chromium does not put v8::CompiledWasmModule attachments on its Mojo
     // CloneableMessage wire. It records the exact sender agent cluster and a
     // different target agent dispatches `messageerror`. Preserve the author's
