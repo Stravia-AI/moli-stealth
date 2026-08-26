@@ -114,7 +114,10 @@ fn meta_charset_after_1024_bytes_after_head_is_ignored() {
     input.extend(vec![b' '; HTML_META_CHARSET_PRESCAN_LIMIT - input.len()]);
     input.extend_from_slice(b"<meta charset=\"gbk\"><p>");
     input.extend_from_slice(&gbk_bytes("家居"));
-    let mut decoder = HtmlDocumentStreamingDecoder::new(&headers);
+    // Suppress heuristic detection so this test isolates the meta prescan's
+    // head boundary rather than CED independently recognizing the GBK body.
+    let mut decoder =
+        HtmlDocumentStreamingDecoder::new_with_fallback(&headers, Some("windows-1252"));
 
     let decoded = decoder.push(&input).join("");
 
@@ -219,8 +222,17 @@ fn unknown_charset_falls_back_to_html_default_on_finish() {
 }
 
 #[test]
-fn no_label_html_document_falls_back_to_windows_1252() {
+fn unlabelled_html_document_uses_legacy_content_detection() {
     let (text, encoding) = decode_html_document(b"\x80\x80 Hello", &[]);
+
+    assert_eq!(encoding, "IBM866");
+    assert_eq!(text, "\u{410}\u{410} Hello");
+}
+
+#[test]
+fn inherited_fallback_suppresses_legacy_content_detection() {
+    let (text, encoding) =
+        decode_html_document_with_fallback(b"\x80\x80 Hello", &[], Some("windows-1252"));
 
     assert_eq!(encoding, "windows-1252");
     assert_eq!(text, "\u{20ac}\u{20ac} Hello");
@@ -792,7 +804,7 @@ fn header_charset_exact_lookup_rejects_non_http_whitespace() {
         assert_eq!(encoding_from_response_headers(&headers), None);
         assert_eq!(
             decode_html_document(&gbk_bytes("太平洋"), &headers).1,
-            "windows-1252"
+            "GBK"
         );
     }
 }

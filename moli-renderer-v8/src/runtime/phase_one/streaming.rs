@@ -123,7 +123,8 @@ impl ConcurrentParseTimeRuntime {
                 )
             });
         state.service_worker_preload_context = service_worker_preload_context.clone();
-        let mut decoder = HtmlDocumentStreamingDecoder::new(&response_headers);
+        let mut decoder =
+            HtmlDocumentStreamingDecoder::new_for_url(&response_headers, state.final_url.as_str());
         // Raw navigation bodies are decoded during prebootstrap scan. The decoder
         // is carried forward so split multibyte sequences are not decoded twice or
         // lost between the scan and parser handoff.
@@ -357,7 +358,8 @@ impl ConcurrentParseTimeRuntime {
                 )
             });
         state.service_worker_preload_context = service_worker_preload_context.clone();
-        let mut decoder = HtmlDocumentStreamingDecoder::new(&response_headers);
+        let mut decoder =
+            HtmlDocumentStreamingDecoder::new_for_url(&response_headers, state.final_url.as_str());
         // External raw bodies replay captured chunks. Pre-scan only what is already
         // buffered before bootstrap so the producer's backpressure boundary still
         // controls how far ahead the parser can get.

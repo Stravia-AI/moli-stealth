@@ -1,5 +1,6 @@
 //! Browser-compatible text, document, form, script, and URL encoding helpers.
 
+mod detector;
 mod document;
 mod form;
 mod labels;

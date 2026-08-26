@@ -1,7 +1,9 @@
 use encoding_rs::{CoderResult, Decoder, Encoding};
 use moli_charset_parser::{HtmlMetaCharsetParser, HtmlMetaCharsetScanResult};
 
-use crate::{encoding_for_label, encoding_from_response_headers};
+use crate::{
+    detector::detect_legacy_html_encoding, encoding_for_label, encoding_from_response_headers,
+};
 
 const DEFAULT_HTML_DOCUMENT_ENCODING: &str = "windows-1252";
 const UTF16LE_XML_PREFIX: &[u8; 6] = b"<\0?\0x\0";
@@ -37,18 +39,32 @@ pub struct HtmlDocumentStreamingDecoder {
     emitted_sniff_len: usize,
     meta_prescan_fed_len: usize,
     meta_charset_parser: HtmlMetaCharsetParser,
+    allow_legacy_content_detection: bool,
+    url_hint: Option<String>,
     decoder: Option<Decoder>,
     selected_encoding: Option<&'static Encoding>,
 }
 
 impl HtmlDocumentStreamingDecoder {
     pub fn new(headers: &[(String, String)]) -> Self {
-        Self::new_with_fallback(headers, None)
+        Self::new_with_fallback_and_url(headers, None, None)
+    }
+
+    pub fn new_for_url(headers: &[(String, String)], url_hint: &str) -> Self {
+        Self::new_with_fallback_and_url(headers, None, Some(url_hint))
     }
 
     pub fn new_with_fallback(
         headers: &[(String, String)],
         fallback_encoding: Option<&str>,
+    ) -> Self {
+        Self::new_with_fallback_and_url(headers, fallback_encoding, None)
+    }
+
+    fn new_with_fallback_and_url(
+        headers: &[(String, String)],
+        fallback_encoding: Option<&str>,
+        url_hint: Option<&str>,
     ) -> Self {
         Self {
             transport_encoding: encoding_from_response_headers(headers),
@@ -59,6 +75,11 @@ impl HtmlDocumentStreamingDecoder {
             emitted_sniff_len: 0,
             meta_prescan_fed_len: 0,
             meta_charset_parser: HtmlMetaCharsetParser::new(),
+            // A supplied fallback represents an inherited or otherwise
+            // authoritative default. Blink only lets content detection replace
+            // its own default, not an ordinary parent-frame encoding.
+            allow_legacy_content_detection: fallback_encoding.is_none(),
+            url_hint: url_hint.map(str::to_owned),
             decoder: None,
             selected_encoding: None,
         }
@@ -130,10 +151,20 @@ impl HtmlDocumentStreamingDecoder {
             return Some(encoding);
         }
         match meta_scan {
-            HtmlMetaCharsetScanResult::NotFound => Some(self.fallback_encoding),
-            HtmlMetaCharsetScanResult::Pending if finishing => Some(self.fallback_encoding),
+            HtmlMetaCharsetScanResult::NotFound => self
+                .detected_legacy_content_encoding()
+                .or(Some(self.fallback_encoding)),
+            HtmlMetaCharsetScanResult::Pending if finishing => self
+                .detected_legacy_content_encoding()
+                .or(Some(self.fallback_encoding)),
             HtmlMetaCharsetScanResult::Pending | HtmlMetaCharsetScanResult::Found(_) => None,
         }
+    }
+
+    fn detected_legacy_content_encoding(&self) -> Option<&'static Encoding> {
+        self.allow_legacy_content_detection
+            .then(|| detect_legacy_html_encoding(&self.sniff_buffer, self.url_hint.as_deref()))
+            .flatten()
     }
 
     fn feed_meta_charset_prescan(&mut self, finishing: bool) -> HtmlMetaCharsetScanResult {
