@@ -35,12 +35,14 @@ impl ResponseContentType {
     }
 }
 
-/// Parses an HTTP response `Content-Type` like Chromium's
+/// Parses a raw HTTP response `Content-Type` field like Chromium's
 /// `net::HttpUtil::ParseContentType` and `net::ParseMimeType` path.
 ///
 /// This intentionally accepts malformed values seen on the network, including
-/// an unterminated quoted parameter and an empty subtype. Use
-/// [`crate::parse_mime_type`] for standards-facing Web API behavior.
+/// an unterminated quoted parameter and an empty subtype. Use this only for
+/// response transport metadata, such as extracting `charset` or multipart
+/// `boundary`; standards-facing MIME operations must use
+/// [`crate::parse_mime_type`].
 pub fn parse_response_content_type(input: &str) -> Option<ResponseContentType> {
     // Chromium treats an exact bare wildcard as meaningless, while retaining
     // wildcard values that have parameters or even trailing whitespace.

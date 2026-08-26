@@ -1,9 +1,20 @@
-//! Shared parsing for MIME values and HTTP response `Content-Type` fields.
+//! MIME parsing for two distinct browser contexts.
 //!
-//! Web-facing MIME operations use the WHATWG parser, while transport response
-//! metadata uses Chromium's deliberately more tolerant network semantics. The
-//! two entry points are named separately so callers cannot select the wrong
-//! behavior through a generic leniency flag.
+//! Choose the entry point from the source of the value:
+//!
+//! - [`parse_mime_type`] applies the WHATWG MIME parsing and serialization
+//!   rules. Use it for standards-facing MIME operations such as Blob/File type
+//!   handling, MIME classification, and interpreting an already selected MIME
+//!   value.
+//! - [`parse_response_content_type`] matches Chromium's network-layer parsing
+//!   of a raw HTTP response `Content-Type` field. Use it when transport
+//!   metadata must retain Chromium behavior for values such as `charset` and
+//!   multipart `boundary`.
+//!
+//! These parsers intentionally have different validity and recovery rules. A
+//! value accepted by one is not necessarily accepted by the other, so callers
+//! must select the parser from the value's origin rather than treating the two
+//! result types as interchangeable.
 
 mod response;
 mod whatwg;

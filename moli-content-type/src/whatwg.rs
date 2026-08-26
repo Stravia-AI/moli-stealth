@@ -44,7 +44,13 @@ impl fmt::Display for MimeType {
     }
 }
 
-/// Parses a MIME value using WHATWG validation and parameter recovery rules.
+/// Parses a standards-facing MIME value using WHATWG validation,
+/// normalization, and parameter recovery rules.
+///
+/// Use this for Web API MIME operations and for interpreting an already
+/// selected MIME value. Raw HTTP response `Content-Type` metadata must instead
+/// use [`crate::parse_response_content_type`] so its Chromium network behavior
+/// is preserved.
 pub fn parse_mime_type(input: &str) -> Option<MimeType> {
     input.parse().ok().map(|inner| MimeType { inner })
 }
@@ -64,7 +70,12 @@ pub fn mime_charset(input: &str) -> Option<String> {
     mime_parameter(input, "charset")
 }
 
-/// Normalizes a Web API MIME string without parsing its structure.
+/// Normalizes a Blob/File-style Web API MIME string without parsing its
+/// structure.
+///
+/// This only validates the permitted byte range and lowercases ASCII. It does
+/// not produce a [`MimeType`] and is not a substitute for
+/// [`parse_mime_type`].
 pub fn normalize_web_api_mime_type(raw: &str) -> String {
     if raw.is_empty() || raw.bytes().any(|byte| !(0x20..=0x7e).contains(&byte)) {
         return String::new();

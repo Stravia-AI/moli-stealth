@@ -747,6 +747,40 @@ fn header_charset_matches_chromium_network_tolerances() {
 }
 
 #[test]
+fn header_charset_does_not_trim_non_http_ascii_whitespace() {
+    for whitespace in ['\u{000b}', '\u{000c}'] {
+        let headers = vec![(
+            "Content-Type".to_owned(),
+            format!("text/html; charset={whitespace}gbk"),
+        )];
+
+        assert_eq!(
+            charset_from_headers(&headers).as_deref(),
+            Some(format!("{whitespace}gbk").as_str())
+        );
+        assert_eq!(
+            decode_html_document(&gbk_bytes("太平洋"), &headers).1,
+            "windows-1252"
+        );
+    }
+}
+
+#[test]
+fn encoding_label_lookup_requires_callers_to_preprocess_whitespace() {
+    assert_eq!(encoding_for_label("gbk"), Some(encoding_rs::GBK));
+    for label in [
+        " gbk",
+        "gbk ",
+        "\tgbk",
+        "gbk\n",
+        "\u{000b}gbk",
+        "gbk\u{000c}",
+    ] {
+        assert_eq!(encoding_for_label(label), None, "label={label:?}");
+    }
+}
+
+#[test]
 fn header_charset_preserves_chromium_empty_parameter_precedence() {
     assert_eq!(
         charset_from_content_type("text/html; charset=; charset=gbk").as_deref(),
