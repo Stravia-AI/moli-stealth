@@ -7,7 +7,9 @@ use crate::content_security_policy::{
     ContentSecurityPolicyStyleElementRequest, ContentSecurityPolicyUrlViolation,
     ContentSecurityPolicyViolationEventFields, TrustedTypesForScriptRequirements,
     content_security_policy_allows_trusted_type_policy_name,
-    content_security_policy_allows_trusted_types_eval, content_security_policy_headers,
+    content_security_policy_allows_trusted_types_eval,
+    content_security_policy_frame_ancestors_violation_with_disposition_and_reporting_endpoints,
+    content_security_policy_headers,
     content_security_policy_inline_script_element_violation_with_disposition_and_reporting_endpoints,
     content_security_policy_inline_source_violation_with_disposition_and_reporting_endpoints,
     content_security_policy_inline_style_element_violation_with_disposition_and_reporting_endpoints,
@@ -48,6 +50,10 @@ pub(crate) struct DocumentContentSecurityPolicyCheck {
 }
 
 impl DocumentContentSecurityPolicyCheck {
+    pub(crate) fn has_no_violations(&self) -> bool {
+        self.report_only_violation.is_none() && self.enforced_violation.is_none()
+    }
+
     pub(crate) fn into_violations(
         self,
     ) -> (
@@ -66,6 +72,12 @@ impl DocumentContentSecurityPolicyCheck {
     fn enforced_violation(&self) -> Option<&DocumentContentSecurityPolicyViolation> {
         self.enforced_violation.as_ref()
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum DocumentNavigationEmbeddingContext<'a> {
+    TopLevel,
+    Nested(&'a [Option<Url>]),
 }
 
 #[derive(Debug, Clone)]
@@ -151,6 +163,37 @@ impl DocumentPolicyContainer {
                     final_url,
                 ),
             ..Self::default()
+        }
+    }
+
+    pub(crate) fn navigation_response_frame_ancestors_check(
+        &self,
+        protected_url: &Url,
+        embedding_context: DocumentNavigationEmbeddingContext<'_>,
+    ) -> DocumentContentSecurityPolicyCheck {
+        let DocumentNavigationEmbeddingContext::Nested(ancestor_origins) = embedding_context else {
+            return DocumentContentSecurityPolicyCheck {
+                report_only_violation: None,
+                enforced_violation: None,
+            };
+        };
+        DocumentContentSecurityPolicyCheck {
+            report_only_violation:
+                content_security_policy_frame_ancestors_violation_with_disposition_and_reporting_endpoints(
+                    &self.response_content_security_report_only_policies,
+                    protected_url,
+                    ancestor_origins,
+                    ContentSecurityPolicyDisposition::Report,
+                    &self.content_security_reporting_endpoints,
+                ),
+            enforced_violation:
+                content_security_policy_frame_ancestors_violation_with_disposition_and_reporting_endpoints(
+                    &self.response_content_security_policies,
+                    protected_url,
+                    ancestor_origins,
+                    ContentSecurityPolicyDisposition::Enforce,
+                    &self.content_security_reporting_endpoints,
+                ),
         }
     }
 
@@ -3081,6 +3124,43 @@ mod tests {
                 .content_security_reporting_endpoints
                 .endpoint_for_group("csp"),
             Some("https://example.test/reports/csp")
+        );
+    }
+
+    #[test]
+    fn navigation_response_frame_ancestors_check_distinguishes_top_level_and_nested() {
+        let protected_url = Url::parse("https://child.test/frame.html").unwrap();
+        let policy = DocumentPolicyContainer {
+            response_content_security_policies: vec!["frame-ancestors 'self'".to_owned()],
+            response_content_security_report_only_policies: vec![
+                "frame-ancestors https://reported.test".to_owned(),
+            ],
+            ..Default::default()
+        };
+
+        assert!(
+            policy
+                .navigation_response_frame_ancestors_check(
+                    &protected_url,
+                    DocumentNavigationEmbeddingContext::TopLevel,
+                )
+                .has_no_violations()
+        );
+
+        let ancestors = [Some(Url::parse("https://embedder.test").unwrap())];
+        let (report_only, enforced) = policy
+            .navigation_response_frame_ancestors_check(
+                &protected_url,
+                DocumentNavigationEmbeddingContext::Nested(&ancestors),
+            )
+            .into_violations();
+        assert_eq!(
+            report_only.unwrap().disposition,
+            ContentSecurityPolicyDisposition::Report
+        );
+        assert_eq!(
+            enforced.unwrap().disposition,
+            ContentSecurityPolicyDisposition::Enforce
         );
     }
 }

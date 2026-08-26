@@ -8,11 +8,9 @@ use super::{
 use crate::referrer_policy::response_referrer_policy_from_headers;
 use crate::{
     content_security_policy::{
-        ContentSecurityPolicyDisposition, ContentSecurityPolicyViolationEventFields,
-        content_security_policy_frame_ancestors_violation_with_disposition_and_reporting_endpoints,
-        send_content_security_policy_reports,
+        ContentSecurityPolicyViolationEventFields, send_content_security_policy_reports,
     },
-    document_runtime::{DocumentPolicyContainer, DomHandle},
+    document_runtime::{DocumentNavigationEmbeddingContext, DocumentPolicyContainer, DomHandle},
     document_script_scheduler::FrameDocumentClassicScriptSchedulerWork,
     frame_owner_model::{
         ChildDocumentNavigationFetchTarget, DocumentCreationKind,
@@ -411,26 +409,13 @@ impl JsContextHost {
                         .clear_content_security_policy_for_bypass();
                 }
                 let ancestor_origins = self.child_document_frame_ancestor_origins(handle);
-                let reporting_endpoints =
-                    &loaded.policy_container.content_security_reporting_endpoints;
-                let report_only_violation =
-                    content_security_policy_frame_ancestors_violation_with_disposition_and_reporting_endpoints(
-                        &loaded
-                            .policy_container
-                            .response_content_security_report_only_policies,
+                let (report_only_violation, enforced_violation) = loaded
+                    .policy_container
+                    .navigation_response_frame_ancestors_check(
                         &loaded.final_url,
-                        &ancestor_origins,
-                        ContentSecurityPolicyDisposition::Report,
-                        reporting_endpoints,
-                    );
-                let enforced_violation =
-                    content_security_policy_frame_ancestors_violation_with_disposition_and_reporting_endpoints(
-                        &loaded.policy_container.response_content_security_policies,
-                        &loaded.final_url,
-                        &ancestor_origins,
-                        ContentSecurityPolicyDisposition::Enforce,
-                        reporting_endpoints,
-                    );
+                        DocumentNavigationEmbeddingContext::Nested(&ancestor_origins),
+                    )
+                    .into_violations();
                 for violation in report_only_violation
                     .iter()
                     .chain(enforced_violation.iter())

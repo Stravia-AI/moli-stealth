@@ -1108,6 +1108,15 @@ impl PageVmEnvConfig {
                 headers, final_url,
             )
             .with_content_security_policy_bypass(self.bypass_content_security_policy);
+        debug_assert!(
+            self.document_policy_container
+                .navigation_response_frame_ancestors_check(
+                    final_url,
+                    crate::document_runtime::DocumentNavigationEmbeddingContext::TopLevel,
+                )
+                .has_no_violations(),
+            "a top-level navigation response cannot violate frame-ancestors"
+        );
         self.document_default_language =
             crate::document_language::document_default_language_from_headers(headers);
         self.document_last_modified =
