@@ -103,6 +103,7 @@ impl ScriptVm {
         ContentSecurityPolicyViolationBodyExecution::DispatchAttempted(result)
     }
 
+    #[cfg(test)]
     pub(crate) fn set_response_content_security_policies(&mut self, policies: &[String]) {
         self.document_runtime
             .set_response_content_security_policies(policies);
@@ -113,6 +114,7 @@ impl ScriptVm {
             .set_bypass_content_security_policy(bypass);
     }
 
+    #[cfg(test)]
     pub(crate) fn set_response_content_security_report_only_policies(
         &mut self,
         policies: &[String],
@@ -121,31 +123,9 @@ impl ScriptVm {
             .set_response_content_security_report_only_policies(policies);
     }
 
+    #[cfg(test)]
     pub(crate) fn set_response_referrer_policy(&mut self, policy: Option<String>) {
         self.document_runtime.set_response_referrer_policy(policy);
-    }
-
-    pub(crate) fn set_cross_origin_embedder_policy(
-        &mut self,
-        policy: crate::cross_origin_isolation::CrossOriginEmbedderPolicy,
-    ) {
-        self.document_runtime
-            .set_cross_origin_embedder_policy(policy);
-    }
-
-    pub(crate) fn set_document_isolation_policy(
-        &mut self,
-        policy: crate::cross_origin_isolation::DocumentIsolationPolicy,
-    ) {
-        self.document_runtime.set_document_isolation_policy(policy);
-    }
-
-    pub(crate) fn set_content_security_reporting_endpoints(
-        &mut self,
-        endpoints: crate::content_security_policy::ContentSecurityPolicyReportingEndpoints,
-    ) {
-        self.document_runtime
-            .set_content_security_reporting_endpoints(endpoints);
     }
 }
 

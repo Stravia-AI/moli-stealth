@@ -687,10 +687,6 @@ impl JsContextHost {
         &self.extra_http_headers
     }
 
-    pub(crate) fn set_document_content_security_policies(&mut self, policies: &[String]) {
-        unsafe { &mut *self.runtime }.set_document_content_security_policies(policies);
-    }
-
     pub(crate) fn document_content_security_policies(&self) -> &[String] {
         unsafe { &*self.runtime }.document_content_security_policies()
     }

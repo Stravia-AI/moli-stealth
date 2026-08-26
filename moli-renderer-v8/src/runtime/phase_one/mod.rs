@@ -110,7 +110,8 @@ fn script_preloads_require_owner_admission(env: &PageVmEnvConfig) -> bool {
 fn main_document_parser_scripting_enabled(env: &PageVmEnvConfig) -> bool {
     !env.script_execution_disabled
         && crate::content_security_policy::content_security_policy_sandbox_allows_scripts(
-            &env.response_content_security_policies,
+            &env.document_policy_container
+                .response_content_security_policies,
         )
 }
 
@@ -492,7 +493,8 @@ mod tests {
             ] {
                 let env = default_test_page_vm_env_config_with(|env| {
                     env.script_execution_disabled = script_execution_disabled;
-                    env.response_content_security_policies =
+                    env.document_policy_container
+                        .response_content_security_policies =
                         policy.into_iter().map(str::to_owned).collect();
                 });
                 let page_vm =
@@ -513,7 +515,8 @@ mod tests {
                 [("sandbox", false), ("sandbox allow-scripts", true)]
             {
                 let env = default_test_page_vm_env_config_with(|env| {
-                    env.response_content_security_policies = vec![policy.to_owned()];
+                    env.document_policy_container
+                        .response_content_security_policies = vec![policy.to_owned()];
                 });
                 let page_vm = parse_phase_one_html_into_page_vm_for_test_with_env(
                     "<!doctype html><script>document.documentElement.setAttribute('data-script-ran', 'yes')</script>",
@@ -2045,15 +2048,7 @@ document.body.setAttribute('data-error-state', [
             runtime_isolated_worlds: vec![],
             permission_overrides: vec![],
             extra_http_headers: vec![],
-            document_content_security_policies: Vec::new(),
-            response_content_security_policies: Vec::new(),
-            response_content_security_report_only_policies: Vec::new(),
-            response_referrer_policy: None,
-            content_security_reporting_endpoints:
-                crate::content_security_policy::ContentSecurityPolicyReportingEndpoints::default(),
-            cross_origin_embedder_policy: Default::default(),
-            document_isolation_policy: Default::default(),
-            cross_origin_isolated: false,
+            document_policy_container: Default::default(),
             document_default_language: None,
             document_last_modified: None,
             locale_override: None,
@@ -5269,7 +5264,9 @@ queueMicrotask(() => window.__mainParserClassicCheckpointEvents.push('script-mic
             let parser_dom_host = state.parser_session.stream_handle().borrow_mut().take_parser_stream_dom_host();
             let local_executor = JsLocalExecutor::new();
             let env = default_test_page_vm_env_config_with(|env| {
-                env.response_content_security_policies = vec!["script-src 'none'".to_owned()];
+                env.document_policy_container
+                    .response_content_security_policies =
+                    vec!["script-src 'none'".to_owned()];
             });
             let mut page_vm = PageVm::new(
                 PageId::new_for_testing(1),
@@ -5361,7 +5358,8 @@ queueMicrotask(() => window.__mainParserClassicCheckpointEvents.push('script-mic
 
         runtime.block_on(tokio::task::LocalSet::new().run_until(async move {
             let env = default_test_page_vm_env_config_with(|env| {
-                env.response_content_security_policies =
+                env.document_policy_container
+                    .response_content_security_policies =
                     vec!["script-src 'nonce-outer'".to_owned()];
             });
             let mut page_vm = parse_phase_one_html_into_page_vm_for_test_with_env(
@@ -5772,7 +5770,7 @@ globalThis.__outerDocumentWriteScriptContinued = true;
             local_executor,
             &loader,
             &PageVmEnvConfig {
-            web_storage: crate::RendererWebStorageHandles::ephemeral(),
+                web_storage: crate::RendererWebStorageHandles::ephemeral(),
                 root_frame_id: None,
                 main_document_commit: None,
                 top_level_storage_key: None,
@@ -5782,14 +5780,7 @@ globalThis.__outerDocumentWriteScriptContinued = true;
                 runtime_isolated_worlds: vec![],
                 permission_overrides: vec![],
                 extra_http_headers: vec![],
-                document_content_security_policies: Vec::new(),
-                response_content_security_policies: Vec::new(),
-                response_content_security_report_only_policies: Vec::new(),
-                response_referrer_policy: None,
-                    content_security_reporting_endpoints: crate::content_security_policy::ContentSecurityPolicyReportingEndpoints::default(),
-                cross_origin_embedder_policy: Default::default(),
-                document_isolation_policy: Default::default(),
-                cross_origin_isolated: false,
+                document_policy_container: Default::default(),
                 document_default_language: None,
                 document_last_modified: None,
                 locale_override: None,
@@ -5803,13 +5794,13 @@ globalThis.__outerDocumentWriteScriptContinued = true;
                 network_offline: false,
                 blocked_url_patterns: Vec::new(),
                 indexed_db_manager: None,
-            storage_bucket_store: None,
+                storage_bucket_store: None,
                 fetch_subresource_interception_enabled: false,
                 fetch_subresource_interception_resource_type: None,
                 layout_policy: moli_page_types::LayoutPolicy::default(),
                 wpt_extensions_enabled: false,
                 navigation_bootstrap_entry: None,
-            reserved_service_worker_client_id: None,
+                reserved_service_worker_client_id: None,
             },
             PageVmRuntimeHooks::standalone_without_owner_reservation_for_test(),
             crate::dom::native::DomHost::from_dom(NativeDom::new(
@@ -14193,14 +14184,7 @@ document.body.setAttribute('data-result', [
                     runtime_isolated_worlds: vec![],
                     permission_overrides: vec![],
                     extra_http_headers: vec![],
-                    document_content_security_policies: Vec::new(),
-                    response_content_security_policies: Vec::new(),
-                    response_content_security_report_only_policies: Vec::new(),
-                    response_referrer_policy: None,
-                    content_security_reporting_endpoints: crate::content_security_policy::ContentSecurityPolicyReportingEndpoints::default(),
-                cross_origin_embedder_policy: Default::default(),
-                document_isolation_policy: Default::default(),
-                cross_origin_isolated: false,
+                    document_policy_container: Default::default(),
                     document_default_language: None,
                     document_last_modified: None,
                     locale_override: None,
@@ -14380,14 +14364,7 @@ document.body.setAttribute('data-result', [
                     runtime_isolated_worlds: vec![],
                     permission_overrides: vec![],
                     extra_http_headers: vec![],
-                    document_content_security_policies: Vec::new(),
-                    response_content_security_policies: Vec::new(),
-                    response_content_security_report_only_policies: Vec::new(),
-                    response_referrer_policy: None,
-                    content_security_reporting_endpoints: crate::content_security_policy::ContentSecurityPolicyReportingEndpoints::default(),
-                cross_origin_embedder_policy: Default::default(),
-                document_isolation_policy: Default::default(),
-                cross_origin_isolated: false,
+                    document_policy_container: Default::default(),
                     document_default_language: None,
                     document_last_modified: None,
                     locale_override: None,
@@ -14616,14 +14593,7 @@ document.body.setAttribute('data-result', [
                     runtime_isolated_worlds: vec![],
                     permission_overrides: vec![],
                     extra_http_headers: vec![],
-                    document_content_security_policies: Vec::new(),
-                    response_content_security_policies: Vec::new(),
-                    response_content_security_report_only_policies: Vec::new(),
-                    response_referrer_policy: None,
-                    content_security_reporting_endpoints: crate::content_security_policy::ContentSecurityPolicyReportingEndpoints::default(),
-                cross_origin_embedder_policy: Default::default(),
-                document_isolation_policy: Default::default(),
-                cross_origin_isolated: false,
+                    document_policy_container: Default::default(),
                     document_default_language: None,
                     document_last_modified: None,
                     locale_override: None,
@@ -16621,14 +16591,7 @@ document.body.setAttribute("data-range", [
                     runtime_isolated_worlds: vec![],
                     permission_overrides: vec![],
                     extra_http_headers: vec![],
-                    document_content_security_policies: Vec::new(),
-                    response_content_security_policies: Vec::new(),
-                    response_content_security_report_only_policies: Vec::new(),
-                    response_referrer_policy: None,
-                    content_security_reporting_endpoints: crate::content_security_policy::ContentSecurityPolicyReportingEndpoints::default(),
-                cross_origin_embedder_policy: Default::default(),
-                document_isolation_policy: Default::default(),
-                cross_origin_isolated: false,
+                    document_policy_container: Default::default(),
                     document_default_language: None,
                     document_last_modified: None,
                     locale_override: None,
@@ -16756,14 +16719,7 @@ document.body.setAttribute("data-range", [
                     runtime_isolated_worlds: vec![],
                     permission_overrides: vec![],
                     extra_http_headers: vec![],
-                    document_content_security_policies: Vec::new(),
-                    response_content_security_policies: Vec::new(),
-                    response_content_security_report_only_policies: Vec::new(),
-                    response_referrer_policy: None,
-                    content_security_reporting_endpoints: crate::content_security_policy::ContentSecurityPolicyReportingEndpoints::default(),
-                cross_origin_embedder_policy: Default::default(),
-                document_isolation_policy: Default::default(),
-                cross_origin_isolated: false,
+                    document_policy_container: Default::default(),
                     document_default_language: None,
                     document_last_modified: None,
                     locale_override: None,
@@ -16901,14 +16857,7 @@ document.body.setAttribute("data-range", [
                     runtime_isolated_worlds: vec![],
                     permission_overrides: vec![],
                     extra_http_headers: vec![],
-                    document_content_security_policies: Vec::new(),
-                    response_content_security_policies: Vec::new(),
-                    response_content_security_report_only_policies: Vec::new(),
-                    response_referrer_policy: None,
-                    content_security_reporting_endpoints: crate::content_security_policy::ContentSecurityPolicyReportingEndpoints::default(),
-                cross_origin_embedder_policy: Default::default(),
-                document_isolation_policy: Default::default(),
-                cross_origin_isolated: false,
+                    document_policy_container: Default::default(),
                     document_default_language: None,
                     document_last_modified: None,
                     locale_override: None,
@@ -17081,14 +17030,7 @@ document.body.setAttribute("data-range", [
                     runtime_isolated_worlds: vec![],
                     permission_overrides: vec![],
                     extra_http_headers: vec![],
-                    document_content_security_policies: Vec::new(),
-                    response_content_security_policies: Vec::new(),
-                    response_content_security_report_only_policies: Vec::new(),
-                    response_referrer_policy: None,
-                    content_security_reporting_endpoints: crate::content_security_policy::ContentSecurityPolicyReportingEndpoints::default(),
-                cross_origin_embedder_policy: Default::default(),
-                document_isolation_policy: Default::default(),
-                cross_origin_isolated: false,
+                    document_policy_container: Default::default(),
                     document_default_language: None,
                     document_last_modified: None,
                     locale_override: None,
@@ -17411,14 +17353,7 @@ document.body.setAttribute("data-range", [
                     runtime_isolated_worlds: vec![],
                     permission_overrides: vec![],
                     extra_http_headers: vec![],
-                    document_content_security_policies: Vec::new(),
-                    response_content_security_policies: Vec::new(),
-                    response_content_security_report_only_policies: Vec::new(),
-                    response_referrer_policy: None,
-                    content_security_reporting_endpoints: crate::content_security_policy::ContentSecurityPolicyReportingEndpoints::default(),
-                cross_origin_embedder_policy: Default::default(),
-                document_isolation_policy: Default::default(),
-                cross_origin_isolated: false,
+                    document_policy_container: Default::default(),
                     document_default_language: None,
                     document_last_modified: None,
                     locale_override: None,
@@ -17588,14 +17523,7 @@ document.body.setAttribute("data-range", [
                     runtime_isolated_worlds: vec![],
                     permission_overrides: vec![],
                     extra_http_headers: vec![],
-                    document_content_security_policies: Vec::new(),
-                    response_content_security_policies: Vec::new(),
-                    response_content_security_report_only_policies: Vec::new(),
-                    response_referrer_policy: None,
-                    content_security_reporting_endpoints: crate::content_security_policy::ContentSecurityPolicyReportingEndpoints::default(),
-                cross_origin_embedder_policy: Default::default(),
-                document_isolation_policy: Default::default(),
-                cross_origin_isolated: false,
+                    document_policy_container: Default::default(),
                     document_default_language: None,
                     document_last_modified: None,
                     locale_override: None,
@@ -17659,7 +17587,8 @@ document.body.setAttribute("data-range", [
         runtime.block_on(tokio::task::LocalSet::new().run_until(async move {
             let _js_runtime = crate::JsRuntime::initialize();
             let final_url = Url::parse("https://example.test/").expect("test url");
-            let loader = ResourceRequestClient::new(&FetchConfig::default()).expect("default loader");
+            let loader =
+                ResourceRequestClient::new(&FetchConfig::default()).expect("default loader");
             let mut state = ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url);
             let parser_dom_host = state
                 .parser_session
@@ -17682,14 +17611,7 @@ document.body.setAttribute("data-range", [
                     runtime_isolated_worlds: vec![],
                     permission_overrides: vec![],
                     extra_http_headers: vec![],
-                    document_content_security_policies: Vec::new(),
-                    response_content_security_policies: Vec::new(),
-                    response_content_security_report_only_policies: Vec::new(),
-                    response_referrer_policy: None,
-                    content_security_reporting_endpoints: crate::content_security_policy::ContentSecurityPolicyReportingEndpoints::default(),
-                    cross_origin_embedder_policy: Default::default(),
-                    document_isolation_policy: Default::default(),
-                    cross_origin_isolated: false,
+                    document_policy_container: Default::default(),
                     document_default_language: None,
                     document_last_modified: None,
                     locale_override: None,
@@ -17757,9 +17679,7 @@ document.body.setAttribute("data-range", [
                 driver
                     .buffered_document_preloads
                     .entries
-                    .contains_key(&classic_preload_key(
-                        "https://example.test/after-pause.js"
-                    )),
+                    .contains_key(&classic_preload_key("https://example.test/after-pause.js")),
                 "a stylesheet parser pause must scan the unconsumed tail for preloadable scripts"
             );
         }));

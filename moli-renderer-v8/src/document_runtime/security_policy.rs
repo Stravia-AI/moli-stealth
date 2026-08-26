@@ -122,12 +122,51 @@ impl DocumentConnectPolicySnapshot {
 }
 
 impl DocumentPolicyContainer {
+    pub(crate) fn from_navigation_response_headers(
+        headers: &[(String, String)],
+        final_url: &Url,
+    ) -> Self {
+        let response_content_security_policies =
+            response_content_security_policies_from_headers(headers);
+        Self {
+            referrer_policy: crate::referrer_policy::response_referrer_policy_from_headers(headers),
+            cross_origin_embedder_policy:
+                crate::cross_origin_isolation::cross_origin_embedder_policy_from_headers(headers),
+            document_isolation_policy:
+                crate::cross_origin_isolation::document_isolation_policy_from_headers(headers),
+            cross_origin_isolated:
+                crate::cross_origin_isolation::response_headers_enable_cross_origin_isolation(
+                    final_url, headers,
+                ),
+            document_content_security_policies: response_content_security_policies.clone(),
+            sandbox: DocumentSandboxPolicy::from_response_content_security_policies(
+                &response_content_security_policies,
+            ),
+            response_content_security_policies,
+            response_content_security_report_only_policies:
+                response_content_security_report_only_policies_from_headers(headers),
+            content_security_reporting_endpoints:
+                crate::content_security_policy::content_security_policy_reporting_endpoints_from_headers(
+                    headers,
+                    final_url,
+                ),
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn clear_content_security_policy_for_bypass(&mut self) {
         self.document_content_security_policies.clear();
         self.response_content_security_policies.clear();
         self.response_content_security_report_only_policies.clear();
         self.content_security_reporting_endpoints = Default::default();
         self.sandbox = DocumentSandboxPolicy::default();
+    }
+
+    pub(crate) fn with_content_security_policy_bypass(mut self, bypass: bool) -> Self {
+        if bypass {
+            self.clear_content_security_policy_for_bypass();
+        }
+        self
     }
 }
 
@@ -411,6 +450,16 @@ impl DocumentRuntime {
         &self.policy_container
     }
 
+    pub(crate) fn set_main_navigation_policy_container(
+        &mut self,
+        mut policy: DocumentPolicyContainer,
+    ) {
+        policy.sandbox = DocumentSandboxPolicy::from_response_content_security_policies(
+            &policy.response_content_security_policies,
+        );
+        self.policy_container = policy;
+    }
+
     pub(crate) fn set_bypass_content_security_policy(&mut self, bypass: bool) {
         self.bypass_content_security_policy = bypass;
     }
@@ -419,16 +468,13 @@ impl DocumentRuntime {
         self.bypass_content_security_policy
     }
 
-    pub(crate) fn set_document_content_security_policies(&mut self, policies: &[String]) {
-        self.policy_container.document_content_security_policies = policies.to_vec();
-    }
-
     pub(crate) fn document_content_security_policies(&self) -> &[String] {
         self.policy_container
             .document_content_security_policies
             .as_slice()
     }
 
+    #[cfg(test)]
     pub(crate) fn set_response_content_security_policies(&mut self, policies: &[String]) {
         self.policy_container.response_content_security_policies = policies.to_vec();
         self.policy_container.sandbox =
@@ -439,6 +485,7 @@ impl DocumentRuntime {
         &self.policy_container.response_content_security_policies
     }
 
+    #[cfg(test)]
     pub(crate) fn set_response_content_security_report_only_policies(
         &mut self,
         policies: &[String],
@@ -447,6 +494,7 @@ impl DocumentRuntime {
             .response_content_security_report_only_policies = policies.to_vec();
     }
 
+    #[cfg(test)]
     pub(crate) fn set_response_referrer_policy(&mut self, policy: Option<String>) {
         self.policy_container.referrer_policy = policy;
     }
@@ -455,34 +503,16 @@ impl DocumentRuntime {
         self.policy_container.referrer_policy.as_deref()
     }
 
-    pub(crate) fn set_cross_origin_embedder_policy(
-        &mut self,
-        policy: crate::cross_origin_isolation::CrossOriginEmbedderPolicy,
-    ) {
-        self.policy_container.cross_origin_embedder_policy = policy;
-    }
-
     pub(crate) fn cross_origin_embedder_policy(
         &self,
     ) -> crate::cross_origin_isolation::CrossOriginEmbedderPolicy {
         self.policy_container.cross_origin_embedder_policy
     }
 
-    pub(crate) fn set_document_isolation_policy(
-        &mut self,
-        policy: crate::cross_origin_isolation::DocumentIsolationPolicy,
-    ) {
-        self.policy_container.document_isolation_policy = policy;
-    }
-
     pub(crate) fn document_isolation_policy(
         &self,
     ) -> crate::cross_origin_isolation::DocumentIsolationPolicy {
         self.policy_container.document_isolation_policy
-    }
-
-    pub(crate) fn set_cross_origin_isolated(&mut self, isolated: bool) {
-        self.policy_container.cross_origin_isolated = isolated;
     }
 
     pub(crate) fn cross_origin_isolated(&self) -> bool {
@@ -511,6 +541,7 @@ impl DocumentRuntime {
             .response_content_security_report_only_policies
     }
 
+    #[cfg(test)]
     pub(crate) fn set_content_security_reporting_endpoints(
         &mut self,
         endpoints: ContentSecurityPolicyReportingEndpoints,
@@ -2992,6 +3023,64 @@ mod tests {
                 ("X-Other".to_owned(), "ignored".to_owned()),
             ]),
             vec!["default-src 'none'"]
+        );
+    }
+
+    #[test]
+    fn navigation_response_headers_build_one_complete_document_policy_container() {
+        let final_url = Url::parse("https://example.test/page").unwrap();
+        let headers = vec![
+            (
+                "Content-Security-Policy".to_owned(),
+                "sandbox allow-scripts; frame-ancestors 'self'".to_owned(),
+            ),
+            (
+                "Content-Security-Policy-Report-Only".to_owned(),
+                "frame-ancestors https://embedder.test; report-to csp".to_owned(),
+            ),
+            ("Referrer-Policy".to_owned(), "no-referrer".to_owned()),
+            (
+                "Reporting-Endpoints".to_owned(),
+                "csp=\"/reports/csp\"".to_owned(),
+            ),
+            (
+                "Cross-Origin-Embedder-Policy".to_owned(),
+                "require-corp".to_owned(),
+            ),
+            (
+                "Cross-Origin-Opener-Policy".to_owned(),
+                "same-origin".to_owned(),
+            ),
+        ];
+
+        let policy =
+            DocumentPolicyContainer::from_navigation_response_headers(&headers, &final_url);
+
+        assert_eq!(
+            policy.document_content_security_policies,
+            policy.response_content_security_policies
+        );
+        assert_eq!(
+            policy.response_content_security_policies,
+            vec!["sandbox allow-scripts; frame-ancestors 'self'"]
+        );
+        assert_eq!(
+            policy.response_content_security_report_only_policies,
+            vec!["frame-ancestors https://embedder.test; report-to csp"]
+        );
+        assert_eq!(policy.referrer_policy.as_deref(), Some("no-referrer"));
+        assert_eq!(
+            policy.cross_origin_embedder_policy,
+            crate::cross_origin_isolation::CrossOriginEmbedderPolicy::RequireCorp
+        );
+        assert!(policy.cross_origin_isolated);
+        assert!(policy.sandbox.forces_opaque_origin);
+        assert!(policy.sandbox.allows_scripts);
+        assert_eq!(
+            policy
+                .content_security_reporting_endpoints
+                .endpoint_for_group("csp"),
+            Some("https://example.test/reports/csp")
         );
     }
 }

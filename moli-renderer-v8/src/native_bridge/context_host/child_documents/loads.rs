@@ -4,24 +4,20 @@ use super::{
     configure_child_document_navigation_request,
     snapshots::{child_document_content_type_for_url, child_document_content_type_from_headers},
 };
+#[cfg(test)]
+use crate::referrer_policy::response_referrer_policy_from_headers;
 use crate::{
     content_security_policy::{
         ContentSecurityPolicyDisposition, ContentSecurityPolicyViolationEventFields,
         content_security_policy_frame_ancestors_violation_with_disposition_and_reporting_endpoints,
-        content_security_policy_reporting_endpoints_from_headers,
         send_content_security_policy_reports,
     },
-    document_runtime::{
-        DocumentPolicyContainer, DocumentSandboxPolicy, DomHandle,
-        response_content_security_policies_from_headers,
-        response_content_security_report_only_policies_from_headers,
-    },
+    document_runtime::{DocumentPolicyContainer, DomHandle},
     document_script_scheduler::FrameDocumentClassicScriptSchedulerWork,
     frame_owner_model::{
         ChildDocumentNavigationFetchTarget, DocumentCreationKind,
         FrameDocumentInteractiveLifecycleAction, FrameRequestKind,
     },
-    referrer_policy::response_referrer_policy_from_headers,
     types::{
         ChildDocumentLoadCompletion, ChildDocumentLoadNetworkAttribution, ChildDocumentLoadOutcome,
         LoadedChildDocument, SubresourceResponseBody,
@@ -776,35 +772,8 @@ fn child_document_load_outcome_from_response(
             decode_html_document_with_fallback(&body_bytes, &head.headers, Some(&fallback));
         (markup, character_set.to_owned())
     };
-    let referrer_policy = response_referrer_policy(&head.headers);
-    let content_security_policies =
-        crate::content_security_policy::content_security_policy_headers(&head.headers);
-    let response_content_security_policies =
-        response_content_security_policies_from_headers(&head.headers);
-    let response_content_security_report_only_policies =
-        response_content_security_report_only_policies_from_headers(&head.headers);
-    let response_content_security_reporting_endpoints =
-        content_security_policy_reporting_endpoints_from_headers(&head.headers, &head.final_url);
-    let policy_container = DocumentPolicyContainer {
-        referrer_policy,
-        cross_origin_embedder_policy:
-            crate::cross_origin_isolation::cross_origin_embedder_policy_from_headers(&head.headers),
-        document_isolation_policy:
-            crate::cross_origin_isolation::document_isolation_policy_from_headers(&head.headers),
-        cross_origin_isolated:
-            crate::cross_origin_isolation::response_headers_enable_cross_origin_isolation(
-                &head.final_url,
-                &head.headers,
-            ),
-        document_content_security_policies: content_security_policies,
-        sandbox: DocumentSandboxPolicy::from_response_content_security_policies(
-            &response_content_security_policies,
-        ),
-        response_content_security_policies,
-        response_content_security_report_only_policies,
-        content_security_reporting_endpoints: response_content_security_reporting_endpoints,
-        ..DocumentPolicyContainer::default()
-    };
+    let policy_container =
+        DocumentPolicyContainer::from_navigation_response_headers(&head.headers, &head.final_url);
     Ok(ChildDocumentLoadOutcome::Loaded(Box::new(
         LoadedChildDocument {
             final_url: head.final_url.clone(),
@@ -827,6 +796,7 @@ fn child_document_load_outcome_from_response(
     )))
 }
 
+#[cfg(test)]
 fn response_referrer_policy(headers: &[(String, String)]) -> Option<String> {
     response_referrer_policy_from_headers(headers)
 }

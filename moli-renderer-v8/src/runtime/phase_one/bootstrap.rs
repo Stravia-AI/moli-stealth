@@ -77,7 +77,9 @@ impl ConcurrentParseTimeRuntime {
         state
             .buffered_document_preloads
             .set_response_csp_requires_parser_admission(
-                !env.response_content_security_policies.is_empty(),
+                !env.document_policy_container
+                    .response_content_security_policies
+                    .is_empty(),
             );
         state.buffered_document_preloads.bind_resource_runtime(
             runtime_hooks.owner_wake(),
@@ -152,7 +154,9 @@ impl ConcurrentParseTimeRuntime {
         state
             .buffered_document_preloads
             .set_response_csp_requires_parser_admission(
-                !env.response_content_security_policies.is_empty(),
+                !env.document_policy_container
+                    .response_content_security_policies
+                    .is_empty(),
             );
         state.buffered_document_preloads.bind_resource_runtime(
             runtime_hooks.owner_wake(),

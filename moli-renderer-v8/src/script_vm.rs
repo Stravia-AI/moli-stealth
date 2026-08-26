@@ -4815,14 +4815,12 @@ impl ScriptVm {
             .set_extra_http_headers(headers);
     }
 
-    pub(super) fn set_document_content_security_policies(&mut self, policies: &[String]) {
-        self._context_host
-            .borrow_mut()
-            .set_document_content_security_policies(policies);
-    }
-
-    pub(super) fn set_cross_origin_isolated(&mut self, isolated: bool) {
-        self.document_runtime.set_cross_origin_isolated(isolated);
+    pub(super) fn set_main_navigation_policy_container(
+        &mut self,
+        policy: crate::document_runtime::DocumentPolicyContainer,
+    ) {
+        self.document_runtime
+            .set_main_navigation_policy_container(policy);
     }
 
     pub(super) fn document_content_security_policies(&self) -> Vec<String> {

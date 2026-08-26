@@ -352,14 +352,20 @@ fn page_vm_env_for_navigation_bootstrap(
     reserved_service_worker_client_id: Option<crate::service_worker_runtime::ServiceWorkerClientId>,
 ) -> PageVmEnvConfig {
     let mut env = env.clone();
-    env.response_content_security_policies = Vec::new();
-    env.response_content_security_report_only_policies = Vec::new();
-    env.response_referrer_policy = None;
+    env.document_policy_container
+        .response_content_security_policies
+        .clear();
+    env.document_policy_container
+        .response_content_security_report_only_policies
+        .clear();
+    env.document_policy_container.referrer_policy = None;
     env.document_last_modified = None;
-    env.content_security_reporting_endpoints =
+    env.document_policy_container
+        .content_security_reporting_endpoints =
         crate::content_security_policy::ContentSecurityPolicyReportingEndpoints::default();
-    env.cross_origin_embedder_policy = Default::default();
-    env.cross_origin_isolated = false;
+    env.document_policy_container.cross_origin_embedder_policy = Default::default();
+    env.document_policy_container.cross_origin_isolated = false;
+    env.document_policy_container.sandbox = Default::default();
     env.top_level_storage_key = None;
     env.navigation_bootstrap_entry = navigation_bootstrap_entry;
     env.reserved_service_worker_client_id = reserved_service_worker_client_id;
@@ -1171,15 +1177,10 @@ impl PageVm {
             runtime_isolated_worlds: self.runtime_isolated_worlds.clone(),
             permission_overrides: self.permission_overrides.clone(),
             extra_http_headers: self.extra_http_headers.clone(),
-            document_content_security_policies: self.vm().document_content_security_policies(),
-            response_content_security_policies: Vec::new(),
-            response_content_security_report_only_policies: Vec::new(),
-            response_referrer_policy: None,
-            content_security_reporting_endpoints:
-                crate::content_security_policy::ContentSecurityPolicyReportingEndpoints::default(),
-            cross_origin_embedder_policy: Default::default(),
-            document_isolation_policy: Default::default(),
-            cross_origin_isolated: false,
+            document_policy_container: crate::document_runtime::DocumentPolicyContainer {
+                document_content_security_policies: self.vm().document_content_security_policies(),
+                ..Default::default()
+            },
             document_default_language: None,
             document_last_modified: None,
             locale_override: self.locale_override.clone(),

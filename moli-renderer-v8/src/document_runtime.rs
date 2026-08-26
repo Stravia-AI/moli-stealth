@@ -86,8 +86,6 @@ pub(crate) use security_policy::{
     DocumentConnectPolicySnapshot, DocumentContentSecurityPolicyCheck,
     DocumentContentSecurityPolicyViolation, DocumentSubresourceCspKind,
     create_content_security_policy_violation_event, document_content_security_policy_error_message,
-    response_content_security_policies_from_headers,
-    response_content_security_report_only_policies_from_headers,
 };
 pub(crate) use stylesheet_runtime::attribute_reprocesses_connected_stylesheet;
 #[cfg(test)]

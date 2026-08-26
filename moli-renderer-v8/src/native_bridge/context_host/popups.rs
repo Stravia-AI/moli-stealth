@@ -2,10 +2,7 @@ use super::{
     JsContextHost, NavigationHistoryEntrySeed, child_frame_runtime::WINDOW_EVENT_HANDLER_PROPERTIES,
 };
 use crate::{
-    content_security_policy::{
-        content_security_policy_forces_opaque_origin,
-        content_security_policy_reporting_endpoints_from_headers,
-    },
+    content_security_policy::content_security_policy_forces_opaque_origin,
     context_bootstrap::{
         SharedWebStorageStore, WINDOW_NAME_SLOT, apply_local_window_location_navigation,
         deep_clone_shared_web_storage_store, dispatch_simple_event_target_event,
@@ -16,12 +13,8 @@ use crate::{
         sync_window_location_history_navigation_runtime_surface,
         sync_window_location_runtime_state, web_storage_area_key_for_storage_key,
     },
+    document_runtime::create_content_security_policy_violation_event,
     document_runtime::{DocumentPolicyContainer, DocumentSandboxPolicy, DomHandle},
-    document_runtime::{
-        create_content_security_policy_violation_event,
-        response_content_security_policies_from_headers,
-        response_content_security_report_only_policies_from_headers,
-    },
     host::HostTimerOwner,
     native_bridge::{
         ComputedStyleDescriptor, ComputedStyleTargetKey, OwnerDispatchScope, WindowTaskTarget,
@@ -39,7 +32,6 @@ use crate::{
             set_object_value,
         },
     },
-    referrer_policy::response_referrer_policy_from_headers,
     runtime::RendererPendingPopupActivation,
     types::{
         LoadedChildDocument, LoadedChildScriptSource, PopupClassicScriptLoadCompletion,
@@ -2226,42 +2218,10 @@ impl JsContextHost {
                     &head.headers,
                     Some(&fallback),
                 );
-                let content_security_policies =
-                    crate::content_security_policy::content_security_policy_headers(&head.headers);
-                let response_content_security_policies =
-                    response_content_security_policies_from_headers(&head.headers);
-                let response_content_security_report_only_policies =
-                    response_content_security_report_only_policies_from_headers(&head.headers);
-                let response_content_security_reporting_endpoints =
-                    content_security_policy_reporting_endpoints_from_headers(
-                        &head.headers,
-                        &head.final_url,
-                    );
-                let policy_container = DocumentPolicyContainer {
-                    referrer_policy: response_referrer_policy_from_headers(&head.headers),
-                    cross_origin_embedder_policy:
-                        crate::cross_origin_isolation::cross_origin_embedder_policy_from_headers(
-                            &head.headers,
-                        ),
-                    document_isolation_policy:
-                        crate::cross_origin_isolation::document_isolation_policy_from_headers(
-                            &head.headers,
-                        ),
-                    cross_origin_isolated:
-                        crate::cross_origin_isolation::response_headers_enable_cross_origin_isolation(
-                            &head.final_url,
-                            &head.headers,
-                        ),
-                    document_content_security_policies: content_security_policies,
-                    sandbox: DocumentSandboxPolicy::from_response_content_security_policies(
-                        &response_content_security_policies,
-                    ),
-                    response_content_security_policies,
-                    response_content_security_report_only_policies,
-                    content_security_reporting_endpoints:
-                        response_content_security_reporting_endpoints,
-                    ..DocumentPolicyContainer::default()
-                };
+                let policy_container = DocumentPolicyContainer::from_navigation_response_headers(
+                    &head.headers,
+                    &head.final_url,
+                );
                 Ok(PopupDocumentLoadOutcome::Loaded(Box::new(
                     LoadedChildDocument {
                         final_url: head.final_url,

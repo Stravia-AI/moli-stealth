@@ -74,15 +74,11 @@ use crate::devtools::ingress::{
     io::RendererInspectorIoOwnerWake,
     main::{RendererInspectorMainFirstDispatchGuard, RendererInspectorMainOwnerWake},
 };
-use crate::document_runtime::{
-    response_content_security_policies_from_headers,
-    response_content_security_report_only_policies_from_headers,
-};
+use crate::document_runtime::DocumentPolicyContainer;
 use crate::page_task_queue::{
     PostParsePageOwnedWork, RendererOwnerWake, RendererOwnerWakeSender, RendererOwnerWakeSource,
     RendererTopLevelNavigationHandoff,
 };
-use crate::referrer_policy::response_referrer_policy_from_headers;
 use crate::render_runtime::{RenderRuntimeEnvelope, RenderRuntimeHandle, RenderRuntimeOwner};
 use crate::script_vm::{
     PendingRuntimeEvaluateCall, RendererDocumentIsolateBootstrap, dispatch_inspector_io_owner_wake,
@@ -6762,43 +6758,11 @@ impl RendererOwnerHandle {
             ))
             .into();
         }
-        let document_content_security_policies = if bypass_content_security_policy {
-            Vec::new()
-        } else {
-            crate::content_security_policy::content_security_policy_headers(&response_headers)
-        };
-        let response_content_security_policies = if bypass_content_security_policy {
-            Vec::new()
-        } else {
-            response_content_security_policies_from_headers(&response_headers)
-        };
-        let response_content_security_report_only_policies = if bypass_content_security_policy {
-            Vec::new()
-        } else {
-            response_content_security_report_only_policies_from_headers(&response_headers)
-        };
-        let response_referrer_policy = response_referrer_policy_from_headers(&response_headers);
-        let content_security_reporting_endpoints = if bypass_content_security_policy {
-            Default::default()
-        } else {
-            crate::content_security_policy::content_security_policy_reporting_endpoints_from_headers(
-                &response_headers,
-                &final_url,
-            )
-        };
-        let cross_origin_embedder_policy =
-            crate::cross_origin_isolation::cross_origin_embedder_policy_from_headers(
-                &response_headers,
-            );
-        let document_isolation_policy =
-            crate::cross_origin_isolation::document_isolation_policy_from_headers(
-                &response_headers,
-            );
-        let cross_origin_isolated =
-            crate::cross_origin_isolation::response_headers_enable_cross_origin_isolation(
-                &final_url,
-                &response_headers,
-            );
+        let document_policy_container = DocumentPolicyContainer::from_navigation_response_headers(
+            &response_headers,
+            &final_url,
+        )
+        .with_content_security_policy_bypass(bypass_content_security_policy);
         let document_default_language =
             crate::document_language::document_default_language_from_headers(&response_headers);
         let document_last_modified =
@@ -6826,14 +6790,7 @@ impl RendererOwnerHandle {
                     runtime_isolated_worlds,
                     permission_overrides,
                     extra_http_headers,
-                    document_content_security_policies,
-                    response_content_security_policies,
-                    response_content_security_report_only_policies,
-                    response_referrer_policy,
-                    content_security_reporting_endpoints,
-                    cross_origin_embedder_policy,
-                    document_isolation_policy,
-                    cross_origin_isolated,
+                    document_policy_container,
                     document_default_language,
                     document_last_modified,
                     locale_override,
@@ -7103,43 +7060,11 @@ impl RendererOwnerHandle {
             network_offline,
             &blocked_url_patterns,
         );
-        let document_content_security_policies = if bypass_content_security_policy {
-            Vec::new()
-        } else {
-            crate::content_security_policy::content_security_policy_headers(&response_headers)
-        };
-        let response_content_security_policies = if bypass_content_security_policy {
-            Vec::new()
-        } else {
-            response_content_security_policies_from_headers(&response_headers)
-        };
-        let response_content_security_report_only_policies = if bypass_content_security_policy {
-            Vec::new()
-        } else {
-            response_content_security_report_only_policies_from_headers(&response_headers)
-        };
-        let response_referrer_policy = response_referrer_policy_from_headers(&response_headers);
-        let content_security_reporting_endpoints = if bypass_content_security_policy {
-            Default::default()
-        } else {
-            crate::content_security_policy::content_security_policy_reporting_endpoints_from_headers(
-                &response_headers,
-                &final_url,
-            )
-        };
-        let cross_origin_embedder_policy =
-            crate::cross_origin_isolation::cross_origin_embedder_policy_from_headers(
-                &response_headers,
-            );
-        let document_isolation_policy =
-            crate::cross_origin_isolation::document_isolation_policy_from_headers(
-                &response_headers,
-            );
-        let cross_origin_isolated =
-            crate::cross_origin_isolation::response_headers_enable_cross_origin_isolation(
-                &final_url,
-                &response_headers,
-            );
+        let document_policy_container = DocumentPolicyContainer::from_navigation_response_headers(
+            &response_headers,
+            &final_url,
+        )
+        .with_content_security_policy_bypass(bypass_content_security_policy);
         let document_default_language =
             crate::document_language::document_default_language_from_headers(&response_headers);
         let document_last_modified =
@@ -7164,14 +7089,7 @@ impl RendererOwnerHandle {
                     runtime_isolated_worlds,
                     permission_overrides,
                     extra_http_headers,
-                    document_content_security_policies,
-                    response_content_security_policies,
-                    response_content_security_report_only_policies,
-                    response_referrer_policy,
-                    content_security_reporting_endpoints,
-                    cross_origin_embedder_policy,
-                    document_isolation_policy,
-                    cross_origin_isolated,
+                    document_policy_container,
                     document_default_language,
                     document_last_modified,
                     locale_override,

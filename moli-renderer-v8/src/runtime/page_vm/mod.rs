@@ -1073,16 +1073,7 @@ pub(crate) struct PageVmEnvConfig {
     pub(crate) runtime_isolated_worlds: Vec<crate::protocol_types::RuntimeIsolatedWorldDefinition>,
     pub(crate) permission_overrides: Vec<crate::protocol_types::PermissionOverrideRegistration>,
     pub(crate) extra_http_headers: Vec<(String, String)>,
-    pub(crate) document_content_security_policies: Vec<String>,
-    pub(crate) response_content_security_policies: Vec<String>,
-    pub(crate) response_content_security_report_only_policies: Vec<String>,
-    pub(crate) response_referrer_policy: Option<String>,
-    pub(crate) content_security_reporting_endpoints:
-        crate::content_security_policy::ContentSecurityPolicyReportingEndpoints,
-    pub(crate) cross_origin_embedder_policy:
-        crate::cross_origin_isolation::CrossOriginEmbedderPolicy,
-    pub(crate) document_isolation_policy: crate::cross_origin_isolation::DocumentIsolationPolicy,
-    pub(crate) cross_origin_isolated: bool,
+    pub(crate) document_policy_container: crate::document_runtime::DocumentPolicyContainer,
     pub(crate) document_default_language: Option<String>,
     pub(crate) document_last_modified: Option<f64>,
     pub(crate) locale_override: Option<String>,
@@ -1104,6 +1095,24 @@ pub(crate) struct PageVmEnvConfig {
     pub(crate) navigation_bootstrap_entry: Option<crate::native_bridge::NavigationHistoryEntrySeed>,
     pub(crate) reserved_service_worker_client_id:
         Option<crate::service_worker_runtime::ServiceWorkerClientId>,
+}
+
+impl PageVmEnvConfig {
+    pub(crate) fn apply_navigation_response_headers(
+        &mut self,
+        final_url: &Url,
+        headers: &[(String, String)],
+    ) {
+        self.document_policy_container =
+            crate::document_runtime::DocumentPolicyContainer::from_navigation_response_headers(
+                headers, final_url,
+            )
+            .with_content_security_policy_bypass(self.bypass_content_security_policy);
+        self.document_default_language =
+            crate::document_language::document_default_language_from_headers(headers);
+        self.document_last_modified =
+            crate::document_last_modified::document_last_modified_from_headers(headers);
+    }
 }
 
 /// Runtime wiring for a live `PageVm`.
@@ -4315,30 +4324,7 @@ impl PageVm {
             .set_extra_http_headers(&env.extra_http_headers);
         page_vm
             .vm_mut()
-            .set_document_content_security_policies(&env.document_content_security_policies);
-        page_vm
-            .vm_mut()
-            .set_response_content_security_policies(&env.response_content_security_policies);
-        page_vm
-            .vm_mut()
-            .set_response_content_security_report_only_policies(
-                &env.response_content_security_report_only_policies,
-            );
-        page_vm
-            .vm_mut()
-            .set_response_referrer_policy(env.response_referrer_policy.clone());
-        page_vm.vm_mut().set_content_security_reporting_endpoints(
-            env.content_security_reporting_endpoints.clone(),
-        );
-        page_vm
-            .vm_mut()
-            .set_cross_origin_embedder_policy(env.cross_origin_embedder_policy);
-        page_vm
-            .vm_mut()
-            .set_document_isolation_policy(env.document_isolation_policy);
-        page_vm
-            .vm_mut()
-            .set_cross_origin_isolated(env.cross_origin_isolated);
+            .set_main_navigation_policy_container(env.document_policy_container.clone());
         page_vm
             .vm_mut()
             .document_runtime

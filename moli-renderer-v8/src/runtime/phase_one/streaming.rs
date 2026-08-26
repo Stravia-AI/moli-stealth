@@ -3,11 +3,6 @@ use super::super::script_preloads::{ServiceWorkerScriptPreloadContext, admit_pen
 use super::parser_blocking_pending::main_parser_blocking_classic_script_item;
 use super::scaffold::continue_phase_one_until_streaming_boundary_on_execution_context;
 use super::*;
-use crate::document_runtime::{
-    response_content_security_policies_from_headers,
-    response_content_security_report_only_policies_from_headers,
-};
-use crate::referrer_policy::response_referrer_policy_from_headers;
 use moli_encoding::HtmlDocumentStreamingDecoder;
 use moli_web_mime::response_headers_indicate_attachment_download;
 use tokio::sync::{mpsc, oneshot};
@@ -95,50 +90,9 @@ impl ConcurrentParseTimeRuntime {
         debug_assert!(!response_headers_indicate_download(&response_headers));
         let response_final_url = response.final_url.clone();
         let mut env = env.clone();
-        env.document_content_security_policies = if env.bypass_content_security_policy {
-            Vec::new()
-        } else {
-            crate::content_security_policy::content_security_policy_headers(&response_headers)
-        };
+        env.apply_navigation_response_headers(&response_final_url, &response_headers);
 
         let mut body_source = RawDocumentBodySource::fetch_response(response);
-        let mut env = env.clone();
-        env.response_content_security_policies = if env.bypass_content_security_policy {
-            Vec::new()
-        } else {
-            response_content_security_policies_from_headers(&response_headers)
-        };
-        env.response_content_security_report_only_policies = if env.bypass_content_security_policy {
-            Vec::new()
-        } else {
-            response_content_security_report_only_policies_from_headers(&response_headers)
-        };
-        env.response_referrer_policy = response_referrer_policy_from_headers(&response_headers);
-        env.document_default_language =
-            crate::document_language::document_default_language_from_headers(&response_headers);
-        env.document_last_modified =
-            crate::document_last_modified::document_last_modified_from_headers(&response_headers);
-        env.content_security_reporting_endpoints = if env.bypass_content_security_policy {
-            Default::default()
-        } else {
-            crate::content_security_policy::content_security_policy_reporting_endpoints_from_headers(
-                &response_headers,
-                &response_final_url,
-            )
-        };
-        env.cross_origin_embedder_policy =
-            crate::cross_origin_isolation::cross_origin_embedder_policy_from_headers(
-                &response_headers,
-            );
-        env.document_isolation_policy =
-            crate::cross_origin_isolation::document_isolation_policy_from_headers(
-                &response_headers,
-            );
-        env.cross_origin_isolated =
-            crate::cross_origin_isolation::response_headers_enable_cross_origin_isolation(
-                &response_final_url,
-                &response_headers,
-            );
         let mut state = ParseTimeDriverState::new_with_scripting_enabled(
             response_final_url,
             main_document_parser_scripting_enabled(&env),
@@ -151,7 +105,9 @@ impl ConcurrentParseTimeRuntime {
         state
             .buffered_document_preloads
             .set_response_csp_requires_parser_admission(
-                !env.response_content_security_policies.is_empty(),
+                !env.document_policy_container
+                    .response_content_security_policies
+                    .is_empty(),
             );
         state.buffered_document_preloads.bind_resource_runtime(
             runtime_hooks.owner_wake(),
@@ -342,50 +298,9 @@ impl ConcurrentParseTimeRuntime {
             None => runtime_hooks,
         };
         let mut env = env.clone();
-        env.document_content_security_policies = if env.bypass_content_security_policy {
-            Vec::new()
-        } else {
-            crate::content_security_policy::content_security_policy_headers(&response_headers)
-        };
+        env.apply_navigation_response_headers(&final_url, &response_headers);
 
         let mut body_source = RawDocumentBodySource::External(raw_body);
-        let mut env = env.clone();
-        env.response_content_security_policies = if env.bypass_content_security_policy {
-            Vec::new()
-        } else {
-            response_content_security_policies_from_headers(&response_headers)
-        };
-        env.response_content_security_report_only_policies = if env.bypass_content_security_policy {
-            Vec::new()
-        } else {
-            response_content_security_report_only_policies_from_headers(&response_headers)
-        };
-        env.response_referrer_policy = response_referrer_policy_from_headers(&response_headers);
-        env.document_default_language =
-            crate::document_language::document_default_language_from_headers(&response_headers);
-        env.document_last_modified =
-            crate::document_last_modified::document_last_modified_from_headers(&response_headers);
-        env.content_security_reporting_endpoints = if env.bypass_content_security_policy {
-            Default::default()
-        } else {
-            crate::content_security_policy::content_security_policy_reporting_endpoints_from_headers(
-                &response_headers,
-                &final_url,
-            )
-        };
-        env.cross_origin_embedder_policy =
-            crate::cross_origin_isolation::cross_origin_embedder_policy_from_headers(
-                &response_headers,
-            );
-        env.document_isolation_policy =
-            crate::cross_origin_isolation::document_isolation_policy_from_headers(
-                &response_headers,
-            );
-        env.cross_origin_isolated =
-            crate::cross_origin_isolation::response_headers_enable_cross_origin_isolation(
-                &final_url,
-                &response_headers,
-            );
         if response_headers_indicate_xml_document(&response_headers) {
             let body = collect_streaming_raw_body(&mut body_source).await?;
             let source = String::from_utf8_lossy(&body).into_owned();
@@ -424,7 +339,9 @@ impl ConcurrentParseTimeRuntime {
         state
             .buffered_document_preloads
             .set_response_csp_requires_parser_admission(
-                !env.response_content_security_policies.is_empty(),
+                !env.document_policy_container
+                    .response_content_security_policies
+                    .is_empty(),
             );
         state.buffered_document_preloads.bind_resource_runtime(
             runtime_hooks.owner_wake(),
@@ -1014,15 +931,7 @@ mod tests {
             runtime_isolated_worlds: vec![],
             permission_overrides: vec![],
             extra_http_headers: vec![],
-            document_content_security_policies: Vec::new(),
-            response_content_security_policies: Vec::new(),
-            response_content_security_report_only_policies: Vec::new(),
-            response_referrer_policy: None,
-            content_security_reporting_endpoints:
-                crate::content_security_policy::ContentSecurityPolicyReportingEndpoints::default(),
-            cross_origin_embedder_policy: Default::default(),
-            document_isolation_policy: Default::default(),
-            cross_origin_isolated: false,
+            document_policy_container: Default::default(),
             document_default_language: None,
             document_last_modified: None,
             locale_override: None,
