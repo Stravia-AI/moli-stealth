@@ -3,6 +3,7 @@
 pub struct ResponseContentType {
     mime_type: String,
     parameters: Vec<(String, String)>,
+    charset: Option<String>,
 }
 
 impl ResponseContentType {
@@ -24,9 +25,10 @@ impl ResponseContentType {
             .map(|(_, value)| value.as_str())
     }
 
-    /// The first `charset` value, with HTTP linear whitespace trimmed.
+    /// The first `charset` value, with HTTP linear whitespace trimmed and
+    /// ASCII letters lowercased to match Chromium's response metadata.
     pub fn charset(&self) -> Option<&str> {
-        self.parameter("charset").map(trim_http_lws)
+        self.charset.as_deref()
     }
 
     /// The first `boundary` value, with HTTP linear whitespace trimmed.
@@ -97,9 +99,15 @@ pub fn parse_response_content_type(input: &str) -> Option<ResponseContentType> {
         parameters.push((name, value));
     }
 
+    let charset = parameters
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("charset"))
+        .map(|(_, value)| trim_http_lws(value).to_ascii_lowercase());
+
     Some(ResponseContentType {
         mime_type,
         parameters,
+        charset,
     })
 }
 

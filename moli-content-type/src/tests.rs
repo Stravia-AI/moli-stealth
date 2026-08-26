@@ -152,6 +152,14 @@ fn response_parser_http_lws_is_only_space_and_tab() {
 }
 
 #[test]
+fn response_parser_ascii_lowercases_charset_without_changing_raw_parameters() {
+    let parsed = parse_response_content_type("text/html; charset=\tX-\u{dc}TF-A\t").unwrap();
+
+    assert_eq!(parsed.charset(), Some("x-\u{dc}tf-a"));
+    assert_eq!(parsed.parameter("charset"), Some("X-\u{dc}TF-A"));
+}
+
+#[test]
 fn response_parser_has_a_distinct_network_level_validity_boundary() {
     assert!(parse_response_content_type("garbage; charset=utf-8").is_none());
     assert!(parse_response_content_type("*/*").is_none());
@@ -172,7 +180,7 @@ fn response_parser_matches_chromium_http_util_regression_matrix() {
     for (input, mime_type, charset) in [
         ("text/html", Some("text/html"), None),
         ("text/html;", Some("text/html"), None),
-        ("text/html; charset=utf-8", Some("text/html"), Some("utf-8")),
+        ("text/html; charset=UTF-8", Some("text/html"), Some("utf-8")),
         ("text/html; charset =utf-8", Some("text/html"), None),
         (
             "text/html; charset= utf-8",
