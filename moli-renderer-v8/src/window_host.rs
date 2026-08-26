@@ -883,11 +883,13 @@ pub(crate) fn window_post_message_callback<'s>(
         );
         return;
     }
+    // Argument conversion and structured cloning can synchronously run author
+    // code, so host references on either side of preparation must be short.
     if let Some((target_frame, frame, target_top)) =
         crate::native_bridge::cross_origin_remote_frame_window_target(scope, args.this())
     {
-        let source_host = unsafe { &mut *ambient_host_ptr };
-        let Some(source) = source_host.remote_window_proxy_source(scope) else {
+        let source = unsafe { &*ambient_host_ptr }.remote_window_proxy_source(scope);
+        let Some(source) = source else {
             rv.set_undefined();
             return;
         };
@@ -911,7 +913,7 @@ pub(crate) fn window_post_message_callback<'s>(
             }
         };
         assert!(
-            source_host.append_live_turn_owner_action(
+            unsafe { &*ambient_host_ptr }.append_live_turn_owner_action(
                 crate::runtime::RendererOwnerAction::RemoteWindowProxy(command),
             ),
             "a live remote-frame Window.postMessage source must retain its Page output journal"
@@ -936,8 +938,8 @@ pub(crate) fn window_post_message_callback<'s>(
             rv.set_undefined();
             return;
         };
-        let source_host = unsafe { &mut *source_host_ptr };
-        let Some(source) = source_host.remote_window_proxy_source(scope) else {
+        let source = unsafe { &*source_host_ptr }.remote_window_proxy_source(scope);
+        let Some(source) = source else {
             rv.set_undefined();
             return;
         };
@@ -972,7 +974,7 @@ pub(crate) fn window_post_message_callback<'s>(
             }
         };
         assert!(
-            source_host.append_live_turn_owner_action(
+            unsafe { &*source_host_ptr }.append_live_turn_owner_action(
                 crate::runtime::RendererOwnerAction::RemoteWindowProxy(command),
             ),
             "a live remote Window.postMessage source must retain its Page output journal"
@@ -997,7 +999,6 @@ pub(crate) fn window_post_message_callback<'s>(
         crate::native_bridge::cross_origin_window_target_host_ptr(scope, args.this())
             .unwrap_or(ambient_host_ptr)
     };
-    let host = unsafe { &mut *host_ptr };
     let Some(target_endpoint) = window_message_endpoint_from_receiver(scope, args.this()) else {
         crate::native_bridge::throw_cross_origin_type_error(
             scope,
@@ -1005,55 +1006,61 @@ pub(crate) fn window_post_message_callback<'s>(
         );
         return;
     };
-    // Blink captures the incumbent DOMWindow at API acceptance.
-    let related_page_source = incumbent_related_page_window_message_source(scope, host);
-    let source_identity = incumbent_window_message_source_identity(scope, host);
-    let source_identity = source_identity
-        .or_else(|| {
-            host.current_window_message_source()
-                .and_then(|endpoint| current_window_message_source_identity(scope, host, endpoint))
-        })
-        .or_else(|| {
-            let endpoint = active_child_window_handle(scope)
-                .or_else(|| child_window_handle(scope, scope.get_current_context().global(scope)))
-                .map(PendingWindowMessageEndpoint::ChildWindow)
-                .unwrap_or(PendingWindowMessageEndpoint::TopWindow);
-            current_window_message_source_identity(scope, host, endpoint)
+    let (accepted_source, target, target_origin) = {
+        let host = unsafe { &*host_ptr };
+        // Blink captures the incumbent DOMWindow at API acceptance.
+        let related_page_source = incumbent_related_page_window_message_source(scope, host);
+        let source_identity = incumbent_window_message_source_identity(scope, host);
+        let source_identity = source_identity
+            .or_else(|| {
+                host.current_window_message_source().and_then(|endpoint| {
+                    current_window_message_source_identity(scope, host, endpoint)
+                })
+            })
+            .or_else(|| {
+                let endpoint = active_child_window_handle(scope)
+                    .or_else(|| {
+                        child_window_handle(scope, scope.get_current_context().global(scope))
+                    })
+                    .map(PendingWindowMessageEndpoint::ChildWindow)
+                    .unwrap_or(PendingWindowMessageEndpoint::TopWindow);
+                current_window_message_source_identity(scope, host, endpoint)
+            });
+        let accepted_source = related_page_source.or_else(|| {
+            let (source_endpoint, source_owner, source_realm_token) = source_identity?;
+            let origin = window_message_endpoint_origin(host, source_endpoint)?;
+            Some(AcceptedWindowMessageSource {
+                source: PendingWindowMessageSource::new(
+                    source_endpoint,
+                    source_owner,
+                    source_realm_token,
+                ),
+                origin,
+                window_proxy: None,
+            })
         });
-    let accepted_source = related_page_source.or_else(|| {
-        let (source_endpoint, source_owner, source_realm_token) = source_identity?;
-        let origin = window_message_endpoint_origin(host, source_endpoint)?;
-        Some(AcceptedWindowMessageSource {
-            source: PendingWindowMessageSource::new(
-                source_endpoint,
-                source_owner,
-                source_realm_token,
-            ),
-            origin,
-            window_proxy: None,
-        })
-    });
-    let Some(AcceptedWindowMessageSource {
+        let Some(accepted_source) = accepted_source else {
+            rv.set_undefined();
+            return;
+        };
+        let target_dispatch_scope = target_endpoint.dispatch_scope();
+        let Some(target_owner) = host.current_window_execution_context_owner(target_dispatch_scope)
+        else {
+            rv.set_undefined();
+            return;
+        };
+        let target = WindowTaskTarget::new(target_dispatch_scope, target_owner);
+        let Some(target_origin) = window_message_endpoint_origin(host, target_endpoint) else {
+            rv.set_undefined();
+            return;
+        };
+        (accepted_source, target, target_origin)
+    };
+    let AcceptedWindowMessageSource {
         source,
         origin: source_origin,
         window_proxy: source_window_proxy,
-    }) = accepted_source
-    else {
-        rv.set_undefined();
-        return;
-    };
-
-    let target_dispatch_scope = target_endpoint.dispatch_scope();
-    let Some(target_owner) = host.current_window_execution_context_owner(target_dispatch_scope)
-    else {
-        rv.set_undefined();
-        return;
-    };
-    let target = WindowTaskTarget::new(target_dispatch_scope, target_owner);
-    let Some(target_origin) = window_message_endpoint_origin(host, target_endpoint) else {
-        rv.set_undefined();
-        return;
-    };
+    } = accepted_source;
     let Some(prepared) = prepare_window_post_message(scope, &args, &source_origin, false) else {
         return;
     };
@@ -1072,7 +1079,7 @@ pub(crate) fn window_post_message_callback<'s>(
             stage = "post_message_queued",
         );
     }
-    let task_id = host.queue_window_message(PendingWindowMessage {
+    let task_id = unsafe { &mut *host_ptr }.queue_window_message(PendingWindowMessage {
         target,
         source,
         source_window_proxy,
@@ -1081,9 +1088,9 @@ pub(crate) fn window_post_message_callback<'s>(
         origin: source_origin,
         intended_target_origin: prepared.intended_target_origin,
     });
-    let sender = host.page_window_message_sender().clone();
+    let sender = unsafe { &*host_ptr }.page_window_message_sender().clone();
     if sender.send(target, task_id).is_err() {
-        let discarded = host.discard_pending_window_message_task(task_id);
+        let discarded = unsafe { &mut *host_ptr }.discard_pending_window_message_task(task_id);
         assert!(
             discarded,
             "closed Window.postMessage route lost its local payload"

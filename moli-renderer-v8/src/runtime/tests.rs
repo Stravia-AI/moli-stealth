@@ -6570,6 +6570,67 @@ addEventListener("messageerror", event => {
     );
 
     output_rx.drain();
+    let (reentrant_posted, _) = opener
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"(() => {
+  const options = {
+    get targetOrigin() {
+      const marker = document.createElement("span");
+      marker.id = "remote-post-message-reentered";
+      document.body.append(marker);
+      __g5RemotePopup.postMessage({ kind: "reentrant-inner" }, "*");
+      return "*";
+    }
+  };
+  __g5RemotePopup.postMessage({ kind: "reentrant-outer" }, options);
+  return document.getElementById("remote-post-message-reentered") !== null;
+})()"#
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("remote postMessage options should permit synchronous author reentry");
+    assert_eq!(
+        renderer_json_value(reentrant_posted),
+        Some(serde_json::json!(true))
+    );
+    let reentrant_publications = output_rx.drain();
+    let reentrant_commands =
+        remote_window_proxy_commands_for_page(&reentrant_publications, &opener);
+    assert_eq!(reentrant_commands.len(), 2);
+    assert!(reentrant_commands.iter().all(|command| matches!(
+        command.kind_for_testing(),
+        crate::runtime::RendererRemoteWindowProxyCommandKind::PostMessage(_)
+    )));
+    for command in reentrant_commands {
+        let (ack, _) = popup
+            .run_async_command(RendererPageCommand::DispatchRemoteWindowProxyCommand(
+                command,
+            ))
+            .await
+            .expect("target Page should ACK each reentrant remote message command");
+        assert!(matches!(ack, RendererPageReply::Bool(true)));
+    }
+    let (reentrant_state, _) = popup
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"(async () => {
+  await new Promise(resolve => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  return JSON.stringify(__g5RemoteMessages.slice(-2).map(entry => entry.data.kind));
+})()"#
+                .to_owned(),
+            await_promise: true,
+        })
+        .await
+        .expect("reentrant remote messages should finish in acceptance order");
+    assert_eq!(
+        renderer_json_value(reentrant_state),
+        Some(serde_json::json!(
+            r#"["reentrant-inner","reentrant-outer"]"#
+        ))
+    );
+
+    output_rx.drain();
     let (oversized_message, _) = opener
         .run_async_command(RendererPageCommand::EvaluateExpression {
             expression: r#"(() => {
@@ -6662,7 +6723,7 @@ addEventListener("messageerror", event => {
     assert_eq!(
         renderer_json_value(wasm_state),
         Some(serde_json::json!(
-            r#"{"messages":1,"errors":[{"dataIsNull":true,"origin":"https://remote-agent-opener.test","sourceIsOpener":true}]}"#
+            r#"{"messages":3,"errors":[{"dataIsNull":true,"origin":"https://remote-agent-opener.test","sourceIsOpener":true}]}"#
         ))
     );
 
