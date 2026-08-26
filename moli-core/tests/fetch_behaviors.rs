@@ -5,7 +5,7 @@ use moli_core::{
     page::{
         Page, ScriptNetworkOutputItem, SubresourceRequestInitiatorType, SubresourceResourceType,
     },
-    runtime::{Browser, BrowserConfig as AppConfig, RenderedDomWaitUntil},
+    runtime::{Browser, BrowserConfig as AppConfig, FetchDeadline, RenderedDomWaitUntil},
     testing::{JsValueSnapshot, ScriptRunOutcome, ScriptSkipReason},
 };
 use std::time::Instant;
@@ -1954,16 +1954,23 @@ async fn fetch_with_domstable_ignores_page_tampered_outer_html_getter() -> Resul
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn fetch_with_networkidle_returns_best_effort_when_quiet_window_cannot_complete() -> Result<()>
+async fn networkidle_readiness_returns_best_effort_when_quiet_window_cannot_complete() -> Result<()>
 {
     let server = FixtureServer::spawn().await?;
     let browser = Browser::new(AppConfig::default())?;
 
-    let page = browser
+    let mut page = browser
         .fetch_with_wait_until(
             &server.url("/wait-until-delayed-fetch"),
+            RenderedDomWaitUntil::Load,
+            Duration::from_secs(5),
+        )
+        .await?;
+    browser
+        .wait_for_page_readiness_with_deadline(
+            &mut page,
             RenderedDomWaitUntil::NetworkIdle,
-            Duration::from_millis(100),
+            FetchDeadline::new(Duration::from_millis(100))?,
         )
         .await?;
 
