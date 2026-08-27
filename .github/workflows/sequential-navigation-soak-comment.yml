@@ -3,11 +3,15 @@ name: Sequential Navigation Soak Report
 on:
   workflow_run:
     workflows: [CI]
-    types: [completed]
+    types: [in_progress]
 
-# This workflow runs from the default branch. It never executes the measured
-# PR binary and only renders bounded numeric fields from the downloaded artifact.
-# The rendered report is published both as an Actions summary and a PR comment.
+concurrency:
+  group: sequential-navigation-soak-report-${{ github.event.workflow_run.pull_requests[0].number || github.event.workflow_run.id }}
+  cancel-in-progress: true
+
+# This trusted workflow starts with CI, then waits only for the immutable v4
+# artifact. It runs from the default branch, never executes PR code, and renders
+# only bounded numeric fields into an Actions summary and an upserted PR comment.
 permissions:
   actions: read
   contents: read
@@ -18,11 +22,10 @@ jobs:
     name: Publish soak report
     if: >-
       github.event.workflow_run.event == 'pull_request' &&
-      github.event.workflow_run.conclusion != 'cancelled' &&
       github.event.workflow_run.pull_requests[0].head.repo.id == github.event.repository.id &&
       github.event.workflow_run.actor.login != 'dependabot[bot]'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 120
     steps:
       - name: Checkout trusted comment renderer
         uses: actions/checkout@v4
@@ -30,7 +33,28 @@ jobs:
           persist-credentials: false
           ref: ${{ github.event.repository.default_branch }}
 
+      - name: Wait for soak evidence
+        id: wait
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          ARTIFACT_NAME: sequential-navigation-soak-results
+          TARGET_JOB_NAME: Sequential navigation soak · 200 A/B
+        with:
+          retries: 3
+          script: |
+            const waitForWorkflowArtifact = require(
+              './.github/scripts/wait-for-workflow-artifact.cjs'
+            );
+            await waitForWorkflowArtifact({
+              github,
+              context,
+              core,
+              artifactName: process.env.ARTIFACT_NAME,
+              targetJobName: process.env.TARGET_JOB_NAME,
+            });
+
       - name: Download soak evidence
+        if: steps.wait.outputs.artifact_available == 'true'
         id: evidence
         continue-on-error: true
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -38,14 +62,15 @@ jobs:
           name: sequential-navigation-soak-results
           path: sequential-navigation-soak-results
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          run-id: ${{ github.event.workflow_run.id }}
+          run-id: ${{ steps.wait.outputs.run_id }}
 
       - name: Render trusted PR comment
+        if: steps.wait.outputs.conclusion != 'cancelled'
         id: render
         env:
           PYTHONPATH: moli-benchmark
-          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }}
-          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_URL: ${{ steps.wait.outputs.run_url }}
+          CONCLUSION: ${{ steps.wait.outputs.conclusion || 'failure' }}
           EVIDENCE_OUTCOME: ${{ steps.evidence.outcome }}
         run: |
           if [[ "$EVIDENCE_OUTCOME" == success && -f sequential-navigation-soak-results/comparison.json ]]; then
@@ -70,9 +95,11 @@ jobs:
           fi
 
       - name: Publish Actions report
+        if: steps.wait.outputs.conclusion != 'cancelled'
         run: cat sequential-navigation-soak-comment.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Post PR soak comment
+        if: steps.wait.outputs.conclusion != 'cancelled'
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         env:
           COMMENT_PATH: sequential-navigation-soak-comment.md
