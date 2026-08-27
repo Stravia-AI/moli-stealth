@@ -20,6 +20,94 @@ fn assert_cdp_event_precedes_response(
     );
 }
 
+#[tokio::test]
+async fn websocket_page_agent_response_precedes_later_runtime_context_replay() {
+    let (cdp_addr, protocol_server) = spawn_test_protocol_server().await;
+    let (mut socket, _) = connect_async(format!(
+        "ws://{cdp_addr}/devtools/browser/{DEFAULT_BROWSER_ID}"
+    ))
+    .await
+    .expect("connect browser CDP websocket");
+    let browser_context_id = cdp_create_browser_context(&mut socket, 1).await;
+    let target = cdp_create_attached_target(&mut socket, 2, &browser_context_id).await;
+
+    send_cdp_command_without_wait(
+        &mut socket,
+        4,
+        "Page.getFrameTree",
+        Some(&target.session_id),
+        json!({}),
+    )
+    .await;
+    send_cdp_command_without_wait(
+        &mut socket,
+        5,
+        "Runtime.enable",
+        Some(&target.session_id),
+        json!({}),
+    )
+    .await;
+
+    let messages = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut messages = Vec::new();
+        let mut saw_frame_tree_response = false;
+        let mut saw_runtime_response = false;
+        let mut saw_default_context = false;
+        while !(saw_frame_tree_response && saw_runtime_response && saw_default_context) {
+            let message = recv_ws_json(&mut socket).await;
+            saw_frame_tree_response |= message["id"] == json!(4_u64);
+            saw_runtime_response |= message["id"] == json!(5_u64);
+            saw_default_context |= message["sessionId"] == json!(target.session_id.as_str())
+                && message["method"] == json!("Runtime.executionContextCreated")
+                && message["params"]["context"]["auxData"]["isDefault"] == json!(true);
+            messages.push(message);
+        }
+        messages
+    })
+    .await
+    .expect("pipelined Page.getFrameTree and Runtime.enable should settle");
+
+    let frame_tree_index = messages
+        .iter()
+        .position(|message| message["id"] == json!(4_u64))
+        .expect("Page.getFrameTree response");
+    let default_context_index = messages
+        .iter()
+        .position(|message| {
+            message["sessionId"] == json!(target.session_id.as_str())
+                && message["method"] == json!("Runtime.executionContextCreated")
+                && message["params"]["context"]["auxData"]["isDefault"] == json!(true)
+        })
+        .expect("default Runtime execution context");
+    assert!(
+        frame_tree_index < default_context_index,
+        "the synchronous Page agent response must reach the frontend before a later Runtime command publishes its context: {messages:?}"
+    );
+
+    let evaluation = send_cdp_command(
+        &mut socket,
+        6,
+        "Runtime.evaluate",
+        Some(&target.session_id),
+        json!({
+            "expression": "1 + 1",
+            "returnByValue": true,
+        }),
+    )
+    .await;
+    assert_eq!(
+        evaluation
+            .iter()
+            .find(|message| message["id"] == json!(6_u64))
+            .and_then(|message| message["result"]["result"]["value"].as_i64()),
+        Some(2),
+        "the context replayed after Page.getFrameTree must be usable by Runtime.evaluate: {evaluation:?}"
+    );
+
+    let _ = socket.close(None).await;
+    abort_test_cdp_server(protocol_server).await;
+}
+
 async fn wait_for_cookie_profile(
     path: &Path,
     predicate: impl Fn(&[StoredCookie]) -> bool,

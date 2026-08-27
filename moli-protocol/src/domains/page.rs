@@ -329,6 +329,13 @@ pub(crate) enum PageCommandTaskStep {
 }
 
 impl PendingPageCommandDispatch {
+    pub(crate) fn requires_same_session_response_barrier(&self) -> bool {
+        matches!(
+            self.kind.as_ref(),
+            PendingPageCommandKind::GetFrameTree { .. }
+        )
+    }
+
     pub async fn wait(self) -> CompletedPageCommandDispatch {
         let kind = match *self.kind {
             PendingPageCommandKind::BringToFront {
