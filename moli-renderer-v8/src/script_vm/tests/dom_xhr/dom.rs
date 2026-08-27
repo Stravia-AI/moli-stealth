@@ -4197,6 +4197,7 @@ fn data_transfer_directory_entries_use_private_slots_for_reflection_and_spoofing
   window.__directoryDropReport = 'missing';
   target.addEventListener('drop', event => {
     const item = event.dataTransfer.items[0];
+    const types = event.dataTransfer.types;
     const entry = item.webkitGetAsEntry();
     const reader = entry.createReader();
 
@@ -4226,7 +4227,9 @@ fn data_transfer_directory_entries_use_private_slots_for_reflection_and_spoofing
     window.__directoryDropReport = JSON.stringify({
       ownNamesBefore,
       transfer: [
-        event.dataTransfer.types.join(','),
+        types.join(','),
+        types === event.dataTransfer.types,
+        Object.isFrozen(types),
         event.dataTransfer.items.length,
         item.kind,
         item.type,
@@ -4271,7 +4274,7 @@ fn data_transfer_directory_entries_use_private_slots_for_reflection_and_spoofing
 
     assert_eq!(
         result,
-        r#"{"ownNamesBefore":{"dataTransfer":[],"itemList":[],"item":[],"entry":[],"reader":[]},"transfer":"Files|1|file||docs|/docs|true|false","freshReaderOwnNames":[]}"#
+        r#"{"ownNamesBefore":{"dataTransfer":[],"itemList":[],"item":[],"entry":[],"reader":[]},"transfer":"Files|true|true|1|file||docs|/docs|true|false","freshReaderOwnNames":[]}"#
     );
 }
 
@@ -4386,6 +4389,8 @@ fn data_transfer_types_is_a_cached_frozen_array_per_item_list_mutation() {
   const otherTransfer = new DataTransfer();
   const initial = transfer.types;
   const otherInitial = otherTransfer.types;
+  transfer.types = ['replacement'];
+  const afterReadonlyAssignment = transfer.types;
 
   transfer.clearData();
   transfer.items.clear();
@@ -4405,6 +4410,7 @@ fn data_transfer_types_is_a_cached_frozen_array_per_item_list_mutation() {
   return JSON.stringify({
     arrays: [Array.isArray(initial), Object.isFrozen(initial)],
     initialIdentity: [transfer !== otherTransfer, initial !== otherInitial],
+    readonlyIdentity: initial === afterReadonlyAssignment,
     emptyNoOpsPreserveIdentity: initial === afterEmptyNoOps,
     addReplacesIdentity: initial !== afterAdd,
     missingClearPreservesIdentity: afterAdd === afterMissingClear,
@@ -4421,7 +4427,86 @@ fn data_transfer_types_is_a_cached_frozen_array_per_item_list_mutation() {
 
     assert_eq!(
         result,
-        r#"{"arrays":[true,true],"initialIdentity":[true,true],"emptyNoOpsPreserveIdentity":true,"addReplacesIdentity":true,"missingClearPreservesIdentity":true,"replacementReplacesIdentity":true,"clearReplacesIdentity":true,"finalNoOpPreservesIdentity":true,"snapshots":["","text/plain","text/plain",""],"frozenAfterMutations":true}"#
+        r#"{"arrays":[true,true],"initialIdentity":[true,true],"readonlyIdentity":true,"emptyNoOpsPreserveIdentity":true,"addReplacesIdentity":true,"missingClearPreservesIdentity":true,"replacementReplacesIdentity":true,"clearReplacesIdentity":true,"finalNoOpPreservesIdentity":true,"snapshots":["","text/plain","text/plain",""],"frozenAfterMutations":true}"#
+    );
+}
+
+#[test]
+fn data_transfer_types_snapshot_tracks_file_and_failed_item_mutations() {
+    let mut vm = new_storage_test_vm("https://data-transfer-file-types-cache.test/");
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const transfer = new DataTransfer();
+  const files = transfer.files;
+  const initial = transfer.types;
+  const firstFile = new File(['first'], 'first.txt');
+  const secondFile = new File(['second'], 'second.txt');
+
+  transfer.items.add(firstFile);
+  const afterFirstFile = transfer.types;
+  transfer.setData('text/plain', 'alpha');
+  const afterText = transfer.types;
+
+  let duplicateError = '';
+  try {
+    transfer.items.add('duplicate', 'text/plain');
+  } catch (error) {
+    duplicateError = error.name;
+  }
+  const afterDuplicate = transfer.types;
+  const invalidAdd = transfer.items.add({});
+  const afterInvalidAdd = transfer.types;
+  transfer.items.remove(99);
+  const afterInvalidRemoval = transfer.types;
+
+  transfer.items.add(secondFile);
+  const afterSecondFile = transfer.types;
+  transfer.items.remove(0);
+  const afterFirstRemoval = transfer.types;
+  transfer.items.remove(1);
+  const afterLastFileRemoval = transfer.types;
+
+  return JSON.stringify({
+    values: [
+      initial.join(','),
+      afterFirstFile.join(','),
+      afterText.join(','),
+      afterSecondFile.join(','),
+      afterFirstRemoval.join(','),
+      afterLastFileRemoval.join(',')
+    ],
+    identities: [
+      initial !== afterFirstFile,
+      afterFirstFile !== afterText,
+      afterText === afterDuplicate,
+      afterDuplicate === afterInvalidAdd,
+      afterInvalidAdd === afterInvalidRemoval,
+      afterInvalidRemoval !== afterSecondFile,
+      afterSecondFile !== afterFirstRemoval,
+      afterFirstRemoval !== afterLastFileRemoval
+    ],
+    frozen: [
+      initial,
+      afterFirstFile,
+      afterText,
+      afterSecondFile,
+      afterFirstRemoval,
+      afterLastFileRemoval
+    ].every(Object.isFrozen),
+    failures: [duplicateError, invalidAdd === null],
+    liveFiles: [transfer.files === files, files.length]
+  });
+})()
+"#,
+        )
+        .expect("DataTransfer file types FrozenArray semantics should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"values":["","Files","text/plain,Files","text/plain,Files","text/plain,Files","text/plain"],"identities":[true,true,true,true,true,true,true,true],"frozen":true,"failures":["NotSupportedError",true],"liveFiles":[true,0]}"#
     );
 }
 

@@ -3148,7 +3148,6 @@ html/dom/reflection-metadata.html
 html/dom/reflection-obsolete.html
 html/dom/reflection-sections.html
 html/dom/reflection-tabular.html
-html/editing/dnd/datastore/datatransfer-types.html
 html/editing/dnd/target-origin/202.html
 html/editing/dnd/the-dropzone-attribute/dropzone_attribute.html
 html/editing/editing-0/autocorrection/autocorrection.html
