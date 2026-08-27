@@ -1100,6 +1100,17 @@ pub(crate) struct PageVmEnvConfig {
 }
 
 impl PageVmEnvConfig {
+    fn main_document_policy_container(&self) -> crate::document_runtime::DocumentPolicyContainer {
+        let mut policy_container = self.document_policy_container.clone();
+        if let Some(initial_document_referrer) = self.initial_document_referrer.as_ref() {
+            policy_container.document_referrer = initial_document_referrer.clone();
+        }
+        if let Some(commit) = self.main_document_commit.as_ref() {
+            policy_container.document_referrer = commit.document_referrer.clone();
+        }
+        policy_container
+    }
+
     pub(crate) fn apply_navigation_response_headers(
         &mut self,
         final_url: &Url,
@@ -4783,14 +4794,15 @@ impl PageVm {
         self.vm_mut()
             .set_extra_http_headers(&env.extra_http_headers);
         if mode.applies_document_policy() {
+            let policy_container = env.main_document_policy_container();
             match mode {
                 PageVmEnvironmentConfigApplyMode::NormalConstruction => self
                     .vm_mut()
-                    .set_main_navigation_policy_container(env.document_policy_container.clone()),
+                    .set_main_navigation_policy_container(policy_container),
                 PageVmEnvironmentConfigApplyMode::StagedInitialConstruction => self
                     .vm_mut()
                     .document_runtime
-                    .set_initial_document_policy_container(env.document_policy_container.clone()),
+                    .set_initial_document_policy_container(policy_container),
                 PageVmEnvironmentConfigApplyMode::StagedInitialAdoption => unreachable!(
                     "staged initial adoption must preserve its creator-derived document policy"
                 ),
