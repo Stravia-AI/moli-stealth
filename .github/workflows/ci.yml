@@ -632,7 +632,12 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-regression-results
-          path: target/release-regression
+          # Package sizes stay in the JSON reports and image manifests. Upload
+          # report data only instead of duplicating the full rootfs archives.
+          path: |
+            target/release-regression/**/*.json
+            target/release-regression/**/*.csv
+            target/release-regression/**/*.md
           if-no-files-found: warn
           retention-days: 7
 
