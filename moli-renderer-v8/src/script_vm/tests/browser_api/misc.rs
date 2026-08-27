@@ -664,6 +664,33 @@ fn trusted_types_eval_keyword_bypasses_default_policy_and_eval_csp() {
 }
 
 #[test]
+fn trusted_script_eval_is_unwrapped_without_trusted_types_enforcement() {
+    let mut vm = new_storage_test_vm("https://trusted-script-eval.test/");
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const policy = trustedTypes.createPolicy("eval", { createScript: value => value });
+  const trusted = policy.createScript("1 + 1");
+  const ordinary = { value: "ordinary" };
+  return JSON.stringify({
+    direct: eval(trusted),
+    indirect: eval?.(trusted),
+    ordinaryPassesThrough: eval(ordinary) === ordinary
+  });
+})()
+"#,
+        )
+        .expect("TrustedScript eval probe should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"direct":2,"indirect":2,"ordinaryPassesThrough":true}"#
+    );
+}
+
+#[test]
 fn trusted_types_default_policy_receives_type_and_eval_sink_arguments() {
     let mut vm = new_storage_test_vm("https://trusted-types-default-callback-args.test/");
     vm.set_response_content_security_policies(&["require-trusted-types-for 'script'".to_owned()]);

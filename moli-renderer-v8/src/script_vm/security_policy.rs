@@ -179,19 +179,12 @@ pub(super) unsafe extern "C" fn string_code_generation_check_callback(
                 }
             }
         } else {
-            match trusted_types_code_generation_check(scope, source, is_code_like) {
-                TrustedTypesCodeGenerationCheck::AllowOriginal => {
-                    StringCodeGenerationPolicyAction::AllowWithoutCsp
-                }
-                TrustedTypesCodeGenerationCheck::AllowModified(source) => {
-                    StringCodeGenerationPolicyAction::CheckCsp {
-                        allow_trusted_types_eval: false,
-                        modified_source: Some(source),
-                    }
-                }
-                TrustedTypesCodeGenerationCheck::Block => StringCodeGenerationPolicyAction::Block,
-            }
+            let check = trusted_types_code_generation_check(scope, source, is_code_like);
+            code_generation_action_from_trusted_types_check(check)
         }
+    } else if is_code_like || !source.is_string() {
+        let check = trusted_types_code_generation_check(scope, source, is_code_like);
+        code_generation_action_from_trusted_types_check(check)
     } else {
         match non_trusted_types_code_generation_source(source, is_code_like) {
             NonTrustedTypesCodeGenerationSource::String => {
@@ -253,6 +246,23 @@ enum StringCodeGenerationPolicyAction {
         modified_source: Option<String>,
     },
     Block,
+}
+
+fn code_generation_action_from_trusted_types_check(
+    check: TrustedTypesCodeGenerationCheck,
+) -> StringCodeGenerationPolicyAction {
+    match check {
+        TrustedTypesCodeGenerationCheck::AllowOriginal => {
+            StringCodeGenerationPolicyAction::AllowWithoutCsp
+        }
+        TrustedTypesCodeGenerationCheck::AllowModified(source) => {
+            StringCodeGenerationPolicyAction::CheckCsp {
+                allow_trusted_types_eval: false,
+                modified_source: Some(source),
+            }
+        }
+        TrustedTypesCodeGenerationCheck::Block => StringCodeGenerationPolicyAction::Block,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
