@@ -267,7 +267,7 @@ impl JsContextHost {
             timezone_override: None,
             idle_override: None,
             protocol_user_gesture_activation_depth: 0,
-            current_input_popup_disposition: None,
+            current_input_event: None,
             webdriver_bidi_file_prompt_handler_stack: Vec::new(),
             emulated_media: crate::protocol_types::EmulatedMediaOverrides::default(),
             viewport_surface: None,

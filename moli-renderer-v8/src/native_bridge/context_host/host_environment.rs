@@ -747,17 +747,15 @@ impl JsContextHost {
         self.protocol_user_gesture_activation_depth > 0
     }
 
-    pub(crate) fn replace_current_input_popup_disposition(
+    pub(crate) fn replace_current_input_event(
         &mut self,
-        disposition: Option<crate::RendererPopupDisposition>,
-    ) -> Option<crate::RendererPopupDisposition> {
-        std::mem::replace(&mut self.current_input_popup_disposition, disposition)
+        event: Option<crate::native_bridge::CurrentInputEvent>,
+    ) -> Option<crate::native_bridge::CurrentInputEvent> {
+        std::mem::replace(&mut self.current_input_event, event)
     }
 
-    pub(crate) fn current_input_popup_disposition(
-        &self,
-    ) -> Option<crate::RendererPopupDisposition> {
-        self.current_input_popup_disposition
+    pub(crate) fn current_input_event(&self) -> Option<crate::native_bridge::CurrentInputEvent> {
+        self.current_input_event
     }
 
     pub(crate) fn begin_webdriver_bidi_file_prompt_handler(&mut self, handler: &str) {

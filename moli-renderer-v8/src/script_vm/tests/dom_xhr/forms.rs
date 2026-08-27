@@ -3727,7 +3727,61 @@ fn trusted_alt_click_downloads_an_anchor_without_a_download_attribute() {
 }
 
 #[test]
-fn window_open_in_click_listener_uses_current_input_popup_disposition() {
+fn alt_input_does_not_turn_window_open_into_a_download_or_background_popup() {
+    let mut vm = new_storage_test_vm("https://alt-window-open.test/path/index.html");
+    vm.eval(
+        r#"const html = document.createElement('html');
+        const body = document.createElement('body');
+        body.style.margin = '0';
+        const button = document.createElement('button');
+        button.style.cssText = 'display:block;width:100px;height:100px';
+        button.addEventListener('click', () => window.open('/target', '_blank'));
+        body.appendChild(button);
+        html.appendChild(body);
+        document.appendChild(html);
+        'installed'"#,
+    )
+    .expect("Alt window.open fixture should initialize");
+
+    vm.dispatch_mouse_event_at_point_with_pointer_and_modifiers(
+        20.0,
+        20.0,
+        "mousedown",
+        0,
+        None,
+        1,
+        0.0,
+        0.0,
+        crate::runtime::RendererPointerEventProperties::default(),
+        1,
+    )
+    .expect("Alt mousedown should dispatch");
+    let outcome = vm
+        .dispatch_mouse_event_at_point_with_pointer_and_modifiers(
+            20.0,
+            20.0,
+            "mouseup",
+            0,
+            None,
+            1,
+            0.0,
+            0.0,
+            crate::runtime::RendererPointerEventProperties::default(),
+            1,
+        )
+        .expect("Alt mouseup should dispatch");
+
+    assert!(outcome.pending_download.is_none());
+    let popups = vm.take_pending_popup_activations();
+    assert_eq!(popups.len(), 1);
+    assert_eq!(
+        popups[0].disposition(),
+        crate::RendererPopupDisposition::Foreground
+    );
+}
+
+#[test]
+fn window_open_in_click_listener_uses_current_input_event() {
     #[cfg(target_os = "macos")]
     let (platform_modifier, synthetic_modifier) = (4, "metaKey: true");
     #[cfg(not(target_os = "macos"))]
@@ -3818,6 +3872,211 @@ fn window_open_in_click_listener_uses_current_input_popup_disposition() {
         synthetic_popups[0].disposition(),
         crate::RendererPopupDisposition::Foreground,
         "a synthesized modifier cannot create a tab-under"
+    );
+}
+
+#[test]
+fn current_mouseup_input_covers_pointer_mouse_click_and_microtask_callbacks() {
+    #[cfg(target_os = "macos")]
+    let platform_modifier = 4;
+    #[cfg(not(target_os = "macos"))]
+    let platform_modifier = 2;
+
+    let mut vm = new_storage_test_vm("https://window-open-input-scope.test/path/index.html");
+    vm.eval(
+        r#"
+(() => {
+  const html = document.createElement('html');
+  const body = document.createElement('body');
+  body.style.margin = '0';
+  const button = document.createElement('button');
+  button.style.cssText = 'display:block;width:100px;height:100px';
+  const nested = document.createElement('button');
+  nested.addEventListener('click', () => window.open('/nested-click', '_blank'));
+  button.addEventListener('pointerup', () => window.open('/pointerup', '_blank'));
+  button.addEventListener('mouseup', () => window.open('/mouseup', '_blank'));
+  button.addEventListener('click', () => {
+    window.open('/click', '_blank');
+    nested.click();
+    Promise.resolve().then(() => window.open('/microtask', '_blank'));
+  });
+  body.append(button, nested);
+  html.appendChild(body);
+  document.appendChild(html);
+})()
+"#,
+    )
+    .expect("current input scope fixture should initialize");
+
+    vm.dispatch_mouse_event_at_point_with_pointer_and_modifiers(
+        20.0,
+        20.0,
+        "mousedown",
+        0,
+        None,
+        1,
+        0.0,
+        0.0,
+        crate::runtime::RendererPointerEventProperties::default(),
+        platform_modifier,
+    )
+    .expect("new-tab-modified mousedown should dispatch");
+    vm.dispatch_mouse_event_at_point_with_pointer_and_modifiers(
+        20.0,
+        20.0,
+        "mouseup",
+        0,
+        None,
+        1,
+        0.0,
+        0.0,
+        crate::runtime::RendererPointerEventProperties::default(),
+        platform_modifier,
+    )
+    .expect("new-tab-modified mouseup should dispatch");
+
+    let popups = vm.take_pending_popup_activations();
+    assert_eq!(
+        popups.iter().map(|popup| popup.url()).collect::<Vec<_>>(),
+        vec![
+            "https://window-open-input-scope.test/pointerup",
+            "https://window-open-input-scope.test/mouseup",
+            "https://window-open-input-scope.test/click",
+            "https://window-open-input-scope.test/nested-click",
+            "https://window-open-input-scope.test/microtask",
+        ]
+    );
+    assert!(
+        popups
+            .iter()
+            .all(|popup| { popup.disposition() == crate::RendererPopupDisposition::Background })
+    );
+
+    vm.eval("window.open('/after-input', '_blank'); 'done'")
+        .expect("post-input window.open should evaluate");
+    let after_input = vm.take_pending_popup_activations();
+    assert_eq!(after_input.len(), 1);
+    assert_eq!(
+        after_input[0].disposition(),
+        crate::RendererPopupDisposition::Foreground,
+        "the real input policy must be restored after its dispatch turn"
+    );
+}
+
+#[test]
+fn middle_auxclick_runs_the_anchor_default_action_in_the_background() {
+    let mut vm = new_storage_test_vm("https://middle-auxclick.test/path/index.html");
+    vm.eval(
+        r#"const html = document.createElement('html');
+        const body = document.createElement('body');
+        body.style.margin = '0';
+        const link = document.createElement('a');
+        link.href = '/anchor-target';
+        link.style.cssText = 'display:block;width:100px;height:100px';
+        body.appendChild(link);
+        html.appendChild(body);
+        document.appendChild(html);
+        window.__auxclickEvents = [];
+        link.addEventListener('auxclick', event => {
+            __auxclickEvents.push(`${event.type}:${event.button}:${event.isTrusted}`);
+            if (event.button === 1) window.open('/listener-target', '_blank');
+        }); 'installed'"#,
+    )
+    .expect("auxclick listener should install");
+
+    vm.dispatch_mouse_event_at_point(20.0, 20.0, "mousedown", 1, None, 0.0, 0.0)
+        .expect("middle mousedown should dispatch");
+    let outcome = vm
+        .dispatch_mouse_event_at_point(20.0, 20.0, "mouseup", 1, None, 0.0, 0.0)
+        .expect("middle mouseup should dispatch");
+    assert!(outcome.handled);
+    assert!(!outcome.triggered_top_level_navigation);
+    assert_eq!(
+        vm.eval("__auxclickEvents.join('|')")
+            .expect("auxclick event log should evaluate"),
+        "auxclick:1:true"
+    );
+
+    let popups = vm.take_pending_popup_activations();
+    assert_eq!(
+        popups.iter().map(|popup| popup.url()).collect::<Vec<_>>(),
+        vec![
+            "https://middle-auxclick.test/listener-target",
+            "https://middle-auxclick.test/anchor-target",
+        ]
+    );
+    assert!(
+        popups
+            .iter()
+            .all(|popup| { popup.disposition() == crate::RendererPopupDisposition::Background })
+    );
+    assert!(vm.take_pending_location_navigation_with_seed().is_none());
+}
+
+#[test]
+fn canceling_middle_auxclick_suppresses_the_anchor_default_action() {
+    let mut vm = new_storage_test_vm("https://middle-auxclick-canceled.test/path/index.html");
+    vm.eval(
+        r#"const html = document.createElement('html');
+        const body = document.createElement('body');
+        body.style.margin = '0';
+        const link = document.createElement('a');
+        link.href = '/anchor-target';
+        link.style.cssText = 'display:block;width:100px;height:100px';
+        link.addEventListener('auxclick', event => event.preventDefault());
+        body.appendChild(link);
+        html.appendChild(body);
+        document.appendChild(html);
+        'installed'"#,
+    )
+    .expect("canceling auxclick listener should install");
+
+    vm.dispatch_mouse_event_at_point(20.0, 20.0, "mousedown", 1, None, 0.0, 0.0)
+        .expect("middle mousedown should dispatch");
+    vm.dispatch_mouse_event_at_point(20.0, 20.0, "mouseup", 1, None, 0.0, 0.0)
+        .expect("middle mouseup should dispatch");
+
+    assert!(vm.take_pending_popup_activations().is_empty());
+    assert!(vm.take_pending_location_navigation_with_seed().is_none());
+}
+
+#[test]
+fn enter_key_window_open_inherits_the_real_input_modifiers() {
+    #[cfg(target_os = "macos")]
+    let platform_modifier = 4;
+    #[cfg(not(target_os = "macos"))]
+    let platform_modifier = 2;
+
+    let mut vm = new_storage_test_vm("https://enter-window-open.test/path/index.html");
+    vm.eval(
+        r#"const html = document.createElement('html');
+            const body = document.createElement('body');
+            const button = document.createElement('button');
+            body.appendChild(button);
+            html.appendChild(body);
+            document.appendChild(html);
+            button.addEventListener('click', () => window.open('/target', '_blank'));
+            button.focus();
+            'installed'"#,
+    )
+    .expect("Enter activation fixture should initialize");
+
+    vm.dispatch_key_event(
+        "keydown",
+        "Enter",
+        "Enter",
+        "",
+        platform_modifier,
+        false,
+        false,
+    )
+    .expect("new-tab-modified Enter should dispatch");
+
+    let popups = vm.take_pending_popup_activations();
+    assert_eq!(popups.len(), 1);
+    assert_eq!(
+        popups[0].disposition(),
+        crate::RendererPopupDisposition::Background
     );
 }
 

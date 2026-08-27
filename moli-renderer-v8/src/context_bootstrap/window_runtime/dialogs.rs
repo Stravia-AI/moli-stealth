@@ -6,7 +6,7 @@ use crate::{
     context_bootstrap::CHILD_BROWSING_CONTEXT_HANDLE_SLOT,
     document_runtime::{DocumentPolicyContainer, DomHandle},
     native_bridge::{
-        child_window_handle_from_marker_data,
+        InputNavigationPolicy, child_window_handle_from_marker_data,
         element::{
             SpecialBrowsingContextTarget, navigate_existing_browsing_context_target,
             navigate_named_iframe_target,
@@ -221,6 +221,21 @@ pub(crate) fn window_open_callback<'s>(
     let opener = (!suppress_opener).then_some(entered_window);
     let opener_child_handle =
         opener.and_then(|opener| window_open_receiver_child_handle(scope, opener));
+    let popup_disposition = match host
+        .current_input_event()
+        .map(crate::native_bridge::CurrentInputEvent::navigation_policy)
+    {
+        Some(InputNavigationPolicy::NewBackgroundSurface) => {
+            crate::RendererPopupDisposition::Background
+        }
+        Some(
+            InputNavigationPolicy::Current
+            | InputNavigationPolicy::Download
+            | InputNavigationPolicy::NewWindow
+            | InputNavigationPolicy::NewForegroundSurface,
+        )
+        | None => crate::RendererPopupDisposition::Foreground,
+    };
     if popup_target_can_use_lightweight_window(&parsed.target_name, &url)
         && let Some(opened_popup) = host.open_lightweight_popup_window(
             scope,
@@ -240,9 +255,6 @@ pub(crate) fn window_open_callback<'s>(
         let window_open_event = opened_popup
             .created_new_browsing_context
             .then_some(window_open_event);
-        let popup_disposition = host
-            .current_input_popup_disposition()
-            .unwrap_or(crate::RendererPopupDisposition::Foreground);
         host.record_pending_popup_activation(
             RendererPendingPopupActivation::window(
                 root_document,
@@ -266,9 +278,6 @@ pub(crate) fn window_open_callback<'s>(
         }
         return;
     }
-    let popup_disposition = host
-        .current_input_popup_disposition()
-        .unwrap_or(crate::RendererPopupDisposition::Foreground);
     host.record_pending_popup_activation(
         RendererPendingPopupActivation::window(
             root_document,

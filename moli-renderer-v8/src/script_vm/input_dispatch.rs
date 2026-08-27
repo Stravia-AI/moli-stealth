@@ -1,4 +1,5 @@
 use anyhow::Result;
+use std::rc::Rc;
 
 use super::input_dispatch_outcome;
 use super::input_helpers::{
@@ -11,7 +12,6 @@ use super::inspector::{
 use super::{ActiveDragSession, ActiveScrollbarDrag, ActiveTouchPoint, ScriptVm};
 use crate::document_runtime::DomHandle;
 use crate::dom::native::{Node, SelectedFile};
-use crate::native_bridge::PointerCaptureDispatchEvent;
 use crate::native_bridge::element::{
     TouchEventPoint, activate_handle_via_click,
     activate_handle_via_click_with_detail_and_modifiers, cache_input_files_from_selected_files,
@@ -22,12 +22,15 @@ use crate::native_bridge::element::{
     construct_pointer_event_with_related_target_and_modifiers, construct_simple_event,
     construct_touch_event, construct_touch_event_with_points, construct_wheel_event,
     contenteditable_editing_host, dispatch_public_event, observable_input_hit_test,
-    observable_input_surface_hit_test, perform_drop_default_action,
-    perform_mouse_focus_default_action, perform_scrollbar_scroll_default_action,
-    perform_wheel_scroll_default_action, replace_contenteditable_selection,
-    replace_text_control_selection, select_contenteditable_contents,
-    text_control_set_selection_range_internal,
+    observable_input_surface_hit_test, perform_auxiliary_link_default_action,
+    perform_drop_default_action, perform_mouse_focus_default_action,
+    perform_scrollbar_scroll_default_action, perform_wheel_scroll_default_action,
+    replace_contenteditable_selection, replace_text_control_selection,
+    select_contenteditable_contents, text_control_set_selection_range_internal,
     text_control_set_selection_range_with_direction_internal, text_control_value, update_focus,
+};
+use crate::native_bridge::{
+    CurrentInputEvent, CurrentInputEventScope, PointerCaptureDispatchEvent,
 };
 use crate::runtime::{
     RendererDragData, RendererInputDispatchOutcome, RendererPointerEventProperties,
@@ -71,6 +74,12 @@ fn can_suppress_compat_mouse_event(event_name: &str) -> bool {
 
 const MOUSE_POINTER_ID: i32 = 1;
 const TOUCH_POINTER_ID: i32 = 2;
+
+struct PreparedMouseInputDispatch {
+    button: i32,
+    buttons: i32,
+    released_press: Option<PendingMousePress>,
+}
 
 fn touch_pointer_id(touch_id: i32) -> i32 {
     TOUCH_POINTER_ID.saturating_add(touch_id.max(0))
@@ -362,19 +371,22 @@ impl ScriptVm {
         pointer: RendererPointerEventProperties,
         modifiers: u8,
     ) -> Result<RendererInputDispatchOutcome> {
-        let result = self
-            .dispatch_mouse_event_at_point_with_pointer_and_modifiers_without_checkpoint(
-                x,
-                y,
-                event_name,
-                button,
-                buttons,
-                click_count,
-                delta_x,
-                delta_y,
-                pointer,
-                modifiers,
-            );
+        let prepared = self.prepare_mouse_input_dispatch(event_name, button, buttons);
+        let _current_input_event = CurrentInputEventScope::enter(
+            Rc::clone(&self._context_host),
+            CurrentInputEvent::mouse(event_name, prepared.button, modifiers),
+        );
+        let result = self.dispatch_mouse_event_at_point_with_pointer_and_modifiers_body(
+            x,
+            y,
+            event_name,
+            prepared,
+            click_count,
+            delta_x,
+            delta_y,
+            pointer,
+            modifiers,
+        );
         self.finish_input_event_dispatch_turn(result)
     }
 
@@ -428,6 +440,30 @@ impl ScriptVm {
         pointer: RendererPointerEventProperties,
         modifiers: u8,
     ) -> Result<RendererInputDispatchOutcome> {
+        let prepared = self.prepare_mouse_input_dispatch(event_name, button, buttons);
+        let _current_input_event = CurrentInputEventScope::enter(
+            Rc::clone(&self._context_host),
+            CurrentInputEvent::mouse(event_name, prepared.button, modifiers),
+        );
+        self.dispatch_mouse_event_at_point_with_pointer_and_modifiers_body(
+            x,
+            y,
+            event_name,
+            prepared,
+            click_count,
+            delta_x,
+            delta_y,
+            pointer,
+            modifiers,
+        )
+    }
+
+    fn prepare_mouse_input_dispatch(
+        &mut self,
+        event_name: &str,
+        button: i32,
+        buttons: Option<i32>,
+    ) -> PreparedMouseInputDispatch {
         let previous_pressed_buttons = self.pressed_mouse_buttons;
         let released_press = if event_name == "mouseup" {
             self.pending_mouse_press.take()
@@ -474,6 +510,31 @@ impl ScriptVm {
             }
         }
         let buttons = buttons.unwrap_or(self.pressed_mouse_buttons);
+        PreparedMouseInputDispatch {
+            button,
+            buttons,
+            released_press,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_mouse_event_at_point_with_pointer_and_modifiers_body(
+        &mut self,
+        x: f64,
+        y: f64,
+        event_name: &str,
+        prepared: PreparedMouseInputDispatch,
+        click_count: i32,
+        delta_x: f64,
+        delta_y: f64,
+        pointer: RendererPointerEventProperties,
+        modifiers: u8,
+    ) -> Result<RendererInputDispatchOutcome> {
+        let PreparedMouseInputDispatch {
+            button,
+            buttons,
+            released_press,
+        } = prepared;
 
         if let Some(outcome) =
             self.dispatch_active_scrollbar_mouse_event(x, y, event_name, button, buttons)?
@@ -967,6 +1028,11 @@ impl ScriptVm {
                     if event_name == "mouseup" {
                         suppress_compat_mouse_events = false;
                     }
+                    let had_pending_top_level_navigation_before_event =
+                        unsafe { &*runtime_ptr }.has_pending_location_navigation();
+                    let pending_child_navigations_before_event = unsafe { &*runtime_ptr }
+                        .pending_live_child_browsing_context_navigation_snapshot();
+                    let mut pending_download = None;
                     if let Some(event) = construct_mouse_event_with_modifiers(
                         scope,
                         follow_up_event_name,
@@ -976,7 +1042,27 @@ impl ScriptVm {
                         buttons,
                         modifiers,
                     ) {
-                        let _ = dispatch_public_event(scope, runtime_ptr, handle, event);
+                        let dispatched = dispatch_public_event(scope, runtime_ptr, handle, event);
+                        if follow_up_event_name == "auxclick" && dispatched.allows_default() {
+                            pending_download = perform_auxiliary_link_default_action(
+                                scope,
+                                runtime_ptr,
+                                handle,
+                                button,
+                                modifiers,
+                                &pending_child_navigations_before_event,
+                            );
+                        }
+                    }
+                    if follow_up_event_name == "auxclick" {
+                        return Ok(RendererInputDispatchOutcome {
+                            handled: true,
+                            triggered_top_level_navigation:
+                                !had_pending_top_level_navigation_before_event
+                                    && unsafe { &*runtime_ptr }.has_pending_location_navigation(),
+                            pending_download,
+                            pending_file_chooser: None,
+                        });
                     }
                 }
                 None => {}
@@ -1708,6 +1794,10 @@ impl ScriptVm {
         auto_repeat: bool,
         should_insert_text: bool,
     ) -> Result<RendererInputDispatchOutcome> {
+        let _current_input_event = CurrentInputEventScope::enter(
+            Rc::clone(&self._context_host),
+            CurrentInputEvent::keyboard(key, modifiers),
+        );
         let handle = self
             .document_runtime
             .active_element_handle()

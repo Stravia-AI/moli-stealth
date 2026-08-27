@@ -13,6 +13,7 @@ use crate::{
     document_runtime::{DomHandle, EventTargetHandle},
     frame_owner_model::DocumentId,
     native_bridge::context_host::ChildBrowsingContextBootstrap,
+    native_bridge::{CurrentInputEvent, InputNavigationPolicy, navigation_policy_from_event},
     runtime::RendererDocumentLifecycleIdentity,
 };
 
@@ -730,45 +731,8 @@ fn dispatch_click_event(
     Some(dispatch_public_event(scope, runtime_ptr, handle, event))
 }
 
-fn click_handle_internal(
-    scope: &mut v8::PinScope<'_, '_>,
-    runtime_ptr: *mut JsContextHost,
-    handle: DomHandle,
-    x: f64,
-    y: f64,
-    button: i32,
-    buttons: i32,
-    click_detail: i32,
-    modifiers: u8,
-    user_initiated: bool,
-) -> RendererInputDispatchOutcome {
-    let popup_disposition = current_click_popup_disposition(button, modifiers, user_initiated);
-    let previous_popup_disposition = unsafe { &mut *runtime_ptr }
-        .replace_current_input_popup_disposition(Some(popup_disposition));
-    let outcome = click_handle_internal_with_current_input(
-        scope,
-        runtime_ptr,
-        handle,
-        x,
-        y,
-        button,
-        buttons,
-        click_detail,
-        modifiers,
-        user_initiated,
-    );
-    let replaced_popup_disposition = unsafe { &mut *runtime_ptr }
-        .replace_current_input_popup_disposition(previous_popup_disposition);
-    assert_eq!(
-        replaced_popup_disposition,
-        Some(popup_disposition),
-        "the current click popup disposition must remain scoped to its activation"
-    );
-    outcome
-}
-
 #[allow(clippy::too_many_arguments)]
-fn click_handle_internal_with_current_input(
+fn click_handle_internal(
     scope: &mut v8::PinScope<'_, '_>,
     runtime_ptr: *mut JsContextHost,
     handle: DomHandle,
@@ -1045,6 +1009,23 @@ fn click_activation_default_action_handle(
     None
 }
 
+fn hyperlink_activation_default_action_handle(
+    runtime: &JsContextHost,
+    target: DomHandle,
+) -> Option<DomHandle> {
+    let mut current = Some(target);
+    while let Some(handle) = current {
+        if is_disabled_form_control(runtime, handle) {
+            return None;
+        }
+        if element_is_anchor_with_href(runtime, handle) {
+            return Some(handle);
+        }
+        current = runtime.dom_host().parent_node(handle);
+    }
+    None
+}
+
 enum ClickActivationDefaultAction {
     Element(DomHandle),
     LabelControl(DomHandle),
@@ -1201,6 +1182,26 @@ pub(crate) fn perform_click_default_action_for_dispatched_event(
         false,
         &[],
     );
+}
+
+pub(crate) fn perform_auxiliary_link_default_action(
+    scope: &mut v8::PinScope<'_, '_>,
+    runtime_ptr: *mut JsContextHost,
+    target: DomHandle,
+    button: i32,
+    modifiers: u8,
+    pending_child_navigations_before_default: &[(DomHandle, ChildBrowsingContextBootstrap)],
+) -> Option<RendererPendingDownloadActivation> {
+    let handle = hyperlink_activation_default_action_handle(unsafe { &*runtime_ptr }, target)?;
+    anchor_click_default_action(
+        scope,
+        runtime_ptr,
+        handle,
+        button,
+        modifiers,
+        true,
+        pending_child_navigations_before_default,
+    )
 }
 
 pub(crate) enum DispatchedClickLegacyActivation {
@@ -1855,7 +1856,8 @@ fn anchor_click_default_action(
             suggested_filename,
         );
     }
-    let navigation_policy = hyperlink_navigation_policy(button, modifiers, user_initiated);
+    let navigation_policy =
+        hyperlink_navigation_policy(button, modifiers, runtime.current_input_event());
     if navigation_policy == HyperlinkNavigationPolicy::Download {
         return anchor_download_activation(
             scope,
@@ -2015,47 +2017,19 @@ enum HyperlinkNavigationPolicy {
 fn hyperlink_navigation_policy(
     button: i32,
     modifiers: u8,
-    user_initiated: bool,
+    current_input: Option<CurrentInputEvent>,
 ) -> HyperlinkNavigationPolicy {
-    const ALT: u8 = 1;
-    const SHIFT: u8 = 8;
-
-    #[cfg(target_os = "macos")]
-    let platform_new_tab_modifier = 4;
-    #[cfg(not(target_os = "macos"))]
-    let platform_new_tab_modifier = 2;
-
-    let requests_new_tab = button == 1 || modifiers & platform_new_tab_modifier != 0;
-    let shift = modifiers & SHIFT != 0;
-    let alt = modifiers & ALT != 0;
-    if requests_new_tab {
-        let disposition = if shift || !user_initiated {
-            RendererPopupDisposition::Foreground
-        } else {
-            RendererPopupDisposition::Background
-        };
-        HyperlinkNavigationPolicy::Auxiliary(disposition)
-    } else if shift {
-        // The renderer target model has no separate window chrome. Preserve
-        // Chromium's selected-surface behavior by folding a new window into a
-        // foreground auxiliary target.
-        HyperlinkNavigationPolicy::Auxiliary(RendererPopupDisposition::Foreground)
-    } else if alt && user_initiated {
-        HyperlinkNavigationPolicy::Download
-    } else {
-        HyperlinkNavigationPolicy::Current
-    }
-}
-
-fn current_click_popup_disposition(
-    button: i32,
-    modifiers: u8,
-    user_initiated: bool,
-) -> RendererPopupDisposition {
-    match hyperlink_navigation_policy(button, modifiers, user_initiated) {
-        HyperlinkNavigationPolicy::Auxiliary(disposition) => disposition,
-        HyperlinkNavigationPolicy::Current | HyperlinkNavigationPolicy::Download => {
-            RendererPopupDisposition::Foreground
+    match navigation_policy_from_event(button, modifiers, current_input) {
+        InputNavigationPolicy::Current => HyperlinkNavigationPolicy::Current,
+        InputNavigationPolicy::Download => HyperlinkNavigationPolicy::Download,
+        InputNavigationPolicy::NewBackgroundSurface => {
+            HyperlinkNavigationPolicy::Auxiliary(RendererPopupDisposition::Background)
+        }
+        InputNavigationPolicy::NewWindow | InputNavigationPolicy::NewForegroundSurface => {
+            // The renderer target model has no separate window chrome. Preserve
+            // Chromium's selected-surface behavior by folding a new window into a
+            // foreground auxiliary target.
+            HyperlinkNavigationPolicy::Auxiliary(RendererPopupDisposition::Foreground)
         }
     }
 }
@@ -2394,11 +2368,11 @@ mod hyperlink_popup_disposition_tests {
     #[test]
     fn ordinary_click_uses_the_declared_target() {
         assert_eq!(
-            hyperlink_navigation_policy(0, 0, true),
+            hyperlink_navigation_policy(0, 0, None),
             HyperlinkNavigationPolicy::Current
         );
         assert_eq!(
-            hyperlink_navigation_policy(0, NON_PLATFORM_NEW_TAB_MODIFIER, true),
+            hyperlink_navigation_policy(0, NON_PLATFORM_NEW_TAB_MODIFIER, None),
             HyperlinkNavigationPolicy::Current
         );
     }
@@ -2406,19 +2380,35 @@ mod hyperlink_popup_disposition_tests {
     #[test]
     fn trusted_new_context_input_matches_chromium_surface_selection() {
         assert_eq!(
-            hyperlink_navigation_policy(1, 0, true),
+            hyperlink_navigation_policy(1, 0, Some(CurrentInputEvent::mouse("mouseup", 1, 0)),),
             HyperlinkNavigationPolicy::Auxiliary(RendererPopupDisposition::Background)
         );
         assert_eq!(
-            hyperlink_navigation_policy(0, PLATFORM_NEW_TAB_MODIFIER, true),
+            hyperlink_navigation_policy(
+                0,
+                PLATFORM_NEW_TAB_MODIFIER,
+                Some(CurrentInputEvent::mouse(
+                    "mouseup",
+                    0,
+                    PLATFORM_NEW_TAB_MODIFIER,
+                )),
+            ),
             HyperlinkNavigationPolicy::Auxiliary(RendererPopupDisposition::Background)
         );
         assert_eq!(
-            hyperlink_navigation_policy(0, SHIFT, true),
+            hyperlink_navigation_policy(
+                0,
+                SHIFT,
+                Some(CurrentInputEvent::mouse("mouseup", 0, SHIFT)),
+            ),
             HyperlinkNavigationPolicy::Auxiliary(RendererPopupDisposition::Foreground)
         );
         assert_eq!(
-            hyperlink_navigation_policy(1, SHIFT, true),
+            hyperlink_navigation_policy(
+                1,
+                SHIFT,
+                Some(CurrentInputEvent::mouse("mouseup", 1, SHIFT)),
+            ),
             HyperlinkNavigationPolicy::Auxiliary(RendererPopupDisposition::Foreground)
         );
     }
@@ -2426,11 +2416,11 @@ mod hyperlink_popup_disposition_tests {
     #[test]
     fn synthetic_new_tab_input_cannot_create_a_background_tab_under() {
         assert_eq!(
-            hyperlink_navigation_policy(1, 0, false),
+            hyperlink_navigation_policy(1, 0, None),
             HyperlinkNavigationPolicy::Auxiliary(RendererPopupDisposition::Foreground)
         );
         assert_eq!(
-            hyperlink_navigation_policy(0, PLATFORM_NEW_TAB_MODIFIER, false),
+            hyperlink_navigation_policy(0, PLATFORM_NEW_TAB_MODIFIER, None),
             HyperlinkNavigationPolicy::Auxiliary(RendererPopupDisposition::Foreground)
         );
     }
@@ -2438,11 +2428,11 @@ mod hyperlink_popup_disposition_tests {
     #[test]
     fn only_trusted_alt_click_requests_a_download() {
         assert_eq!(
-            hyperlink_navigation_policy(0, ALT, true),
+            hyperlink_navigation_policy(0, ALT, Some(CurrentInputEvent::mouse("mouseup", 0, ALT)),),
             HyperlinkNavigationPolicy::Download
         );
         assert_eq!(
-            hyperlink_navigation_policy(0, ALT, false),
+            hyperlink_navigation_policy(0, ALT, None),
             HyperlinkNavigationPolicy::Current
         );
     }

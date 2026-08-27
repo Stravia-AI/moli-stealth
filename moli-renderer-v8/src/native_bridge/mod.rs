@@ -5,9 +5,13 @@ mod bridge;
 mod child_window_surface;
 mod collections;
 mod context_host;
+mod current_input;
 pub(crate) use context_host::{
     JsContextHost, JsContextHostPageTaskCapabilities, PendingScrollObservableEffects,
     PostParseAutofocusAdmission, ServiceWorkerWindowOwner,
+};
+pub(crate) use current_input::{
+    CurrentInputEvent, CurrentInputEventScope, InputNavigationPolicy, navigation_policy_from_event,
 };
 pub(crate) mod document;
 pub(crate) mod element;

@@ -125,7 +125,7 @@ pub(crate) use activation::{
 pub(crate) use activation::{
     activate_handle_via_click, activate_handle_via_click_with_detail_and_modifiers,
     activate_handle_via_synthetic_click, dispatched_click_activation_target,
-    finish_legacy_activation_for_dispatched_click,
+    finish_legacy_activation_for_dispatched_click, perform_auxiliary_link_default_action,
     perform_click_default_action_for_dispatched_event, perform_drop_default_action,
     prepare_legacy_activation_for_dispatched_click, replace_contenteditable_selection,
     scroll_to_url_fragment_or_top, select_contenteditable_contents,

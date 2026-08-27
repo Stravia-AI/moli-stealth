@@ -107,11 +107,15 @@ auto-attach reconciliation without duplicate sessions, stable Tab-to-Page
 ownership across foreground changes, `Target.createTarget` foreground and
 background behavior, Page visibility changes, screencast visibility
 `true -> false -> true` across demotion and close-driven promotion, and a real
-default discovery target that is not recreated after close. The complete
-12-contract group passed three consecutive fresh Chromium processes and five
-consecutive fresh Moli processes. Chromium source revision `a03603fe9af6` was
-also inspected to explain the access-mode and auto-attach machinery; the
-executable probe remains the behavioral authority.
+default discovery target that is not recreated after close. It also drives a
+real middle-button press/release through `Input.dispatchMouseEvent` and checks
+that the trusted `auxclick` anchor default action leaves the source visible and
+creates a hidden background Page. The original 12-contract matrix passed three
+consecutive fresh Chromium processes and five consecutive fresh Moli processes;
+the middle-click contract was then run unchanged against both engines.
+Chromium source revision `a03603fe9af6` was also inspected to explain the
+access-mode and auto-attach machinery; the executable probe remains the
+behavioral authority.
 
 ## Current Coverage
 

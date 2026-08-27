@@ -107,6 +107,21 @@ def _raw_semantic_contracts() -> tuple[RawSemanticContract, ...]:
             _noopener_popup_devtools_attribution,
         ),
         RawSemanticContract(
+            "raw_cdp_contract_middle_click_background_popup",
+            "A real middle-button press/release dispatches an uncanceled auxclick whose anchor default action opens a background Page target while the source target stays foreground.",
+            "Chromium CurrentInputEvent, NavigationPolicyFromEvent, and HTMLAnchorElement auxclick default action",
+            [
+                "Target.createBrowserContext",
+                "Target.setDiscoverTargets",
+                "Target.createTarget",
+                "Target.attachToTarget x2",
+                "Runtime.evaluate",
+                "Input.dispatchMouseEvent x2",
+                "Target.getTargetInfo",
+            ],
+            _middle_click_background_popup,
+        ),
+        RawSemanticContract(
             "raw_cdp_contract_target_multi_attach_independence",
             "Each flattened attachment has a distinct session and detaching one session leaves the other attachment usable.",
             source,
@@ -1355,6 +1370,202 @@ async def _noopener_popup_devtools_attribution(
                 == source_frame_id,
                 "canAccessOpener": detached_info.get("canAccessOpener"),
             },
+        }
+    except Exception as error:
+        raise SmokeError(f"{stage}: {type(error).__name__}: {error}") from error
+    finally:
+        for target_id in (popup_target_id, source_target_id):
+            if target_id is not None:
+                await _ignore_raw_error(
+                    client,
+                    "Target.closeTarget",
+                    {"targetId": target_id},
+                )
+        if browser_context_id is not None:
+            await _ignore_raw_error(
+                client,
+                "Target.disposeBrowserContext",
+                {"browserContextId": browser_context_id},
+            )
+        await client.websocket.close()
+
+
+async def _middle_click_background_popup(
+    endpoint: str,
+    fixture: str,
+) -> dict[str, Any]:
+    client = await connect_raw_cdp(endpoint)
+    browser_context_id: str | None = None
+    source_target_id: str | None = None
+    popup_target_id: str | None = None
+    stage = "create browser context"
+    try:
+        context_result, _ = await _raw_command(client, "Target.createBrowserContext")
+        browser_context_id = context_result["browserContextId"]
+        await _raw_command(client, "Target.setDiscoverTargets", {"discover": True})
+
+        source_url = f"{fixture}/plain?middle-click-source=1"
+        popup_url = f"{fixture}/plain?middle-click-popup=1"
+        stage = "create middle-click source target"
+        source_result, _ = await _raw_command(
+            client,
+            "Target.createTarget",
+            {"url": source_url, "browserContextId": browser_context_id},
+        )
+        source_target_id = source_result["targetId"]
+        attached, _ = await _raw_command(
+            client,
+            "Target.attachToTarget",
+            {"targetId": source_target_id, "flatten": True},
+        )
+        source_session_id = attached["sessionId"]
+
+        source_document: dict[str, Any] | None = None
+
+        async def source_document_loaded() -> bool:
+            nonlocal source_document
+            evaluation, _ = await _raw_command(
+                client,
+                "Runtime.evaluate",
+                {
+                    "expression": "({url: location.href, readyState: document.readyState})",
+                    "returnByValue": True,
+                },
+                session_id=source_session_id,
+            )
+            candidate = evaluation["result"].get("value")
+            source_document = candidate if isinstance(candidate, dict) else None
+            return source_document == {"url": source_url, "readyState": "complete"}
+
+        stage = "wait for middle-click source document"
+        await wait_until(source_document_loaded, "middle-click source document complete")
+
+        stage = "install middle-click anchor"
+        fixture_result, _ = await _raw_command(
+            client,
+            "Runtime.evaluate",
+            {
+                "expression": (
+                    "(() => {"
+                    "document.body.replaceChildren();"
+                    "document.body.style.margin = '0';"
+                    "const anchor = document.createElement('a');"
+                    f"anchor.href = {json.dumps(popup_url)};"
+                    "anchor.textContent = 'open';"
+                    "anchor.style.cssText = 'position:fixed;left:0;top:0;width:120px;height:80px;display:block';"
+                    "window.__middleAuxclickEvents = [];"
+                    "anchor.addEventListener('auxclick', event => {"
+                    "window.__middleAuxclickEvents.push(`${event.type}:${event.button}:${event.isTrusted}`);"
+                    "});"
+                    "document.body.append(anchor);"
+                    "return anchor.getBoundingClientRect().toJSON();"
+                    "})()"
+                ),
+                "returnByValue": True,
+            },
+            session_id=source_session_id,
+        )
+        fixture_rect = fixture_result["result"].get("value")
+        _require(isinstance(fixture_rect, dict), "middle-click anchor has no layout rect")
+
+        stage = "dispatch real middle-button input"
+        await _raw_command(
+            client,
+            "Input.dispatchMouseEvent",
+            {
+                "type": "mousePressed",
+                "x": 20,
+                "y": 20,
+                "button": "middle",
+                "buttons": 4,
+                "clickCount": 1,
+            },
+            session_id=source_session_id,
+        )
+        _, release_seen = await _raw_command(
+            client,
+            "Input.dispatchMouseEvent",
+            {
+                "type": "mouseReleased",
+                "x": 20,
+                "y": 20,
+                "button": "middle",
+                "buttons": 0,
+                "clickCount": 1,
+            },
+            session_id=source_session_id,
+        )
+
+        auxclick_result, auxclick_seen = await _raw_command(
+            client,
+            "Runtime.evaluate",
+            {
+                "expression": "window.__middleAuxclickEvents.join('|')",
+                "returnByValue": True,
+            },
+            session_id=source_session_id,
+        )
+        assert_equal(
+            auxclick_result["result"].get("value"),
+            "auxclick:1:true",
+            "real middle-button auxclick",
+        )
+
+        stage = "wait for middle-click popup target"
+        popup_event = await _raw_wait_for_event(
+            client,
+            "Target.targetCreated",
+            lambda params: params.get("targetInfo", {}).get("browserContextId")
+            == browser_context_id
+            and params.get("targetInfo", {}).get("targetId") != source_target_id,
+            [*release_seen, *auxclick_seen],
+        )
+        popup_target_id = popup_event["params"]["targetInfo"]["targetId"]
+
+        popup_info: dict[str, Any] | None = None
+
+        async def popup_navigation_committed() -> bool:
+            nonlocal popup_info
+            result, _ = await _raw_command(
+                client,
+                "Target.getTargetInfo",
+                {"targetId": popup_target_id},
+            )
+            candidate = result.get("targetInfo")
+            popup_info = candidate if isinstance(candidate, dict) else None
+            return popup_info is not None and popup_info.get("url") == popup_url
+
+        stage = "wait for middle-click popup navigation"
+        await wait_until(popup_navigation_committed, "middle-click popup navigation")
+
+        popup_attach, _ = await _raw_command(
+            client,
+            "Target.attachToTarget",
+            {"targetId": popup_target_id, "flatten": True},
+        )
+
+        async def visibility(session_id: str) -> str | None:
+            result, _ = await _raw_command(
+                client,
+                "Runtime.evaluate",
+                {
+                    "expression": "document.visibilityState",
+                    "returnByValue": True,
+                },
+                session_id=session_id,
+            )
+            return result.get("result", {}).get("value")
+
+        source_visibility = await visibility(source_session_id)
+        popup_visibility = await visibility(popup_attach["sessionId"])
+        assert_equal(source_visibility, "visible", "middle-click source visibility")
+        assert_equal(popup_visibility, "hidden", "middle-click popup visibility")
+
+        return {
+            "auxclick": auxclick_result["result"].get("value"),
+            "popupUrl": popup_info.get("url") if popup_info is not None else None,
+            "sourceVisibility": source_visibility,
+            "popupVisibility": popup_visibility,
         }
     except Exception as error:
         raise SmokeError(f"{stage}: {type(error).__name__}: {error}") from error
