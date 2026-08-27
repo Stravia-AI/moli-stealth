@@ -1,13 +1,14 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     time::Instant,
 };
 
 use moli_core::{RendererOutputFence, RendererOutputTransportMessage};
 use moli_protocol::{
-    BackgroundNavigationCompletion, BackgroundProtocolEvent, CdpSchedulerEvent,
-    CommandDispatchContext, CompletedCdpCommandDispatch, CompletedPageScreencastCapture,
-    DeferredMainDocumentLoadObservationId, ParsedCdpCommand, PendingCdpCommandDispatch,
+    BackgroundNavigationCompletion, BackgroundProtocolEvent, CdpPendingCommandOrdering,
+    CdpSchedulerEvent, CommandDispatchContext, CompletedCdpCommandDispatch,
+    CompletedPageScreencastCapture, DeferredMainDocumentLoadObservationId, ParsedCdpCommand,
+    PendingCdpCommandDispatch,
     conn::{RuntimeInspectorAsyncCompletionReceiver, RuntimeInspectorResponseReady},
 };
 use serde_json::json;
@@ -50,6 +51,7 @@ struct InFlightCommandMetadata {
 
 struct InFlightCommandState {
     metadata: InFlightCommandMetadata,
+    same_session_response_barrier: bool,
     dispatch: CommandDispatchState,
     output_release_permit: CommandOutputReleasePermit,
     command_context: CommandDispatchContext,
@@ -67,6 +69,29 @@ struct BlockedCommandDispatch {
 }
 
 type InFlightCommands = HashMap<u64, InFlightCommandState>;
+
+fn session_response_barrier_is_active<'a>(
+    barrier_sessions: impl IntoIterator<Item = Option<&'a str>>,
+    session_id: Option<&str>,
+) -> bool {
+    barrier_sessions
+        .into_iter()
+        .any(|barrier_session_id| barrier_session_id == session_id)
+}
+
+fn command_session_dispatch_is_blocked(
+    in_flight_commands: &InFlightCommands,
+    session_id: Option<&str>,
+) -> bool {
+    session_response_barrier_is_active(
+        in_flight_commands.values().filter_map(|state| {
+            state
+                .same_session_response_barrier
+                .then_some(state.metadata.session_id.as_deref())
+        }),
+        session_id,
+    )
+}
 
 fn page_javascript_owner_is_blocked(
     scheduler: &CdpScheduler,
@@ -282,7 +307,7 @@ async fn run_cdp_scheduler_actor(
                 {
                     break;
                 }
-                if !drain_blocked_commands_after_navigation_gate(
+                if !drain_blocked_commands(
                     &frontend_router,
                     &mut scheduler,
                     &mut scheduler_input_rx,
@@ -455,7 +480,7 @@ async fn handle_scheduler_input(
             {
                 return false;
             }
-            drain_blocked_commands_after_navigation_gate(
+            drain_blocked_commands(
                 frontend_router,
                 scheduler,
                 scheduler_input_rx,
@@ -1417,6 +1442,29 @@ async fn handle_client_command_with_interleaved_output(
     if let Some(method) = probe_method.as_deref() {
         tracing::info!(method, "CMD_PROBE_COMMAND_RECEIVED");
     }
+    if command_session_dispatch_is_blocked(in_flight_commands, metadata.session_id.as_deref()) {
+        trace_command(
+            &command,
+            "command_blocked_by_same_session_response_barrier",
+            None,
+            None,
+            None,
+        );
+        blocked_commands.push_back(BlockedCommandDispatch { command, metadata });
+        return drain_blocked_commands(
+            frontend_router,
+            scheduler,
+            scheduler_input_rx,
+            pending_runtime_deferred_replies,
+            deferred_runtime_response_tx,
+            adapter_scheduler,
+            pending_command_completion_tx,
+            in_flight_commands,
+            blocked_commands,
+            next_in_flight_command_token,
+        )
+        .await;
+    }
     if !blocked_commands.is_empty() && scheduler.command_waits_for_navigation_flush(&command) {
         trace_command(
             &command,
@@ -1426,7 +1474,7 @@ async fn handle_client_command_with_interleaved_output(
             None,
         );
         blocked_commands.push_back(BlockedCommandDispatch { command, metadata });
-        return drain_blocked_commands_after_navigation_gate(
+        return drain_blocked_commands(
             frontend_router,
             scheduler,
             scheduler_input_rx,
@@ -1562,11 +1610,16 @@ async fn start_ready_command_dispatch(
         }
         CommandTaskStep::Pending(pending) => {
             trace_command(command, "command_dispatch_pending", None, None, None);
+            let same_session_response_barrier = matches!(
+                pending.ordering(),
+                CdpPendingCommandOrdering::SameSessionResponseBarrier
+            );
             let token = take_next_in_flight_command_token(next_in_flight_command_token);
             in_flight_commands.insert(
                 token,
                 InFlightCommandState {
                     metadata,
+                    same_session_response_barrier,
                     dispatch: CommandDispatchState::pending_command(),
                     output_release_permit,
                     command_context,
@@ -1579,7 +1632,7 @@ async fn start_ready_command_dispatch(
     }
 }
 
-async fn drain_blocked_commands_after_navigation_gate(
+async fn drain_blocked_commands(
     frontend_router: &CdpFrontendRouter,
     scheduler: &mut CdpScheduler,
     scheduler_input_rx: &mut SchedulerInputReceivers,
@@ -1591,10 +1644,30 @@ async fn drain_blocked_commands_after_navigation_gate(
     blocked_commands: &mut VecDeque<BlockedCommandDispatch>,
     next_in_flight_command_token: &mut u64,
 ) -> bool {
-    loop {
+    let mut stalled_sessions = HashSet::new();
+    let blocked_command_count = blocked_commands.len();
+    for _ in 0..blocked_command_count {
         let Some(blocked) = blocked_commands.pop_front() else {
             return true;
         };
+        let session_id = blocked.metadata.session_id.clone();
+        if stalled_sessions.contains(&session_id)
+            || command_session_dispatch_is_blocked(
+                in_flight_commands,
+                blocked.metadata.session_id.as_deref(),
+            )
+        {
+            trace_command(
+                &blocked.command,
+                "blocked_command_still_waiting_for_same_session_response",
+                None,
+                None,
+                None,
+            );
+            stalled_sessions.insert(session_id);
+            blocked_commands.push_back(blocked);
+            continue;
+        }
         if scheduler.command_waits_for_navigation_flush(&blocked.command) {
             trace_command(
                 &blocked.command,
@@ -1603,8 +1676,9 @@ async fn drain_blocked_commands_after_navigation_gate(
                 None,
                 None,
             );
-            blocked_commands.push_front(blocked);
-            return true;
+            stalled_sessions.insert(session_id);
+            blocked_commands.push_back(blocked);
+            continue;
         }
         match scheduler.start_command_or_request_background_navigation_flush(&blocked.command) {
             CommandStartAction::NeedsBackgroundNavigationFlush => {
@@ -1615,8 +1689,9 @@ async fn drain_blocked_commands_after_navigation_gate(
                     None,
                     None,
                 );
-                blocked_commands.push_front(blocked);
-                return true;
+                stalled_sessions.insert(session_id);
+                blocked_commands.push_back(blocked);
+                continue;
             }
             CommandStartAction::Dispatch {
                 step,
@@ -1646,6 +1721,7 @@ async fn drain_blocked_commands_after_navigation_gate(
             }
         }
     }
+    true
 }
 
 async fn flush_completed_command_output(
@@ -2056,6 +2132,19 @@ mod tests {
     fn in_flight_command_tokens_never_wrap() {
         let mut next = u64::MAX;
         let _ = take_next_in_flight_command_token(&mut next);
+    }
+
+    #[test]
+    fn response_barrier_blocks_only_its_own_session() {
+        assert!(session_response_barrier_is_active(
+            [Some("SID-A")],
+            Some("SID-A")
+        ));
+        assert!(!session_response_barrier_is_active(
+            [Some("SID-A")],
+            Some("SID-B")
+        ));
+        assert!(session_response_barrier_is_active([None], None));
     }
 
     #[tokio::test]

@@ -17,6 +17,18 @@ pub struct CompletedCdpCommandDispatch {
     owner_scope: Option<CommandOwnerScope>,
 }
 
+/// Frontend ordering required while a pending CDP command is settling.
+///
+/// Most Moli commands may interleave by design. A Chromium-synchronous domain
+/// handler that crosses an internal async boundary instead retains a response
+/// barrier so later commands for that session cannot publish observable output
+/// before its response.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CdpPendingCommandOrdering {
+    Interleavable,
+    SameSessionResponseBarrier,
+}
+
 pub enum CdpCommandTaskStep {
     Pending(Box<PendingCdpCommandDispatch>),
     Complete(CdpRendererOwnerTurnOutcome),
@@ -184,6 +196,17 @@ impl PendingCdpCommandDispatch {
 
     pub fn kind_name(&self) -> &'static str {
         self.inner.name()
+    }
+
+    pub fn ordering(&self) -> CdpPendingCommandOrdering {
+        match &self.inner {
+            PendingCdpCommandDispatchKind::Page(pending)
+                if pending.requires_same_session_response_barrier() =>
+            {
+                CdpPendingCommandOrdering::SameSessionResponseBarrier
+            }
+            _ => CdpPendingCommandOrdering::Interleavable,
+        }
     }
 
     #[cfg(test)]
