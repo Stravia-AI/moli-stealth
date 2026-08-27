@@ -1,4 +1,4 @@
-name: Spider Bench Comment
+name: Spider Bench Report
 
 on:
   workflow_run:
@@ -7,6 +7,7 @@ on:
 
 # This trusted workflow runs from the default branch. It never executes code
 # from the PR checkout and only renders bounded numeric fields from the artifact.
+# The rendered report is published both as an Actions summary and a PR comment.
 permissions:
   actions: read
   contents: read
@@ -14,7 +15,7 @@ permissions:
 
 jobs:
   comment:
-    name: Update PR benchmark comment
+    name: Publish benchmark report
     if: >-
       github.event.workflow_run.event == 'pull_request' &&
       github.event.workflow_run.conclusion != 'cancelled' &&
@@ -65,6 +66,9 @@ jobs:
               --output spider-bench-comment.md
             echo "has_comparison=false" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Publish Actions report
+        run: cat spider-bench-comment.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Post PR benchmark comment
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7

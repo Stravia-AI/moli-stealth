@@ -1,4 +1,4 @@
-name: Sequential Navigation Soak Comment
+name: Sequential Navigation Soak Report
 
 on:
   workflow_run:
@@ -7,6 +7,7 @@ on:
 
 # This workflow runs from the default branch. It never executes the measured
 # PR binary and only renders bounded numeric fields from the downloaded artifact.
+# The rendered report is published both as an Actions summary and a PR comment.
 permissions:
   actions: read
   contents: read
@@ -14,7 +15,7 @@ permissions:
 
 jobs:
   comment:
-    name: Update PR soak comment
+    name: Publish soak report
     if: >-
       github.event.workflow_run.event == 'pull_request' &&
       github.event.workflow_run.conclusion != 'cancelled' &&
@@ -67,6 +68,9 @@ jobs:
               --output sequential-navigation-soak-comment.md
             echo "has_comparison=false" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Publish Actions report
+        run: cat sequential-navigation-soak-comment.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Post PR soak comment
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
