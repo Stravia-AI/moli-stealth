@@ -364,7 +364,15 @@ where
         ) {
             layout_box.css_images = self.css_image_resources(source_node, &style);
         }
-        layout_box.scroll_offset = self.source.scroll_offset(source_node);
+        // DOM scroll state is stored in CSSOM units. Numeric layout operates
+        // in effective-zoomed CSS pixels, so import the sampled state into the
+        // same coordinate space as the box geometry.
+        let scroll_offset = self.source.scroll_offset(source_node);
+        let effective_zoom = style.effective_zoom();
+        layout_box.scroll_offset = crate::LayoutPoint::new(
+            scroll_offset.x * effective_zoom,
+            scroll_offset.y * effective_zoom,
+        );
         layout_box
     }
 

@@ -1333,6 +1333,19 @@ impl ResolvedLayoutStyle {
         self.paint_containment
     }
 
+    /// Returns the accumulated CSS `zoom` applied to this box's layout values.
+    ///
+    /// Stylo has already applied this factor to computed CSS lengths. Layout,
+    /// paint, and client rects retain that zoomed space. Browser state is
+    /// scaled into it on import, while CSSOM integer box and scroll metrics
+    /// remove the factor when they are published. Synthetic styles have no
+    /// Stylo value and therefore use the initial factor.
+    pub(crate) fn effective_zoom(&self) -> f32 {
+        self.computed
+            .as_ref()
+            .map_or(1.0, |computed| computed.effective_zoom.value())
+    }
+
     pub(crate) const fn is_visible(&self) -> bool {
         self.visible
     }

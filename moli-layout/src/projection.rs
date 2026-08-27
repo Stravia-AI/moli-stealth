@@ -545,6 +545,7 @@ where
                 .global_layout_origin(LayoutBoxId::from_index(index));
             self.boxes.push(LayoutBoxGeometry {
                 id,
+                effective_zoom: layout_box.style.effective_zoom(),
                 structural_parent: layout_box
                     .structural_parent
                     .map(|parent| LayoutOutputBoxId::from_index(parent.index())),
