@@ -118,7 +118,14 @@ jobs:
   nextest:
     name: Nextest
     runs-on: [self-hosted, moli-ci]
-    container: rust:1.96.1-bookworm
+    container:
+      image: rust:1.96.1-bookworm
+      # Docker seeds new named volumes from the pinned image. Keep toolchains
+      # and Cargo downloads local to each self-hosted Docker daemon. Bump both
+      # volume names when the image or Rust toolchain changes.
+      volumes:
+        - moli-ci-cargo-home-1-96-1-v1:/usr/local/cargo
+        - moli-ci-rustup-home-1-96-1-v1:/usr/local/rustup
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -222,7 +229,11 @@ jobs:
     needs: resolve-refs
     runs-on: [self-hosted, moli-ci]
     timeout-minutes: 60
-    container: rust:1.96.1-bookworm
+    container:
+      image: rust:1.96.1-bookworm
+      volumes:
+        - moli-ci-cargo-home-1-96-1-v1:/usr/local/cargo
+        - moli-ci-rustup-home-1-96-1-v1:/usr/local/rustup
     steps:
       - uses: actions/checkout@v4
         with:
@@ -256,7 +267,11 @@ jobs:
     needs: resolve-refs
     runs-on: [self-hosted, moli-ci]
     timeout-minutes: 60
-    container: rust:1.96.1-bookworm
+    container:
+      image: rust:1.96.1-bookworm
+      volumes:
+        - moli-ci-cargo-home-1-96-1-v1:/usr/local/cargo
+        - moli-ci-rustup-home-1-96-1-v1:/usr/local/rustup
     steps:
       - uses: actions/checkout@v4
         with:
