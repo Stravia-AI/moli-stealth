@@ -18,6 +18,7 @@ pub(crate) mod element;
 mod helpers;
 mod history_queue;
 pub(super) mod identity;
+pub(crate) mod named_access;
 mod node;
 pub(crate) mod pointer_lock;
 mod traversal;

@@ -1,6 +1,15 @@
+use crate::native_bridge::collections;
 use crate::util::{v8_string, v8str};
+use crate::webidl;
 
 use super::super::super::super::callback_arg_string;
+
+#[derive(webidl::WebIdlArgs)]
+#[webidl(prefix = "HTMLAllCollection.namedItem")]
+struct HtmlAllCollectionNamedItemArgs {
+    #[webidl(required)]
+    name: String,
+}
 
 enum HtmlAllNameOrIndex {
     Index(u32),
@@ -8,17 +17,17 @@ enum HtmlAllNameOrIndex {
 }
 
 fn array_index_property_name(value: &str) -> Option<u32> {
-    if value.is_empty() || (value.len() > 1 && value.starts_with('0')) {
-        return None;
+    collections::array_index_property_name(value)
+}
+
+fn fresh_named_value<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    value: v8::Local<'s, v8::Value>,
+) -> Option<v8::Local<'s, v8::Value>> {
+    if collections::is_document_all_named_collection_value(scope, value) {
+        return collections::build_fresh_document_all_named_collection_value(scope, value);
     }
-    if !value.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    let index = value.parse::<u64>().ok()?;
-    if index >= u64::from(u32::MAX) {
-        return None;
-    }
-    u32::try_from(index).ok()
+    Some(value)
 }
 
 fn document_all_name_or_index(
@@ -47,9 +56,10 @@ fn resolve_document_all_value<'s>(
             .filter(|value| !value.is_null_or_undefined()),
         HtmlAllNameOrIndex::Name(key) => {
             let key = v8_string(scope, &key)?;
-            named
+            let value = named
                 .get(scope, key.into())
-                .filter(|value| !value.is_null_or_undefined())
+                .filter(|value| !value.is_null_or_undefined())?;
+            fresh_named_value(scope, value)
         }
     }
 }
@@ -120,9 +130,9 @@ pub(super) fn document_all_item_callback(
     }
 }
 
-pub(super) fn document_all_named_item_callback(
-    scope: &mut v8::PinScope<'_, '_>,
-    args: v8::FunctionCallbackArguments<'_>,
+pub(super) fn document_all_named_item_callback<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
     let Ok(data) = v8::Local::<v8::Object>::try_from(args.data()) else {
@@ -136,16 +146,30 @@ pub(super) fn document_all_named_item_callback(
         rv.set_null();
         return;
     };
-    let Some(key) = callback_arg_string(scope, &args, 0) else {
-        rv.set_null();
+    let Some(parsed) = webidl::parse_args::<HtmlAllCollectionNamedItemArgs>(scope, &args) else {
         return;
     };
-    let Some(key) = v8_string(scope, &key) else {
+    let Some(key) = v8_string(scope, &parsed.name) else {
         rv.set_null();
         return;
     };
     match named.get(scope, key.into()) {
-        Some(value) if !value.is_null_or_undefined() => rv.set(value),
+        Some(value) if !value.is_null_or_undefined() => match fresh_named_value(scope, value) {
+            Some(value) => rv.set(value),
+            None => rv.set_null(),
+        },
         _ => rv.set_null(),
+    }
+}
+pub(super) fn document_all_named_collection_getter<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    _key: v8::Local<'s, v8::Name>,
+    args: v8::PropertyCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'_, v8::Value>,
+) {
+    if let Some(value) =
+        collections::build_fresh_document_all_named_collection_value(scope, args.data())
+    {
+        rv.set(value);
     }
 }

@@ -5238,6 +5238,211 @@ fn live_document_all_matches_chromium_htmldda_surface() {
 }
 
 #[test]
+fn live_document_all_obeys_legacy_named_and_indexed_semantics() {
+    let mut vm = new_parsed_test_vm(
+        "https://example.com/",
+        r#"<!doctype html><html><body>
+          <div id="dupe"></div><div id="dupe"></div>
+          <form id="same" name="same"></form>
+          <span id="42"></span>
+          <span id="043"></span>
+          <span id="4294967294"></span>
+          <span id="4294967295"></span>
+          <span id="undefined"></span>
+        </body></html>"#,
+    );
+
+    let result = vm
+        .eval(
+            r##"
+            (() => {
+              const all = document.all;
+              const collections = [
+                all.dupe,
+                all.namedItem("dupe"),
+                all("dupe", 0),
+                all.item("dupe"),
+              ];
+              const matches = collections[0];
+              const first = document.querySelectorAll("#dupe")[0];
+              const second = document.querySelectorAll("#dupe")[1];
+              const initial = [
+                collections.every(collection => collection instanceof HTMLCollection),
+                collections.every((collection, index) =>
+                  collections.slice(index + 1).every(other => collection !== other)),
+                matches.length,
+                matches[0] === first,
+                matches[1] === second,
+                all("same") === document.getElementById("same")
+              ];
+              const numericNames = [
+                all[42] === undefined,
+                all[4294967294] === undefined,
+                all["043"] === document.getElementById("043"),
+                all[4294967295] === document.getElementById("4294967295"),
+              ];
+              let namedItemMissingThrows = false;
+              try {
+                all.namedItem();
+              } catch (error) {
+                namedItemMissingThrows = error instanceof TypeError;
+              }
+              const explicitUndefined =
+                all.namedItem(undefined) === document.getElementById("undefined");
+              const namedItemLength = all.namedItem.length;
+              const third = document.createElement("div");
+              third.id = "dupe";
+              document.body.appendChild(third);
+              const appended = collections.every(collection =>
+                collection.length === 3 && collection[2] === third);
+              second.remove();
+              const removed = collections.every(collection =>
+                collection.length === 2 && collection[0] === first && collection[1] === third);
+              return JSON.stringify({
+                initial,
+                numericNames,
+                namedItemMissingThrows,
+                explicitUndefined,
+                namedItemLength,
+                appended,
+                removed,
+              });
+            })()
+            "##,
+        )
+        .expect("document.all multiple named matches should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"initial":[true,true,2,true,true,true],"numericNames":[true,true,true,true],"namedItemMissingThrows":true,"explicitUndefined":true,"namedItemLength":1,"appended":true,"removed":true}"#
+    );
+}
+
+#[test]
+fn legacy_named_access_filters_name_candidates_by_consumer() {
+    let mut vm = new_parsed_test_vm(
+        "https://example.com/",
+        r#"<!doctype html><html><body>
+            <applet id="appletId" name="appletOnly"></applet>
+            <applet name="shared"></applet>
+            <form id="form" name="shared"></form>
+            <div id="divId" name="divOnly"></div>
+            <a id="anchor" name="allOnly"></a>
+            <img id="image" name="windowAllowed">
+            <svg><a id="svgId" name="svgOnly"></a></svg>
+        </body></html>"#,
+    );
+
+    let result = vm
+        .eval(
+            r#"
+            (() => {
+              const detached = new DOMParser().parseFromString(
+                '<html><body><applet id="detachedAppletId" name="detachedApplet"></applet>' +
+                '<form id="detachedFormId" name="detachedForm"></form></body></html>',
+                'text/html'
+              );
+              return JSON.stringify({
+                windowAppletNameAbsent: window.appletOnly === undefined,
+                allAppletNameAbsent: document.all.appletOnly === undefined,
+                windowSharedUsesEligibleForm: window.shared === document.getElementById("form"),
+                allSharedUsesEligibleForm: document.all.shared === document.getElementById("form"),
+                windowAnchorNameAbsent: window.allOnly === undefined,
+                allAnchorNamePresent: document.all.allOnly === document.getElementById("anchor"),
+                windowImageNamePresent:
+                  window.windowAllowed === document.getElementById("image"),
+                allImageNamePresent:
+                  document.all.windowAllowed === document.getElementById("image"),
+                windowDivNameAbsent: window.divOnly === undefined,
+                allDivNameAbsent: document.all.divOnly === undefined,
+                windowSvgNameAbsent: window.svgOnly === undefined,
+                allSvgNameAbsent: document.all.svgOnly === undefined,
+                windowAppletIdPresent: window.appletId === document.getElementById("appletId"),
+                allAppletIdPresent: document.all.appletId === document.getElementById("appletId"),
+                windowSvgIdPresent: window.svgId === document.getElementById("svgId"),
+                allSvgIdPresent: document.all.svgId === document.getElementById("svgId"),
+                detachedAppletNameAbsent: detached.all.detachedApplet === undefined,
+                detachedAppletIdPresent:
+                  detached.all.detachedAppletId === detached.getElementById("detachedAppletId"),
+                detachedFormNamePresent:
+                  detached.all.detachedForm === detached.getElementById("detachedFormId")
+              });
+            })()
+            "#,
+        )
+        .expect("legacy named access candidate filtering should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"windowAppletNameAbsent":true,"allAppletNameAbsent":true,"windowSharedUsesEligibleForm":true,"allSharedUsesEligibleForm":true,"windowAnchorNameAbsent":true,"allAnchorNamePresent":true,"windowImageNamePresent":true,"allImageNamePresent":true,"windowDivNameAbsent":true,"allDivNameAbsent":true,"windowSvgNameAbsent":true,"allSvgNameAbsent":true,"windowAppletIdPresent":true,"allAppletIdPresent":true,"windowSvgIdPresent":true,"allSvgIdPresent":true,"detachedAppletNameAbsent":true,"detachedAppletIdPresent":true,"detachedFormNamePresent":true}"#
+    );
+}
+
+#[test]
+fn window_named_access_returns_a_live_deduplicated_collection_for_multiple_matches() {
+    let mut vm = new_parsed_test_vm(
+        "https://example.com/",
+        "<!doctype html><html><body></body></html>",
+    );
+
+    let result = vm
+        .eval(
+            r#"
+            (() => {
+              const first = document.createElement("img");
+              first.name = "multi";
+              const duplicate = document.createElement("form");
+              duplicate.id = "multi";
+              duplicate.name = "multi";
+              const rejected = document.createElement("span");
+              rejected.setAttribute("name", "multi");
+              const idOnly = document.createElement("div");
+              idOnly.id = "multi";
+              document.body.append(first, duplicate, rejected, idOnly);
+
+              const collection = window.multi;
+              const initial = {
+                isCollection: collection instanceof HTMLCollection,
+                cachedIdentity: window.multi === collection,
+                deduplicatedAndFiltered:
+                  collection.length === 3 &&
+                  collection[0] === first &&
+                  collection[1] === duplicate &&
+                  collection[2] === idOnly
+              };
+
+              const inserted = document.createElement("object");
+              inserted.name = "multi";
+              document.body.insertBefore(inserted, first);
+              const liveAfterInsert =
+                collection.length === 4 &&
+                collection[0] === inserted &&
+                collection[1] === first &&
+                collection[2] === duplicate &&
+                collection[3] === idOnly;
+
+              first.remove();
+              idOnly.id = "";
+              inserted.name = "";
+              return JSON.stringify({
+                ...initial,
+                liveAfterInsert,
+                liveAfterRemoval:
+                  collection.length === 1 && collection[0] === duplicate,
+                getterCollapsesToElement: window.multi === duplicate
+              });
+            })()
+            "#,
+        )
+        .expect("window named multi-match collection should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"isCollection":true,"cachedIdentity":true,"deduplicatedAndFiltered":true,"liveAfterInsert":true,"liveAfterRemoval":true,"getterCollapsesToElement":true}"#
+    );
+}
+
+#[test]
 fn live_html_collection_enforces_brand_and_legacy_named_property_semantics() {
     let mut vm = new_parsed_test_vm(
         "https://example.com/",

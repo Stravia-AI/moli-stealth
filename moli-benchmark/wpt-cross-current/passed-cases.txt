@@ -5085,10 +5085,14 @@ html/browsers/the-window-object/Window-document.html
 html/browsers/the-window-object/accessing-other-browsing-contexts/iterator.html
 html/browsers/the-window-object/accessing-other-browsing-contexts/window_length.html
 html/browsers/the-window-object/defaultstatus.html
+html/browsers/the-window-object/named-access-on-the-window-object/basics.html
 html/browsers/the-window-object/named-access-on-the-window-object/changing.html
 html/browsers/the-window-object/named-access-on-the-window-object/cross-global-npo.html
 html/browsers/the-window-object/named-access-on-the-window-object/doc-no-window.html
 html/browsers/the-window-object/named-access-on-the-window-object/existing-prop.html
+html/browsers/the-window-object/named-access-on-the-window-object/multi-match.html
+html/browsers/the-window-object/named-access-on-the-window-object/name-attribute-elements.html
+html/browsers/the-window-object/named-access-on-the-window-object/named-objects.html
 html/browsers/the-window-object/named-access-on-the-window-object/nested-context.html
 html/browsers/the-window-object/named-access-on-the-window-object/prototype.html
 html/browsers/the-window-object/named-access-on-the-window-object/removing.html
@@ -5193,6 +5197,7 @@ html/dom/elements/global-attributes/translate-non-html-translation-mode.html
 html/dom/elements/name-content-attribute-and-property.html
 html/dom/elements/the-innertext-and-outertext-properties/getter-first-letter-marker-multicol.html
 html/dom/elements/the-innertext-and-outertext-properties/innertext-whitespace-pre-line.html
+html/dom/historical.html
 html/dom/partial-updates/tentative/template-for-innerHTML-outside.html
 html/dom/partial-updates/tentative/template-for-invalid.html
 html/dom/partial-updates/tentative/template-for-only-html-001.html

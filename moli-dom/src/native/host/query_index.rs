@@ -1018,6 +1018,67 @@ mod tests {
     }
 
     #[test]
+    fn combined_named_candidates_are_deduplicated_filtered_and_document_ordered() {
+        let mut host = test_host();
+        let document = host.document_handle();
+        let id_only = host.create_element("div");
+        let id_and_name = host.create_element("span");
+        let accepted_name = host.create_element("form");
+
+        assert!(host.set_attribute(id_only, "id", "target"));
+        assert!(host.set_attribute(id_and_name, "id", "target"));
+        assert!(host.set_attribute(id_and_name, "name", "target"));
+        assert!(host.set_attribute(accepted_name, "name", "target"));
+        assert!(host.append_child(document, id_only));
+        assert!(host.append_child(document, id_and_name));
+        assert!(host.append_child(document, accepted_name));
+
+        assert_eq!(
+            host.element_handles_by_id_or_name_matching("target", |handle| {
+                handle == accepted_name
+            }),
+            vec![id_only, id_and_name, accepted_name]
+        );
+
+        assert!(host.insert_before(document, accepted_name, Some(id_only)));
+        assert_eq!(
+            host.element_handles_by_id_or_name_matching("target", |handle| {
+                handle == accepted_name
+            }),
+            vec![accepted_name, id_only, id_and_name]
+        );
+
+        assert!(host.remove_attribute(id_and_name, "id"));
+        assert_eq!(
+            host.element_handles_by_id_or_name_matching("target", |handle| {
+                handle == accepted_name
+            }),
+            vec![accepted_name, id_only]
+        );
+
+        let nested_root = host.create_element("section");
+        let nested_id = host.create_element("div");
+        let rejected_nested_name = host.create_element("span");
+        let accepted_nested_name = host.create_element("form");
+        assert!(host.set_attribute(nested_id, "id", "target"));
+        assert!(host.set_attribute(rejected_nested_name, "name", "target"));
+        assert!(host.set_attribute(accepted_nested_name, "name", "target"));
+        assert!(host.append_child(document, nested_root));
+        assert!(host.append_child(nested_root, nested_id));
+        assert!(host.append_child(nested_root, rejected_nested_name));
+        assert!(host.append_child(nested_root, accepted_nested_name));
+
+        assert_eq!(
+            host.element_handles_by_id_or_name_matching_in_subtree(
+                nested_root,
+                "target",
+                |handle| handle == accepted_nested_name,
+            ),
+            vec![nested_id, accepted_nested_name]
+        );
+    }
+
+    #[test]
     fn named_candidate_index_tracks_deep_subtree_connectivity_without_rebuild() {
         let mut host = test_host();
         let document = host.document_handle();

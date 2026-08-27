@@ -1,11 +1,13 @@
 use crate::document_runtime::DomHandle;
+use crate::native_bridge::collections;
 use crate::util::v8str;
 use moli_webapi_declare::WebApiObject;
 
 use super::super::super::super::JsContextHost;
 use super::super::super::define_collection_value_property;
 use super::callbacks::{
-    document_all_call_callback, document_all_item_callback, document_all_named_item_callback,
+    document_all_call_callback, document_all_item_callback, document_all_named_collection_getter,
+    document_all_named_item_callback,
 };
 use super::items::{document_all_items_array, document_all_named_lookup};
 
@@ -31,7 +33,12 @@ struct DocumentAllCollectionSurfaceDeclaration<'scope> {
     length: f64,
     #[webapi(method, callback = document_all_item_callback, data = self.data)]
     item: (),
-    #[webapi(method, callback = document_all_named_item_callback, data = self.data)]
+    #[webapi(
+        method,
+        length = 1,
+        callback = document_all_named_item_callback,
+        data = self.data
+    )]
     named_item: (),
 }
 
@@ -41,7 +48,7 @@ pub(super) fn build_document_all_collection<'s>(
     document_handle: DomHandle,
 ) -> Option<v8::Local<'s, v8::Object>> {
     let items = document_all_items_array(scope, runtime_ptr, document_handle)?;
-    let named = document_all_named_lookup(scope, items);
+    let named = document_all_named_lookup(scope, runtime_ptr, document_handle, items);
     let data = DocumentAllCollectionDataDeclaration::new(items, named)
         .bind(scope)
         .ok()?;
@@ -81,6 +88,26 @@ pub(super) fn build_document_all_collection<'s>(
         let Some(value) = named.get(scope, key) else {
             continue;
         };
+        let Ok(key_name) = v8::Local::<v8::Name>::try_from(key) else {
+            continue;
+        };
+        let Ok(key_string) = v8::Local::<v8::String>::try_from(key) else {
+            continue;
+        };
+        if collections::array_index_property_name(&key_string.to_rust_string_lossy(scope)).is_some()
+        {
+            continue;
+        }
+        if collections::is_document_all_named_collection_value(scope, value) {
+            let _ = collection.set_native_data_property_with_configuration(
+                scope,
+                key_name,
+                v8::NativeDataPropertyConfiguration::new(document_all_named_collection_getter)
+                    .data(value)
+                    .property_attribute(v8::PropertyAttribute::DONT_ENUM),
+            );
+            continue;
+        }
         define_collection_value_property(
             scope,
             collection,

@@ -1,4 +1,7 @@
 use super::helpers::{window_child_context_handle, window_host_ptr};
+use crate::native_bridge::named_access::{
+    build_window_named_items_collection, window_named_item_handles,
+};
 use crate::util::serialize_v8_iter_array;
 use moli_webapi_declare::DataPropertyDescriptorDeclaration;
 
@@ -199,28 +202,27 @@ fn window_named_access_value<'s>(
     let document = child_handle
         .and_then(|child_handle| host.child_browsing_context_document_handle(child_handle))
         .unwrap_or_else(|| host.document_handle());
-    let handle = host
-        .dom_host()
-        .element_handle_by_id_in_subtree(document, &key_name)
-        .or_else(|| {
-            host.dom_host()
-                .element_handle_by_name_in_subtree(document, &key_name)
-        });
+    let handles = window_named_item_handles(host.dom_host(), document, &key_name);
     if moli_trace::window_message_trace_enabled() {
         tracing::info!(
             target: "moli_window_message_trace",
             property = %key_name,
             child_handle = child_handle.map(|handle| handle.index()),
             document_handle = document.index(),
-            matched_handle = handle.map(|handle| handle.index()),
+            matched_handle = handles.first().map(|handle| handle.index()),
+            match_count = handles.len(),
             receiver_is_current_global = holder
                 .strict_equals(scope.get_current_context().global(scope).into()),
             stage = "window_named_property_lookup",
         );
     }
-    let handle = handle?;
-    unsafe { &mut *host_ptr }
-        .native_bridge_mut()
-        .wrap_handle(scope, host_ptr, handle)
-        .map(Into::into)
+    match handles.as_slice() {
+        [] => None,
+        [handle] => unsafe { &mut *host_ptr }
+            .native_bridge_mut()
+            .wrap_handle(scope, host_ptr, *handle)
+            .map(Into::into),
+        _ => build_window_named_items_collection(scope, host_ptr, document, &key_name)
+            .map(Into::into),
+    }
 }

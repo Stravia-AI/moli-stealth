@@ -809,6 +809,79 @@ impl DomHost {
             })
     }
 
+    pub fn element_handles_by_id_or_name_matching(
+        &self,
+        key: &str,
+        mut accepts_name: impl FnMut(DomHandle) -> bool,
+    ) -> Vec<DomHandle> {
+        self.ensure_id_index();
+        self.ensure_name_index();
+
+        let mut candidates = IndexSet::new();
+        if let Some(handles) = self
+            .id_index
+            .borrow()
+            .as_ref()
+            .and_then(|index| index.handles_by_value.get(key))
+        {
+            candidates.extend(handles.iter().copied());
+        }
+        if let Some(handles) = self
+            .name_index
+            .borrow()
+            .as_ref()
+            .and_then(|index| index.handles_by_value.get(key))
+        {
+            candidates.extend(handles.iter().copied());
+        }
+
+        let document_handle = self.document_handle();
+        let mut matches = candidates
+            .into_iter()
+            .filter(|handle| {
+                self.node(*handle).is_some_and(|node| {
+                    node.flags().in_document_tree()
+                        && node.owner_document() == Some(document_handle)
+                        && node.as_element().is_some_and(|element| {
+                            element.id() == Some(key)
+                                || (element.name_attribute() == Some(key) && accepts_name(*handle))
+                        })
+                })
+            })
+            .collect::<Vec<_>>();
+        matches.sort_by(|left, right| self.compare_handles_in_document_order(*left, *right));
+        matches
+    }
+
+    pub fn element_handles_by_id_or_name_matching_in_subtree(
+        &self,
+        root: DomHandle,
+        key: &str,
+        mut accepts_name: impl FnMut(DomHandle) -> bool,
+    ) -> Vec<DomHandle> {
+        if root == self.document_handle() {
+            return self.element_handles_by_id_or_name_matching(key, accepts_name);
+        }
+
+        let mut matches = Vec::new();
+        let mut stack = vec![root];
+        while let Some(handle) = stack.pop() {
+            if self
+                .node(handle)
+                .and_then(Node::as_element)
+                .is_some_and(|element| {
+                    element.id() == Some(key)
+                        || (element.name_attribute() == Some(key) && accepts_name(handle))
+                })
+            {
+                matches.push(handle);
+            }
+            let children = self.child_handles(handle).collect::<Vec<_>>();
+            stack.extend(children.into_iter().rev());
+        }
+        matches
+    }
+
     pub fn element_handle_by_id_in_subtree(&self, root: DomHandle, id: &str) -> Option<DomHandle> {
         if root == self.document_handle() {
             return self.element_handle_by_id(id);

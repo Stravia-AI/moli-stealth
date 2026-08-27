@@ -1,6 +1,9 @@
 use crate::native_bridge::collections::{STATIC_COLLECTION_LENGTH_SLOT, mark_collection_kind};
 use crate::native_bridge::document::DETACHED_NATIVE_NODE_LIST_HANDLES_SLOT;
 use crate::native_bridge::identity::CollectionKind;
+use crate::native_bridge::named_access::{
+    LegacyNamedAccessKind, html_element_name_attribute_is_exposed,
+};
 use crate::util::{
     context_host_ptr_from_global_bridge, get_private_value, serialize_v8_iter_array,
     set_private_value,
@@ -259,16 +262,25 @@ pub(in crate::native_bridge::document) fn detached_html_collection_named_item_ca
 fn detached_collection_named_lookup<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     values: &[v8::Local<'s, v8::Object>],
+    name_access_kind: Option<LegacyNamedAccessKind>,
 ) -> v8::Local<'s, v8::Object> {
     let lookup = ObjectLiteralDeclaration::bind(scope);
     for value in values {
-        for key_text in [
-            detached_collection_attribute_value(scope, *value, "id"),
-            detached_collection_attribute_value(scope, *value, "name"),
-        ]
-        .into_iter()
-        .flatten()
-        {
+        for attribute_name in ["id", "name"] {
+            if attribute_name == "name"
+                && name_access_kind.is_some_and(|kind| {
+                    detached_element_namespace_uri(scope, *value).as_deref() != Some(XHTML_NS)
+                        || !detached_element_local_name(scope, *value).is_some_and(|local_name| {
+                            html_element_name_attribute_is_exposed(&local_name, kind)
+                        })
+                })
+            {
+                continue;
+            }
+            let Some(key_text) = detached_collection_attribute_value(scope, *value, attribute_name)
+            else {
+                continue;
+            };
             if key_text.is_empty() {
                 continue;
             }
@@ -401,7 +413,7 @@ pub(in crate::native_bridge::document) fn build_detached_html_collection<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     values: &[v8::Local<'s, v8::Object>],
 ) -> Option<v8::Local<'s, v8::Object>> {
-    let named = detached_collection_named_lookup(scope, values);
+    let named = detached_collection_named_lookup(scope, values, None);
     let wrapper = DetachedHtmlCollectionDeclaration::new().bind(scope).ok()?;
     install_detached_collection_state(scope, wrapper, CollectionKind::HtmlCollection, values.len());
     install_detached_collection_members(scope, wrapper, values, Some(named))?;
@@ -465,7 +477,8 @@ pub(in crate::native_bridge::document) fn build_detached_document_all<'s>(
     let prototype = v8::Local::<v8::Object>::try_from(prototype).ok()?;
 
     let items = build_object_array(scope, &values);
-    let named = detached_collection_named_lookup(scope, &values);
+    let named =
+        detached_collection_named_lookup(scope, &values, Some(LegacyNamedAccessKind::DocumentAll));
     let data = DetachedCollectionItemsAndNamedDataDeclaration::new(items.into(), named)
         .bind(scope)
         .ok()?;

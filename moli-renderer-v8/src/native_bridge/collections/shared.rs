@@ -78,7 +78,7 @@ pub(in crate::native_bridge::collections) fn static_handle_collection_handle_at(
         .static_handle_collection_handle_at(collection_id, index)
 }
 
-fn object_collection_id(
+pub(in crate::native_bridge::collections) fn object_collection_id(
     scope: &mut v8::PinScope<'_, '_>,
     object: v8::Local<'_, v8::Object>,
 ) -> std::result::Result<u32, String> {
@@ -159,14 +159,20 @@ pub(in crate::native_bridge::collections) fn named_item_property_names(
     names.into_iter().collect()
 }
 
-pub(in crate::native_bridge::collections) fn is_array_index_property_name(value: &str) -> bool {
+pub(in crate::native_bridge) fn array_index_property_name(value: &str) -> Option<u32> {
     if value.is_empty() || (value.len() > 1 && value.starts_with('0')) {
-        return false;
+        return None;
     }
     if !value.bytes().all(|byte| byte.is_ascii_digit()) {
-        return false;
+        return None;
     }
-    value
-        .parse::<u64>()
-        .is_ok_and(|index| index < u64::from(u32::MAX))
+    let index = value.parse::<u64>().ok()?;
+    if index >= u64::from(u32::MAX) {
+        return None;
+    }
+    u32::try_from(index).ok()
+}
+
+pub(in crate::native_bridge::collections) fn is_array_index_property_name(value: &str) -> bool {
+    array_index_property_name(value).is_some()
 }

@@ -375,6 +375,26 @@ pub(in crate::native_bridge) fn build_live_collection_wrapper<'s>(
         host.native_bridge_mut()
             .register_live_collection(descriptor.clone())
     };
+    let wrapper = instantiate_live_collection_wrapper(
+        scope,
+        runtime_ptr,
+        collection_id,
+        descriptor.collection_kind,
+    );
+    {
+        let host = unsafe { &mut *runtime_ptr };
+        host.native_bridge_mut()
+            .cache_live_collection_wrapper(scope, descriptor, wrapper);
+    }
+    wrapper
+}
+
+fn instantiate_live_collection_wrapper<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    runtime_ptr: *mut JsContextHost,
+    collection_id: u32,
+    collection_kind: CollectionKind,
+) -> v8::Local<'s, v8::Object> {
     let template = {
         let host = unsafe { &mut *runtime_ptr };
         host.native_bridge_mut().live_collection_wrapper_template()
@@ -391,13 +411,45 @@ pub(in crate::native_bridge) fn build_live_collection_wrapper<'s>(
         wrapper.set_internal_field(1, v8::Number::new(scope, collection_id as f64).into()),
         "live collection wrapper must expose its descriptor id field"
     );
-    set_collection_prototype(scope, wrapper, descriptor.collection_kind);
-    {
-        let host = unsafe { &mut *runtime_ptr };
-        host.native_bridge_mut()
-            .cache_live_collection_wrapper(scope, descriptor, wrapper);
-    }
+    set_collection_prototype(scope, wrapper, collection_kind);
     wrapper
+}
+
+fn document_all_named_collection_parts(
+    scope: &mut v8::PinScope<'_, '_>,
+    value: v8::Local<'_, v8::Value>,
+) -> Option<(*mut JsContextHost, u32)> {
+    let object = v8::Local::<v8::Object>::try_from(value).ok()?;
+    let (runtime_ptr, descriptor) = live_collection_descriptor_from_object(scope, object).ok()?;
+    if descriptor.collection_kind != CollectionKind::HtmlCollection
+        || descriptor.query_kind != LiveCollectionQueryKind::DocumentAllNamedItems
+    {
+        return None;
+    }
+    Some((runtime_ptr, object_collection_id(scope, object).ok()?))
+}
+
+pub(in crate::native_bridge) fn is_document_all_named_collection_value(
+    scope: &mut v8::PinScope<'_, '_>,
+    value: v8::Local<'_, v8::Value>,
+) -> bool {
+    document_all_named_collection_parts(scope, value).is_some()
+}
+
+pub(in crate::native_bridge) fn build_fresh_document_all_named_collection_value<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    value: v8::Local<'s, v8::Value>,
+) -> Option<v8::Local<'s, v8::Value>> {
+    let (runtime_ptr, collection_id) = document_all_named_collection_parts(scope, value)?;
+    Some(
+        instantiate_live_collection_wrapper(
+            scope,
+            runtime_ptr,
+            collection_id,
+            CollectionKind::HtmlCollection,
+        )
+        .into(),
+    )
 }
 
 fn define_html_collection_named_properties(
