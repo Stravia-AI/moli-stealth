@@ -1,0 +1,22 @@
+name: Cancel closed PR CI
+
+on:
+  pull_request:
+    types: [closed]
+
+# Concurrency groups are shared across workflows in the repository. Starting
+# this lightweight run cancels the matching validation run without scheduling
+# the full CI suite for a pull request that can no longer be merged.
+concurrency:
+  group: ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  cancel:
+    name: Cancel superseded validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Record cancellation
+        run: echo "Cancelled validation for closed PR #${{ github.event.pull_request.number }}."
