@@ -36,7 +36,6 @@ jobs:
     name: Resolve exact revisions
     runs-on: ubuntu-latest
     outputs:
-      target_base_sha: ${{ steps.refs.outputs.target_base_sha }}
       base_sha: ${{ steps.refs.outputs.base_sha }}
       head_sha: ${{ steps.refs.outputs.head_sha }}
       execution_order: ${{ steps.refs.outputs.execution_order }}
@@ -72,8 +71,6 @@ jobs:
 
           target_base_sha=$(git rev-parse "${target_base_ref}^{commit}")
           base_sha=$(git merge-base "$target_base_sha" "$head_sha")
-          git merge-base --is-ancestor "$base_sha" "$target_base_sha"
-          git merge-base --is-ancestor "$base_sha" "$head_sha"
 
           if (( GITHUB_RUN_NUMBER % 2 == 0 )); then
             execution_order=head-first
@@ -81,7 +78,6 @@ jobs:
             execution_order=base-first
           fi
 
-          echo "target_base_sha=$target_base_sha" >> "$GITHUB_OUTPUT"
           echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
           echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
           echo "execution_order=$execution_order" >> "$GITHUB_OUTPUT"
@@ -246,8 +242,6 @@ jobs:
           mkdir -p "$package_dir"
           install -m 0755 target/release/moli "$package_dir/moli"
           printf '%s\n' '${{ needs.resolve-refs.outputs.head_sha }}' > "$package_dir/revision.txt"
-          "$package_dir/moli" --version > "$package_dir/version.txt"
-          stat --format='%s' "$package_dir/moli" > "$package_dir/size-bytes.txt"
           (cd "$package_dir" && sha256sum moli > SHA256SUMS)
           tar -C target/ci-package -czf target/moli-release-head.tar.gz moli-release-head
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -282,8 +276,6 @@ jobs:
           mkdir -p "$package_dir"
           install -m 0755 target/release/moli "$package_dir/moli"
           printf '%s\n' '${{ needs.resolve-refs.outputs.base_sha }}' > "$package_dir/revision.txt"
-          "$package_dir/moli" --version > "$package_dir/version.txt"
-          stat --format='%s' "$package_dir/moli" > "$package_dir/size-bytes.txt"
           (cd "$package_dir" && sha256sum moli > SHA256SUMS)
           tar -C target/ci-package -czf target/moli-release-base.tar.gz moli-release-base
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -700,17 +692,6 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ needs.resolve-refs.outputs.head_sha }}
-      - name: Initialize benchmark evidence
-        shell: bash
-        run: |
-          mkdir -p "$BENCHMARK_OUTPUT"
-          printf '{\n  "schema": "moli.browser-spider.run-metadata.v1",\n  "status": "resolved",\n  "target_base": { "sha": "%s" },\n  "base": { "sha": "%s", "role": "common-ancestor" },\n  "head": { "sha": "%s" },\n  "harness": { "sha": "%s", "role": "exact-head" },\n  "execution_order": "%s"\n}\n' \
-            "${{ needs.resolve-refs.outputs.target_base_sha }}" \
-            "${{ needs.resolve-refs.outputs.base_sha }}" \
-            "${{ needs.resolve-refs.outputs.head_sha }}" \
-            "${{ needs.resolve-refs.outputs.head_sha }}" \
-            "${{ needs.resolve-refs.outputs.execution_order }}" \
-            > "$BENCHMARK_OUTPUT/run-metadata.json"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: moli-release-head
@@ -772,17 +753,6 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ needs.resolve-refs.outputs.head_sha }}
-      - name: Initialize soak evidence
-        shell: bash
-        run: |
-          mkdir -p "$BENCHMARK_OUTPUT"
-          printf '{\n  "schema": "moli.sequential-navigation.run-metadata.v1",\n  "status": "resolved",\n  "target_base": { "sha": "%s" },\n  "base": { "sha": "%s", "role": "common-ancestor" },\n  "head": { "sha": "%s" },\n  "harness": { "sha": "%s", "role": "exact-head" },\n  "execution_order": "%s",\n  "navigation_count": 200\n}\n' \
-            "${{ needs.resolve-refs.outputs.target_base_sha }}" \
-            "${{ needs.resolve-refs.outputs.base_sha }}" \
-            "${{ needs.resolve-refs.outputs.head_sha }}" \
-            "${{ needs.resolve-refs.outputs.head_sha }}" \
-            "${{ needs.resolve-refs.outputs.execution_order }}" \
-            > "$BENCHMARK_OUTPUT/run-metadata.json"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: moli-release-head

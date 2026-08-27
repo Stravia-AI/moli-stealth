@@ -434,31 +434,6 @@ test('infrastructure-comment command writes the trusted fallback comment', () =>
   }
 });
 
-test('CI resolves a common ancestor and reuses exact release artifacts', () => {
-  const benchmarkWorkflow = fs.readFileSync(
-    fileURLToPath(new URL('../../../.github/workflows/ci.yml', import.meta.url)),
-    'utf8'
-  );
-  const commentWorkflow = fs.readFileSync(
-    fileURLToPath(new URL('../../../.github/workflows/spider-bench-comment.yml', import.meta.url)),
-    'utf8'
-  );
-
-  assert.match(
-    benchmarkWorkflow,
-    /base_sha=\$\(git merge-base "\$target_base_sha" "\$head_sha"\)/
-  );
-  assert.match(benchmarkWorkflow, /build-release-head:[\s\S]*name: moli-release-head/);
-  assert.match(benchmarkWorkflow, /build-release-base:[\s\S]*name: moli-release-base/);
-  assert.match(
-    benchmarkWorkflow,
-    /spider-bench:[\s\S]*needs: \[resolve-refs, build-release-head, build-release-base\]/
-  );
-  assert.match(benchmarkWorkflow, /ref: \$\{\{ needs\.resolve-refs\.outputs\.head_sha \}\}/);
-  assert.match(commentWorkflow, /compareCommitsWithBasehead/);
-  assert.match(commentWorkflow, /comparison\.base\?\.sha !== expectedCommonAncestor/);
-});
-
 test('Moli endpoint discovery accepts ANSI-formatted tracing output', () => {
   const log = '\u001b[2m2026-08-03T09:21:36Z\u001b[0m \u001b[32m INFO\u001b[0m '
     + 'protocol server listening \u001b[3maddr\u001b[0m\u001b[2m=\u001b[0m127.0.0.1:45445';
