@@ -38,7 +38,6 @@ jobs:
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         env:
           ARTIFACT_NAME: sequential-navigation-soak-results
-          TARGET_JOB_NAME: Sequential navigation soak · 200 A/B
         with:
           retries: 3
           script: |
@@ -50,7 +49,6 @@ jobs:
               context,
               core,
               artifactName: process.env.ARTIFACT_NAME,
-              targetJobName: process.env.TARGET_JOB_NAME,
             });
 
       - name: Download soak evidence
@@ -62,14 +60,14 @@ jobs:
           name: sequential-navigation-soak-results
           path: sequential-navigation-soak-results
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          run-id: ${{ steps.wait.outputs.run_id }}
+          run-id: ${{ github.event.workflow_run.id }}
 
       - name: Render trusted PR comment
         if: steps.wait.outputs.conclusion != 'cancelled'
         id: render
         env:
           PYTHONPATH: moli-benchmark
-          RUN_URL: ${{ steps.wait.outputs.run_url }}
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }}
           CONCLUSION: ${{ steps.wait.outputs.conclusion || 'failure' }}
           EVIDENCE_OUTCOME: ${{ steps.evidence.outcome }}
         run: |

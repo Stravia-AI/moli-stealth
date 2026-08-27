@@ -6,7 +6,6 @@ const DEFAULT_TIMEOUT_MS = 110 * 60_000;
 async function pollWorkflowArtifact({
   artifactName,
   listArtifacts,
-  getTargetJob = async () => null,
   getWorkflowRun,
   now = Date.now,
   sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
@@ -24,14 +23,6 @@ async function pollWorkflowArtifact({
       return {
         artifactAvailable: true,
         conclusion: '',
-      };
-    }
-
-    const targetJob = await getTargetJob();
-    if (targetJob?.status === 'completed') {
-      return {
-        artifactAvailable: false,
-        conclusion: targetJob.conclusion || 'failure',
       };
     }
 
@@ -59,7 +50,6 @@ async function waitForWorkflowArtifact({
   context,
   core,
   artifactName,
-  targetJobName,
   pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
   timeoutMs = DEFAULT_TIMEOUT_MS,
 }) {
@@ -87,19 +77,6 @@ async function waitForWorkflowArtifact({
       });
       return response.data.artifacts;
     },
-    getTargetJob: async () => {
-      if (!targetJobName) {
-        return null;
-      }
-      const response = await github.rest.actions.listJobsForWorkflowRun({
-        owner,
-        repo,
-        run_id: runId,
-        filter: 'latest',
-        per_page: 100,
-      });
-      return response.data.jobs.find((job) => job.name === targetJobName) || null;
-    },
     getWorkflowRun: async () => {
       const response = await github.rest.actions.getWorkflowRun({
         owner,
@@ -110,15 +87,12 @@ async function waitForWorkflowArtifact({
     },
   });
 
-  const runUrl = run.html_url || `https://github.com/${owner}/${repo}/actions/runs/${runId}`;
   core.setOutput('artifact_available', String(result.artifactAvailable));
   core.setOutput('conclusion', result.conclusion);
-  core.setOutput('run_id', String(runId));
-  core.setOutput('run_url', runUrl);
 
   if (!result.artifactAvailable) {
     core.notice(
-      `The target job or workflow run ${runId} finished, or the wait timed out, before ${artifactName} was uploaded.`
+      `Workflow run ${runId} finished or the wait timed out before ${artifactName} was uploaded.`
     );
   }
 }

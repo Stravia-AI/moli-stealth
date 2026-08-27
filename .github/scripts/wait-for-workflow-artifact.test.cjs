@@ -57,22 +57,6 @@ test('reports a terminal workflow that never uploaded the artifact', async () =>
   assert.deepEqual(result, { artifactAvailable: false, conclusion: 'failure' });
 });
 
-test('does not wait for unrelated jobs after the target job finishes', async () => {
-  let workflowLookups = 0;
-  const result = await pollWorkflowArtifact({
-    artifactName: 'benchmark-results',
-    listArtifacts: async () => [],
-    getTargetJob: async () => ({ status: 'completed', conclusion: 'skipped' }),
-    getWorkflowRun: async () => {
-      workflowLookups += 1;
-      return { status: 'in_progress', conclusion: null };
-    },
-  });
-
-  assert.deepEqual(result, { artifactAvailable: false, conclusion: 'skipped' });
-  assert.equal(workflowLookups, 0);
-});
-
 test('ignores expired artifacts and eventually times out', async () => {
   let currentTime = 0;
   const result = await pollWorkflowArtifact({

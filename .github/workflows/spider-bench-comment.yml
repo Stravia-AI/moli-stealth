@@ -11,7 +11,7 @@ concurrency:
 
 # This trusted workflow starts with CI, then waits only for the immutable v4
 # artifact. It runs from the default branch, never executes PR code, and renders
-# only bounded numeric fields into an Actions summary and a PR comment.
+# only bounded numeric fields into an Actions summary and an upserted PR comment.
 permissions:
   actions: read
   contents: read
@@ -38,7 +38,6 @@ jobs:
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         env:
           ARTIFACT_NAME: spider-bench-results
-          TARGET_JOB_NAME: Spider public-web A/B
         with:
           retries: 3
           script: |
@@ -50,7 +49,6 @@ jobs:
               context,
               core,
               artifactName: process.env.ARTIFACT_NAME,
-              targetJobName: process.env.TARGET_JOB_NAME,
             });
 
       - name: Download benchmark evidence
@@ -62,7 +60,7 @@ jobs:
           name: spider-bench-results
           path: spider-bench-results
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          run-id: ${{ steps.wait.outputs.run_id }}
+          run-id: ${{ github.event.workflow_run.id }}
 
       - name: Install Node.js
         if: steps.wait.outputs.conclusion != 'cancelled'
@@ -74,7 +72,7 @@ jobs:
         if: steps.wait.outputs.conclusion != 'cancelled'
         id: render
         env:
-          RUN_URL: ${{ steps.wait.outputs.run_url }}
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }}
           CONCLUSION: ${{ steps.wait.outputs.conclusion || 'failure' }}
           EVIDENCE_OUTCOME: ${{ steps.evidence.outcome }}
         run: |
@@ -144,9 +142,34 @@ jobs:
             }
 
             const body = fs.readFileSync(process.env.COMMENT_PATH, 'utf8');
-            await github.rest.issues.createComment({
+            const marker = '<!-- moli-spider-bench -->';
+            if (!body.includes(marker) || Buffer.byteLength(body, 'utf8') > 32 * 1024) {
+              core.setFailed('Rendered Spider Bench comment is missing its marker or exceeds 32 KiB.');
+              return;
+            }
+            const comments = await github.paginate(github.rest.issues.listComments, {
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: association.number,
-              body,
+              per_page: 100,
             });
+            const existing = comments.find(
+              (comment) =>
+                comment.user?.login === 'github-actions[bot]' &&
+                comment.body?.includes(marker)
+            );
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: association.number,
+                body,
+              });
+            }
