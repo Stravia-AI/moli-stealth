@@ -1,0 +1,22 @@
+name: Use CI release
+description: Download and verify a release binary built by this workflow.
+
+inputs:
+  side:
+    description: Release side to consume (head or base).
+    required: true
+  revision:
+    description: Exact Git revision expected in the artifact.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Download release artifact
+      uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      with:
+        name: moli-release-${{ inputs.side }}
+        path: target/ci-artifacts/${{ inputs.side }}
+    - name: Verify release artifact
+      shell: bash
+      run: .github/scripts/unpack-ci-release.sh "${{ inputs.side }}" "${{ inputs.revision }}"

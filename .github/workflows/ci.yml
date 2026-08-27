@@ -296,12 +296,11 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ needs.resolve-refs.outputs.head_sha }}
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - name: Use HEAD release
+        uses: ./.github/actions/use-ci-release
         with:
-          name: moli-release-head
-          path: target/ci-artifacts/head
-      - name: Verify HEAD release
-        run: .github/scripts/unpack-ci-release.sh head "${{ needs.resolve-refs.outputs.head_sha }}"
+          side: head
+          revision: ${{ needs.resolve-refs.outputs.head_sha }}
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           version: 0.11.14
@@ -343,12 +342,11 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ needs.resolve-refs.outputs.head_sha }}
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - name: Use HEAD release
+        uses: ./.github/actions/use-ci-release
         with:
-          name: moli-release-head
-          path: target/ci-artifacts/head
-      - name: Verify HEAD release
-        run: .github/scripts/unpack-ci-release.sh head "${{ needs.resolve-refs.outputs.head_sha }}"
+          side: head
+          revision: ${{ needs.resolve-refs.outputs.head_sha }}
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           version: 0.11.14
@@ -387,12 +385,11 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ needs.resolve-refs.outputs.head_sha }}
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - name: Use HEAD release
+        uses: ./.github/actions/use-ci-release
         with:
-          name: moli-release-head
-          path: target/ci-artifacts/head
-      - name: Verify HEAD release
-        run: .github/scripts/unpack-ci-release.sh head "${{ needs.resolve-refs.outputs.head_sha }}"
+          side: head
+          revision: ${{ needs.resolve-refs.outputs.head_sha }}
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           version: 0.11.14
@@ -471,12 +468,11 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ needs.resolve-refs.outputs.head_sha }}
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - name: Use HEAD release
+        uses: ./.github/actions/use-ci-release
         with:
-          name: moli-release-head
-          path: target/ci-artifacts/head
-      - name: Verify HEAD release
-        run: .github/scripts/unpack-ci-release.sh head "${{ needs.resolve-refs.outputs.head_sha }}"
+          side: head
+          revision: ${{ needs.resolve-refs.outputs.head_sha }}
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           version: 0.11.14
@@ -517,12 +513,11 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ needs.resolve-refs.outputs.head_sha }}
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - name: Use HEAD release
+        uses: ./.github/actions/use-ci-release
         with:
-          name: moli-release-head
-          path: target/ci-artifacts/head
-      - name: Verify HEAD release
-        run: .github/scripts/unpack-ci-release.sh head "${{ needs.resolve-refs.outputs.head_sha }}"
+          side: head
+          revision: ${{ needs.resolve-refs.outputs.head_sha }}
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           version: 0.11.14
@@ -575,18 +570,16 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ needs.resolve-refs.outputs.head_sha }}
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - name: Use HEAD release
+        uses: ./.github/actions/use-ci-release
         with:
-          name: moli-release-head
-          path: target/ci-artifacts/head
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+          side: head
+          revision: ${{ needs.resolve-refs.outputs.head_sha }}
+      - name: Use base release
+        uses: ./.github/actions/use-ci-release
         with:
-          name: moli-release-base
-          path: target/ci-artifacts/base
-      - name: Verify release artifacts
-        run: |
-          .github/scripts/unpack-ci-release.sh head "${{ needs.resolve-refs.outputs.head_sha }}"
-          .github/scripts/unpack-ci-release.sh base "${{ needs.resolve-refs.outputs.base_sha }}"
+          side: base
+          revision: ${{ needs.resolve-refs.outputs.base_sha }}
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           version: 0.11.14
@@ -644,12 +637,11 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ needs.resolve-refs.outputs.head_sha }}
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - name: Use HEAD release
+        uses: ./.github/actions/use-ci-release
         with:
-          name: moli-release-head
-          path: target/ci-artifacts/head
-      - name: Verify HEAD release
-        run: .github/scripts/unpack-ci-release.sh head "${{ needs.resolve-refs.outputs.head_sha }}"
+          side: head
+          revision: ${{ needs.resolve-refs.outputs.head_sha }}
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24.15.0
@@ -692,18 +684,16 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ needs.resolve-refs.outputs.head_sha }}
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - name: Use HEAD release
+        uses: ./.github/actions/use-ci-release
         with:
-          name: moli-release-head
-          path: target/ci-artifacts/head
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+          side: head
+          revision: ${{ needs.resolve-refs.outputs.head_sha }}
+      - name: Use base release
+        uses: ./.github/actions/use-ci-release
         with:
-          name: moli-release-base
-          path: target/ci-artifacts/base
-      - name: Verify release artifacts
-        run: |
-          .github/scripts/unpack-ci-release.sh head "${{ needs.resolve-refs.outputs.head_sha }}"
-          .github/scripts/unpack-ci-release.sh base "${{ needs.resolve-refs.outputs.base_sha }}"
+          side: base
+          revision: ${{ needs.resolve-refs.outputs.base_sha }}
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 24.15.0
@@ -753,18 +743,16 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ needs.resolve-refs.outputs.head_sha }}
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - name: Use HEAD release
+        uses: ./.github/actions/use-ci-release
         with:
-          name: moli-release-head
-          path: target/ci-artifacts/head
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+          side: head
+          revision: ${{ needs.resolve-refs.outputs.head_sha }}
+      - name: Use base release
+        uses: ./.github/actions/use-ci-release
         with:
-          name: moli-release-base
-          path: target/ci-artifacts/base
-      - name: Verify release artifacts
-        run: |
-          .github/scripts/unpack-ci-release.sh head "${{ needs.resolve-refs.outputs.head_sha }}"
-          .github/scripts/unpack-ci-release.sh base "${{ needs.resolve-refs.outputs.base_sha }}"
+          side: base
+          revision: ${{ needs.resolve-refs.outputs.base_sha }}
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           version: 0.11.14
@@ -869,28 +857,17 @@ jobs:
       - spider-fixture
     runs-on: ubuntu-latest
     env:
-      REQUIRED_RESULTS: >-
-        ${{ needs.format.result }}
-        ${{ needs.clippy.result }}
-        ${{ needs.nextest.result }}
-        ${{ needs.python-harness-tests.result }}
-        ${{ needs.node-harness-tests.result }}
-        ${{ needs.build-release-head.result }}
-        ${{ needs.build-release-base.result }}
-        ${{ needs.cdp-smoke.result }}
-        ${{ needs.webdriver-smoke.result }}
-        ${{ needs.frontend-differential.result }}
-        ${{ needs.runtime-contracts.result }}
-        ${{ needs.agent-episode.result }}
-        ${{ needs.release-regression.result }}
-        ${{ needs.spider-fixture.result }}
+      REQUIRED_JOBS: ${{ toJSON(needs) }}
     steps:
       - name: Require every deterministic check
         run: |
           set -euo pipefail
-          for result in $REQUIRED_RESULTS; do
-            if [[ "$result" != success ]]; then
-              echo "required CI dependency finished with: $result"
-              exit 1
-            fi
-          done
+          failures=$(jq -r '
+            to_entries[]
+            | select(.value.result != "success")
+            | "\(.key): \(.value.result)"
+          ' <<< "$REQUIRED_JOBS")
+          if [[ -n "$failures" ]]; then
+            printf 'required CI dependency did not succeed:\n%s\n' "$failures"
+            exit 1
+          fi
