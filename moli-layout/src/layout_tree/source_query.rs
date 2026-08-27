@@ -512,10 +512,10 @@ where
                 )
             });
 
-            // Blink's BoundingBoxRelativeToFirstFragment uses UniteIfNonZero:
-            // an empty fragment supplies the offset anchor but cannot stretch
-            // the size union across lines by its zero-area position alone.
-            if document_border.width <= 0.0 || document_border.height <= 0.0 {
+            // Blink's BoundingBoxRelativeToFirstFragment uses UniteIfNonZero,
+            // which discards only a 0-by-0 fragment. A one-dimensional
+            // fragment still contributes its non-zero axis to offset geometry.
+            if document_border.width == 0.0 && document_border.height == 0.0 {
                 continue;
             }
             bounds = Some(bounds.map_or(document_border, |current| current.union(document_border)));
@@ -648,7 +648,7 @@ mod tests {
     }
 
     #[test]
-    fn inline_offset_geometry_skips_an_unprojectable_fragment_before_valid_geometry() {
+    fn inline_offset_geometry_skips_unprojectable_fragments_and_keeps_one_dimensional_bounds() {
         let box_id = LayoutOutputBoxId::from_index(0);
         let coordinate_space = LayoutCoordinateSpaceId::from_index(1);
         let skipped_fragment = LayoutFragmentId::from_index(0);
@@ -668,10 +668,10 @@ mod tests {
             paint_order: None,
         };
         let valid_box_model = LayoutFragmentBoxModel {
-            content: LayoutRect::new(3.0, 4.0, 10.0, 5.0),
-            padding: LayoutRect::new(3.0, 4.0, 10.0, 5.0),
-            border: LayoutRect::new(3.0, 4.0, 10.0, 5.0),
-            margin: LayoutRect::new(3.0, 4.0, 10.0, 5.0),
+            content: LayoutRect::new(3.0, 4.0, 0.0, 5.0),
+            padding: LayoutRect::new(3.0, 4.0, 0.0, 5.0),
+            border: LayoutRect::new(3.0, 4.0, 0.0, 5.0),
+            margin: LayoutRect::new(3.0, 4.0, 0.0, 5.0),
         };
         let scroll_extent = LayoutScrollExtent {
             scrollport: LayoutRect::ZERO,
@@ -752,6 +752,6 @@ mod tests {
             geometry.border_origin_in_viewport_ignoring_css_transforms,
             LayoutPoint::new(3.0, 4.0)
         );
-        assert_eq!(geometry.size, LayoutSize::new(10.0, 5.0));
+        assert_eq!(geometry.size, LayoutSize::new(0.0, 5.0));
     }
 }

@@ -3199,7 +3199,7 @@ document.body.innerHTML = `
             .expect("inline offset fixture must retain a layout root");
 
         let geometry = page_vm.vm_mut().eval(
-            r#"(()=>{const target=document.querySelector('.target');const reference=target.previousSibling;return JSON.stringify({reference:[reference.offsetLeft,reference.offsetTop,reference.offsetWidth,reference.offsetHeight],target:[target.offsetLeft,target.offsetTop]})})()"#,
+            r#"(()=>{const target=document.querySelector('.target');const reference=target.previousSibling;return JSON.stringify({reference:[reference.offsetLeft,reference.offsetTop,reference.offsetWidth,reference.offsetHeight],target:[target.offsetLeft,target.offsetTop,target.offsetWidth,target.offsetHeight]})})()"#,
         )?;
         let geometry: serde_json::Value = serde_json::from_str(&geometry)?;
         let reference = geometry["reference"]
@@ -3216,6 +3216,15 @@ document.body.innerHTML = `
             number(target, 0),
             number(reference, 0) + number(reference, 2),
             "the empty inline starts after the reference fragment: {geometry}"
+        );
+        assert_eq!(
+            number(target, 2),
+            0.0,
+            "the empty inline remains zero-width: {geometry}"
+        );
+        assert!(
+            number(target, 3) > 0.0,
+            "a zero-width inline still contributes its non-zero height: {geometry}"
         );
         Ok::<_, anyhow::Error>(())
     })
