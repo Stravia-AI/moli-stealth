@@ -130,6 +130,7 @@ mod image_root_coordinates;
 mod indexed_db;
 mod inline_svg_paint;
 mod internal_loading_completion;
+mod intrinsic_percentage_resolution;
 mod lifecycle;
 mod main_document_post_parse_completion;
 mod main_document_runtime;
