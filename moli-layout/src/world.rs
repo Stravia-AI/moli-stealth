@@ -77,6 +77,27 @@ impl LayoutBoxKind {
         matches!(self, Self::Text)
     }
 
+    /// Whether this box is one of CSS Display's internal table boxes.
+    ///
+    /// Table wrappers and captions are deliberately excluded: they are
+    /// ordinary sizing boxes for `aspect-ratio`, while row groups, rows,
+    /// columns, and cells are outside the property's applicability set.
+    pub(crate) const fn is_internal_table_box(self) -> bool {
+        matches!(
+            self,
+            Self::TableRowGroup
+                | Self::TableHeaderGroup
+                | Self::TableFooterGroup
+                | Self::TableColumnGroup
+                | Self::TableColumn
+                | Self::TableRow
+                | Self::TableCell
+                | Self::AnonymousTableRowGroup
+                | Self::AnonymousTableRow
+                | Self::AnonymousTableCell
+        )
+    }
+
     pub(crate) const fn debug_name(self) -> &'static str {
         match self {
             Self::PrincipalBlock => "principal-block",
@@ -548,6 +569,9 @@ impl<N> LayoutBox<N> {
     /// Resolve the used ratio at the layout-node boundary, after both authored
     /// style and natural replaced-element sizing are available.
     pub(crate) fn resolved_aspect_ratio(&self) -> Option<taffy::ResolvedAspectRatio> {
+        if self.kind.is_internal_table_box() {
+            return None;
+        }
         let natural_ratio = self
             .replaced_context
             .and_then(|context| context.inherent_ratio());
