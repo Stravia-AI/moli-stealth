@@ -3,6 +3,30 @@ import test from 'node:test';
 
 import { ProcessTreeResourceSampler } from '../lib/observability/sampler.mjs';
 
+function samplerFailureDetails(artifact) {
+  return JSON.stringify({
+    runtime: {
+      node: process.version,
+      platform: process.platform,
+      arch: process.arch,
+      pid: process.pid,
+      ci: process.env.CI ?? null
+    },
+    status: artifact.status,
+    error: artifact.error,
+    sampling: artifact.sampling,
+    markers: artifact.markers,
+    samples: artifact.samples.map((sample) => ({
+      elapsed_ms: sample.elapsed_ms,
+      kind: sample.kind,
+      capture_duration_ms: sample.capture_duration_ms,
+      total: sample.total,
+      workers: sample.workers
+    })),
+    summary: artifact.summary
+  }, null, 2);
+}
+
 test('worker-thread sampler captures the current Linux process tree', {
   skip: process.platform !== 'linux',
   timeout: 5000
@@ -14,15 +38,18 @@ test('worker-thread sampler captures the current Linux process tree', {
   await new Promise((resolve) => setTimeout(resolve, 240));
   sampler.mark({ type: 'case-done', caseName: 'fixture' });
   const artifact = await sampler.stop();
+  const failureDetails = samplerFailureDetails(artifact);
+  const caseDone = artifact.markers.find((marker) => marker.type === 'case-done');
 
-  assert.equal(artifact.status, 'available');
-  assert.ok(artifact.samples.length >= 3);
-  assert.ok(artifact.summary.peak_rss_bytes > 0);
-  assert.ok(artifact.summary.peak_process_count >= 1);
-  assert.equal(artifact.summary.cases[0].case_name, 'fixture');
+  assert.equal(artifact.status, 'available', failureDetails);
+  assert.ok(artifact.samples.length >= 3, failureDetails);
+  assert.ok(artifact.summary.peak_rss_bytes > 0, failureDetails);
+  assert.ok(artifact.summary.peak_process_count >= 1, failureDetails);
+  assert.equal(artifact.summary.cases[0]?.case_name, 'fixture', failureDetails);
+  assert.ok(caseDone, failureDetails);
   assert.ok(
-    artifact.samples.at(-1).elapsed_ms
-      >= artifact.markers.find((marker) => marker.type === 'case-done').elapsed_ms
+    artifact.samples.at(-1)?.elapsed_ms >= caseDone?.elapsed_ms,
+    failureDetails
   );
 });
 
