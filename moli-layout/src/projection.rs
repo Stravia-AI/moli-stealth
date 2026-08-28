@@ -571,6 +571,13 @@ where
             let (layout_x, layout_y) = self
                 .world
                 .global_layout_origin(LayoutBoxId::from_index(index));
+            let used_box_size = layout_box.is_css_box().then(|| {
+                let box_rect = match layout_box.style.taffy.box_sizing {
+                    taffy::BoxSizing::ContentBox => content_box,
+                    taffy::BoxSizing::BorderBox => border_box,
+                };
+                LayoutSize::new(box_rect.width, box_rect.height)
+            });
             self.boxes.push(LayoutBoxGeometry {
                 id,
                 effective_zoom: layout_box.style.effective_zoom(),
@@ -590,6 +597,7 @@ where
                 padding_box,
                 border_box,
                 margin_box,
+                used_box_size,
                 fragments: Vec::new(),
                 layout_origin_in_document: LayoutPoint::new(layout_x, layout_y),
                 is_body_element: semantics.is_some_and(|element| element.is_html_element("body")),

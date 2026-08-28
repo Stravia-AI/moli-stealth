@@ -15,10 +15,18 @@ use super::style_world::{
     stylesheet_source_document_for_handle, stylo_style_environment,
 };
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum ComputedStyleValuePhase {
+    #[default]
+    Computed,
+    Resolved,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub(in crate::native_bridge::element::styles) struct StyleComputationContext {
     pub(in crate::native_bridge::element::styles) viewport: StyleViewport,
     pub(in crate::native_bridge::element::styles) read_document: Option<DomHandle>,
+    value_phase: ComputedStyleValuePhase,
 }
 
 impl StyleComputationContext {
@@ -26,6 +34,7 @@ impl StyleComputationContext {
         Self {
             viewport,
             read_document: None,
+            value_phase: ComputedStyleValuePhase::Computed,
         }
     }
 
@@ -43,6 +52,15 @@ impl StyleComputationContext {
     ) -> Self {
         self.read_document = read_document;
         self
+    }
+
+    pub(in crate::native_bridge::element::styles) const fn with_resolved_values(mut self) -> Self {
+        self.value_phase = ComputedStyleValuePhase::Resolved;
+        self
+    }
+
+    pub(super) const fn reads_resolved_values(self) -> bool {
+        matches!(self.value_phase, ComputedStyleValuePhase::Resolved)
     }
 
     pub(super) fn resolved_read_document(
