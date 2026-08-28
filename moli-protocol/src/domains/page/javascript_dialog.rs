@@ -134,7 +134,11 @@ fn emit_to_attachment(
             url: source_url,
             message,
             dialog_type,
-            has_browser_handler: true,
+            // Moli has no native browser UI capable of presenting or resolving
+            // JavaScript dialogs. CDP clients can still resolve this dialog via
+            // Page.handleJavaScriptDialog; `false` also lets the Chromium
+            // DevTools frontend dismiss it instead of waiting for nonexistent UI.
+            has_browser_handler: false,
             default_prompt,
         },
     ));

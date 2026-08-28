@@ -6100,8 +6100,9 @@ async fn websocket_cdp_handle_javascript_dialog_prompt_text_resumes_prompt() {
             message["sessionId"].as_str() == Some(session_id.as_str())
                 && message["method"] == json!("Page.javascriptDialogOpening")
                 && message["params"]["defaultPrompt"] == json!("default answer")
+                && message["params"]["hasBrowserHandler"] == json!(false)
         }),
-        "prompt opening should include defaultPrompt: {observed:#?}"
+        "prompt opening should include defaultPrompt and report that Moli has no native dialog UI: {observed:#?}"
     );
 
     observed.extend(

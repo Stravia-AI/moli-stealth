@@ -245,7 +245,7 @@ async fn javascript_dialog_events_round_trip_through_page_domain() {
     assert_eq!(opening["sessionId"], json!("SID-1"));
     assert_eq!(opening["params"]["type"], json!("alert"));
     assert_eq!(opening["params"]["message"], json!("smoke alert"));
-    assert_eq!(opening["params"]["hasBrowserHandler"], json!(true));
+    assert_eq!(opening["params"]["hasBrowserHandler"], json!(false));
     assert_eq!(opening["params"]["frameId"], json!("TID-1"));
 
     ctx.process_async(json!({

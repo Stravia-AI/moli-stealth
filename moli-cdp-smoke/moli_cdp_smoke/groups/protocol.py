@@ -517,6 +517,11 @@ async def _javascript_dialog_protocol_shape(
         "default prompt",
         "raw Page.javascriptDialogOpening default prompt",
     )
+    assert_equal(
+        params.get("hasBrowserHandler"),
+        False,
+        "raw Page.javascriptDialogOpening native browser handler",
+    )
     if not isinstance(params.get("frameId"), str) or not params["frameId"]:
         raise SmokeError(f"missing prompt frameId in {opening}")
 

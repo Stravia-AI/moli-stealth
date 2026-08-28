@@ -2787,7 +2787,7 @@ mod producer_tests {
         );
         assert_eq!(event.dialog_type, "alert");
         assert_eq!(event.message, "prepared dialog");
-        assert!(event.has_browser_handler);
+        assert!(!event.has_browser_handler);
         let installed = conn
             .target_page_session_state_for_session(Some("SID-1"))
             .expect("target page session state should exist")
