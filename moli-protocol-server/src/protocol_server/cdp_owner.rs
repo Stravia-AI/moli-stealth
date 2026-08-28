@@ -127,7 +127,6 @@ impl SharedCdpOwnerRegistry {
             self.inner.config.navigation_runtime_config.clone(),
             Some(CdpTargetHostIntegration::new(
                 self.inner.config.target_id_allocator.clone(),
-                self.inner.config.tab_target_id_allocator.clone(),
                 lifecycle_observer,
             )),
             Some(CdpOwnerActorLifecycle {

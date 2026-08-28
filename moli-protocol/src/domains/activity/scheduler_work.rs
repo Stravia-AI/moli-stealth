@@ -6,7 +6,7 @@ use crate::{
     conn::{
         BidiChannelOwnerAction, CdpConnection, DeferredMainDocumentLoadCompletionOutputAction,
         DeferredMainDocumentLoadCompletionOutputInterest,
-        PendingDeferredMainDocumentLoadCompletion,
+        PendingDeferredMainDocumentLoadCompletion, PopupTargetActivationAction,
     },
     devtools_runtime::DevToolsCommandContext,
 };
@@ -51,6 +51,7 @@ pub enum ProtocolSchedulerWorkKind {
     ProtocolObservation,
     MainDocumentLoadFactProjection,
     BidiChannelOwnerAction,
+    PopupTargetActivationAction,
 }
 
 /// Durable protocol-owned work with concrete payload, exact route and one
@@ -69,6 +70,7 @@ enum ProtocolSchedulerWorkPayload {
     ProtocolObservation(ProtocolOutputWork),
     MainDocumentLoadFactProjection(Box<DeferredMainDocumentLoadCompletionActivity>),
     BidiChannelOwnerAction(BidiChannelOwnerAction),
+    PopupTargetActivationAction(PopupTargetActivationAction),
 }
 
 impl fmt::Debug for ProtocolSchedulerWork {
@@ -99,6 +101,11 @@ impl fmt::Debug for ProtocolSchedulerWork {
                 debug
                     .field("action", &action.kind())
                     .field("session_id", &action.owner().session_id());
+            }
+            ProtocolSchedulerWorkPayload::PopupTargetActivationAction(action) => {
+                debug
+                    .field("browser_context_id", &action.browser_context_id())
+                    .field("target_id", &action.target_id());
             }
         }
         debug.finish()
@@ -138,6 +145,16 @@ impl ProtocolSchedulerWork {
         }
     }
 
+    pub(crate) fn popup_target_activation_action(
+        publish_sequence: ProtocolWorkPublishSequence,
+        action: PopupTargetActivationAction,
+    ) -> Self {
+        Self {
+            publish_sequence,
+            payload: ProtocolSchedulerWorkPayload::PopupTargetActivationAction(action),
+        }
+    }
+
     pub fn publish_sequence(&self) -> ProtocolWorkPublishSequence {
         self.publish_sequence
     }
@@ -152,6 +169,9 @@ impl ProtocolSchedulerWork {
             }
             ProtocolSchedulerWorkPayload::BidiChannelOwnerAction(_) => {
                 ProtocolSchedulerWorkKind::BidiChannelOwnerAction
+            }
+            ProtocolSchedulerWorkPayload::PopupTargetActivationAction(_) => {
+                ProtocolSchedulerWorkKind::PopupTargetActivationAction
             }
         }
     }
@@ -169,22 +189,24 @@ impl ProtocolSchedulerWork {
                 completion.has_terminal_browser_fact()
             }
             ProtocolSchedulerWorkPayload::BidiChannelOwnerAction(_) => true,
+            ProtocolSchedulerWorkPayload::PopupTargetActivationAction(_) => true,
         }
     }
 
-    /// Reports owner work that must complete inside the producing command's
-    /// turn.
-    ///
-    /// Popup navigation is safe to start while completing the producing
-    /// command: it retains its exact target route and cannot replace the
-    /// command's active renderer. Popup activation is deliberately excluded.
-    /// It can replace that renderer and must therefore cross the ordinary
-    /// client-turn predecessor so the opener's command result is collected
-    /// from its original owner first.
     pub fn is_command_followup(&self) -> bool {
         matches!(
             &self.payload,
             ProtocolSchedulerWorkPayload::BidiChannelOwnerAction(_)
+        )
+    }
+
+    /// Foreground selection is independent of the selected Target's document
+    /// load. It must still wait for the opener client turn, but not for the
+    /// popup navigation to finish (including wait-for-debugger staging).
+    pub fn bypasses_inflight_navigation_gate(&self) -> bool {
+        matches!(
+            &self.payload,
+            ProtocolSchedulerWorkPayload::PopupTargetActivationAction(_)
         )
     }
 
@@ -269,7 +291,8 @@ impl ProtocolSchedulerWork {
                 PendingDeferredMainDocumentLoadCompletion::new((*completion).start_scheduler_step())
             }
             ProtocolSchedulerWorkPayload::ProtocolObservation(_)
-            | ProtocolSchedulerWorkPayload::BidiChannelOwnerAction(_) => {
+            | ProtocolSchedulerWorkPayload::BidiChannelOwnerAction(_)
+            | ProtocolSchedulerWorkPayload::PopupTargetActivationAction(_) => {
                 panic!("only main-document load owner work can start a lifecycle wait")
             }
         }
@@ -299,6 +322,7 @@ pub(crate) enum ReadyProtocolSchedulerWork {
         Box<super::main_document::CompletedDeferredMainDocumentLoadCompletionActivity>,
     ),
     BidiChannelOwnerAction(BidiChannelOwnerAction),
+    PopupTargetActivationAction(PopupTargetActivationAction),
 }
 
 impl ProtocolSchedulerWork {
@@ -317,6 +341,9 @@ impl ProtocolSchedulerWork {
             }
             ProtocolSchedulerWorkPayload::BidiChannelOwnerAction(action) => {
                 ReadyProtocolSchedulerWork::BidiChannelOwnerAction(action)
+            }
+            ProtocolSchedulerWorkPayload::PopupTargetActivationAction(action) => {
+                ReadyProtocolSchedulerWork::PopupTargetActivationAction(action)
             }
         }
     }

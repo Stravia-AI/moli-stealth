@@ -267,6 +267,7 @@ impl MainDocumentNavigationActivity {
                 self.state.navigate_session_id.as_deref(),
                 &self.state.loader_id,
             );
+            self.publish_post_commit_target_activation(conn);
             return;
         }
         if !reached_domcontentloaded {
@@ -340,6 +341,14 @@ impl MainDocumentNavigationActivity {
             self.activate_pending_download_async(conn, out, pending_download)
                 .await;
         }
+        self.publish_post_commit_target_activation(conn);
+    }
+
+    fn publish_post_commit_target_activation(&mut self, conn: &CdpConnection) {
+        crate::domains::page::publish_post_commit_target_activation(
+            conn,
+            self.state.post_commit_target_activation.take(),
+        );
     }
 
     fn is_still_current(&self, conn: &CdpConnection) -> bool {
@@ -864,6 +873,9 @@ impl CompletedDeferredMainDocumentLoadCompletionActivity {
                 self.state
                     .navigation_activity
                     .emit_renderer_load_boundary_facts(conn, out);
+                self.state
+                    .navigation_activity
+                    .publish_post_commit_target_activation(conn);
                 return;
             }
             BrowserDocumentLifecycleWaitOutcome::Superseded
@@ -992,6 +1004,7 @@ mod tests {
             request_load_policy: crate::conn::NavigationRequestLoadPolicy::DocumentInitiated,
             timestamp: 12.5,
             source_document_security: Default::default(),
+            post_commit_target_activation: None,
         }
     }
 

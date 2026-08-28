@@ -780,6 +780,7 @@ async fn bidi_fetch_control_resolves_background_request_owner() {
                 request_load_policy: crate::conn::NavigationRequestLoadPolicy::DocumentInitiated,
                 timestamp: 0.0,
                 source_document_security: Default::default(),
+                post_commit_target_activation: None,
             },
             request_cookie_report: None,
             intercept_response: false,

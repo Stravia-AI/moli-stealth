@@ -82,7 +82,6 @@ impl CdpTargetHostIntegration {
     ) -> Self {
         Self {
             target_id_allocator,
-            tab_target_id_allocator,
             lifecycle_observer,
         }
     }
@@ -2108,7 +2107,10 @@ impl CdpScheduler {
     ) -> ProtocolOutputSequence {
         let mut out = ProtocolOutputSequence::empty();
         while let Some(mut residence) = snapshot.pop_front() {
-            if self.has_inflight_background_navigation() || self.has_pending_javascript_dialog() {
+            if (self.has_inflight_background_navigation()
+                && !residence.bypasses_inflight_navigation_gate())
+                || self.has_pending_javascript_dialog()
+            {
                 snapshot.push_front(residence);
                 self.queues.restore_snapshot_to_front(snapshot);
                 return out;
@@ -2690,7 +2692,9 @@ impl CdpScheduler {
     }
 
     fn next_protocol_scheduler_step(&self) -> ProtocolSchedulerStep {
-        if self.has_inflight_background_navigation() {
+        if self.has_inflight_background_navigation()
+            && !self.queues.front_bypasses_inflight_navigation_gate()
+        {
             return ProtocolSchedulerStep::Wait;
         }
         if self.queues.front_needs_client_turn_predecessor() {

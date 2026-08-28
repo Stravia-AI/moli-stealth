@@ -207,6 +207,7 @@ impl TargetSessionOwnerMut<'_> {
                         target_id,
                         primary_session_id,
                         auxiliary_session_ids,
+                        promoted_target_id: None,
                     },
                     retired_page,
                 })
@@ -236,6 +237,7 @@ impl TargetSessionOwnerMut<'_> {
                         target_id: target_id.clone(),
                         primary_session_id,
                         auxiliary_session_ids,
+                        promoted_target_id: None,
                     },
                     retired_page,
                 })
@@ -347,6 +349,7 @@ impl CdpConnection {
                 target_id: target_id.to_owned(),
                 primary_session_id,
                 auxiliary_session_ids,
+                promoted_target_id: None,
             },
             retired_page,
         })
@@ -392,6 +395,7 @@ impl CdpConnection {
                 target_id,
                 primary_session_id,
                 auxiliary_session_ids,
+                promoted_target_id: promoted_target_id.clone(),
             },
             retired_page,
             promoted_target_id,

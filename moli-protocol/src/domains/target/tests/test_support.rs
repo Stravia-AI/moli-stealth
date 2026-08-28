@@ -101,10 +101,10 @@ pub(super) async fn install_navigation_for_target_without_session(
     ctx.conn.replace_none_session_owner_route_override(previous);
 }
 
-pub(super) fn loaded_page_for_target<'a>(
-    browser_context: &'a BrowserContext,
+pub(super) fn loaded_page_for_target(
+    browser_context: &BrowserContext,
     target_id: &str,
-) -> Option<&'a moli_core::page::Page> {
+) -> Option<moli_core::browser_host::BrowserPageRuntimeLease> {
     if browser_context.is_active_target(target_id) {
         browser_context.loaded_page()
     } else {

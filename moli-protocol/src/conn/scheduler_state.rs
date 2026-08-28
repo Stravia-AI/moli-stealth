@@ -374,6 +374,7 @@ mod tests {
             request_load_policy: NavigationRequestLoadPolicy::BrowserInitiated,
             timestamp: 1.0,
             source_document_security: NavigationSourceDocumentSecurityContext::default(),
+            post_commit_target_activation: None,
         }
     }
 

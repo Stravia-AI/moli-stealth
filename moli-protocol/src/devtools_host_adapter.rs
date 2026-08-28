@@ -117,6 +117,15 @@ impl DevToolsHostView<'_> {
         self.connection.default_target_id()
     }
 
+    pub fn default_tab_target_id(&self) -> &'static str {
+        self.connection.default_tab_target_id()
+    }
+
+    pub fn tab_target_id_for_page_target_id(&self, page_target_id: &str) -> Option<&str> {
+        self.connection
+            .tab_target_id_for_page_target_id(page_target_id)
+    }
+
     pub fn worker_target_id_for_session(&self, session_id: Option<&str>) -> Option<String> {
         self.connection.worker_target_id_for_session(session_id)
     }

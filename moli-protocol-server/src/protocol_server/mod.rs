@@ -18,7 +18,9 @@ use moli_core::{
     runtime::{NavigationRuntimeConfig, storage_partition::StoragePartitionState},
 };
 use moli_fetch::FetchConfig;
-use moli_protocol::CdpInitialStoragePartition;
+#[cfg(test)]
+use moli_protocol::DEFAULT_CDP_TAB_TARGET_ID;
+use moli_protocol::{CdpInitialStoragePartition, DEFAULT_CDP_PAGE_TARGET_ID};
 use tokio::net::TcpListener;
 use tracing::info;
 

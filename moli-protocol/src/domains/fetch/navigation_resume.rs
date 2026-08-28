@@ -635,6 +635,11 @@ fn start_pending_navigation_network_resume(
             "Navigation aborted",
         ));
     };
+    // A request-stage Fetch decision may have replaced the method and body
+    // after the initial request event was emitted. Capture that final request
+    // before any of the resumed network paths hand ownership to background
+    // work so Network.getRequestPostData observes the bytes actually sent.
+    network::record_main_document_request_body(conn, &pending.navigation);
     if pending.intercept_response && pending.navigation.requested_url.scheme() == "data" {
         let mut output = CommandOutputBuffer::default();
         pause_data_url_response_stage_navigation_into_buffer(conn, &mut output, pending);

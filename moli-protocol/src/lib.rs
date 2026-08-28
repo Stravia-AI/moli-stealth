@@ -32,6 +32,7 @@ pub use conn::{
     CommandDispatchContext, CommandResponseFlushContext, CommandResponseFlushPermit,
     CompletedBrowserHostTurn, CompletedCdpCommandDispatch,
     CompletedDeferredMainDocumentLoadCompletion, CompletedRuntimeProtocolMessageDispatch,
+    DEFAULT_CDP_PAGE_TARGET_ID, DEFAULT_CDP_TAB_TARGET_ID,
     DeferredMainDocumentLoadCompletionOutputAction,
     DeferredMainDocumentLoadCompletionOutputInterest, DeferredMainDocumentLoadCompletionReadiness,
     DeferredMainDocumentLoadObservationId, DeferredMainDocumentLoadPredecessorCandidate,

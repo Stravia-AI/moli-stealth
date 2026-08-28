@@ -6,7 +6,8 @@ use serde::Deserialize;
 
 use crate::conn::{
     BackgroundProtocolEvent, BrowserTargetCreatedFactProjection, CdpTargetFilter,
-    CdpTargetFilterEntry, PreparedTargetAttach, TargetAttachSessionCommit,
+    CdpTargetFilterEntry, PopupTargetActivationAction, PreparedTargetAttach,
+    TargetActivationTransition, TargetAttachSessionCommit,
 };
 use crate::devtools_runtime::{
     DevToolsActivateTargetCommand, DevToolsBrowserContextId, DevToolsCloseTargetCommand,
@@ -26,6 +27,7 @@ pub(super) struct DevToolsCreateTargetExecution {
 
 pub(super) struct CreatedTargetProtocolEvents {
     target_id: String,
+    activation: Option<TargetActivationTransition>,
     browser_fact: Option<BrowserTargetCreatedFactProjection>,
     attached_tab_sessions: Vec<TargetAttachSessionCommit>,
     attached_sessions: Vec<TargetAttachSessionCommit>,
@@ -34,6 +36,10 @@ pub(super) struct CreatedTargetProtocolEvents {
 impl CreatedTargetProtocolEvents {
     pub(super) fn target_id(&self) -> &str {
         &self.target_id
+    }
+
+    pub(super) fn activation(&self) -> Option<&TargetActivationTransition> {
+        self.activation.as_ref()
     }
 }
 
@@ -139,6 +145,15 @@ struct CreateTargetParams {
     #[serde(default = "default_blank")]
     url: String,
     browser_context_id: Option<String>,
+    for_tab: Option<bool>,
+    background: Option<bool>,
+    focus: Option<bool>,
+}
+
+#[derive(Clone, Copy)]
+enum CreateTargetResultHost {
+    Page,
+    Tab,
 }
 
 fn default_blank() -> String {
@@ -166,32 +181,49 @@ pub(super) fn start_create_target_command(
         Ok(None) => CreateTargetParams {
             url: "about:blank".into(),
             browser_context_id: None,
+            for_tab: None,
+            background: None,
+            focus: None,
         },
         Err(e) => {
             return super::target_command_error(-32602, e);
         }
     };
-    let command = build_cdp_create_target_command(cmd, params);
-    super::start_devtools_target_command(
+    let result_host = if params.for_tab.unwrap_or(false) {
+        CreateTargetResultHost::Tab
+    } else {
+        CreateTargetResultHost::Page
+    };
+    let command = match build_cdp_create_target_command(cmd, params) {
+        Ok(command) => command,
+        Err(message) => return super::target_command_error(-32602, message),
+    };
+    start_devtools_create_target_command_with_result_host(
         conn,
         cmd.id,
         cmd.session_id,
-        DevToolsCommand::CreateTarget(command),
+        command,
+        result_host,
     )
 }
 
 fn build_cdp_create_target_command(
     cmd: &Cmd<'_>,
     params: CreateTargetParams,
-) -> DevToolsCreateTargetCommand {
-    DevToolsCreateTargetCommand {
+) -> Result<DevToolsCreateTargetCommand, &'static str> {
+    let should_focus = params.focus.unwrap_or(!params.background.unwrap_or(false));
+    let create_in_background = params.background.unwrap_or(false) || params.focus == Some(false);
+    if should_focus && create_in_background {
+        return Err("Can't focus a target in the background. Use background=false instead.");
+    }
+    Ok(DevToolsCreateTargetCommand {
         context: cmd.devtools_command_context(None::<&str>, params.browser_context_id.as_deref()),
         url: params.url,
         browser_context_id: params
             .browser_context_id
             .map(DevToolsBrowserContextId::from),
-        activate: false,
-    }
+        activate: !create_in_background,
+    })
 }
 
 pub(super) fn start_devtools_create_target_command(
@@ -200,13 +232,47 @@ pub(super) fn start_devtools_create_target_command(
     command_session_id: Option<&str>,
     command: DevToolsCreateTargetCommand,
 ) -> TargetCommandTaskStep {
+    start_devtools_create_target_command_with_result_host(
+        conn,
+        command_id,
+        command_session_id,
+        command,
+        CreateTargetResultHost::Page,
+    )
+}
+
+fn start_devtools_create_target_command_with_result_host(
+    conn: &mut CdpConnection,
+    command_id: Option<u64>,
+    command_session_id: Option<&str>,
+    command: DevToolsCreateTargetCommand,
+    result_host: CreateTargetResultHost,
+) -> TargetCommandTaskStep {
     let mut plan = CommandOutputPlan::default();
     let execution = execute_devtools_create_target_command(conn, command);
     let (created_target_id, created_target_protocol_events) = match execution {
         Ok(execution) => {
             let target_id = execution.result.target_id.clone();
+            let response_target_id = match result_host {
+                CreateTargetResultHost::Page => execution.result.target_id,
+                CreateTargetResultHost::Tab => {
+                    let Some(tab_target_id) =
+                        conn.tab_target_id_for_page_target_id(target_id.as_str())
+                    else {
+                        return TargetCommandTaskStep::Complete(
+                            CommandOutputPlan::from_devtools_error(DevToolsError::new(
+                                DevToolsErrorKind::Internal,
+                                "MissingTabTargetId",
+                            )),
+                        );
+                    };
+                    DevToolsTargetId::from(tab_target_id)
+                }
+            };
             plan.extend(CommandOutputPlan::from_devtools_result(
-                DevToolsCommandResult::CreateTarget(execution.result),
+                DevToolsCommandResult::CreateTarget(DevToolsCreateTargetResult {
+                    target_id: response_target_id,
+                }),
             ));
             (target_id, execution.protocol_events)
         }
@@ -277,7 +343,12 @@ pub(super) fn execute_devtools_create_target_command(
 
     let target_id = conn.gen_target_id();
     let default_target_id = conn.default_target_id();
-    let (browser_context_id, has_active_target, replacing_default_placeholder) = {
+    let (
+        browser_context_id,
+        has_active_target,
+        replacing_default_placeholder,
+        previous_active_target_id,
+    ) = {
         let browser_context = conn
             .browser_context
             .as_ref()
@@ -288,6 +359,7 @@ pub(super) fn execute_devtools_create_target_command(
             browser_context.id.clone(),
             browser_context.active_target_identity().is_some() && !replacing_default_placeholder,
             replacing_default_placeholder,
+            browser_context.active_target_id_owned(),
         )
     };
     let auto_attach_page_owners = top_level_page_auto_attach_owner_sessions(conn);
@@ -309,6 +381,8 @@ pub(super) fn execute_devtools_create_target_command(
         None
     };
     let activating_created_target = has_active_target && command.activate;
+    let activation = activating_created_target
+        .then(|| TargetActivationTransition::new(target_id.clone(), previous_active_target_id));
     let initial_empty_document_url = create_target_initial_empty_document_url(&command.url);
     let creation_metadata = BrowserTargetCreationMetadata::with_initial_empty_document(
         BrowserInitialEmptyDocumentSeed::new(initial_empty_document_url.clone()),
@@ -388,6 +462,9 @@ pub(super) fn execute_devtools_create_target_command(
         );
     }
     let tab_target_id = conn.register_top_level_page_target(&target_id);
+    if !creating_background_target {
+        conn.notify_target_host_activated(&target_id);
+    }
     let created_target_id = target_id.clone();
 
     let mut attached_tab_sessions = Vec::new();
@@ -449,6 +526,7 @@ pub(super) fn execute_devtools_create_target_command(
         },
         protocol_events: CreatedTargetProtocolEvents {
             target_id,
+            activation,
             browser_fact,
             attached_tab_sessions,
             attached_sessions,
@@ -578,6 +656,7 @@ pub(crate) struct PopupTargetCreation {
     target_name: String,
     opener: Option<PopupTargetOpenerIdentity>,
     can_access_opener: bool,
+    disposition: moli_core::page::RendererPopupDisposition,
     session_storage_store: Option<moli_core::network::SharedWebStorageStore>,
     initial_empty_document_storage_key: Option<moli_storage_key::MoliStorageKey>,
 }
@@ -590,6 +669,7 @@ impl PopupTargetCreation {
         target_name: String,
         opener: Option<PopupTargetOpenerIdentity>,
         can_access_opener: bool,
+        disposition: moli_core::page::RendererPopupDisposition,
         session_storage_store: Option<moli_core::network::SharedWebStorageStore>,
         initial_empty_document_storage_key: Option<moli_storage_key::MoliStorageKey>,
     ) -> Self {
@@ -600,6 +680,7 @@ impl PopupTargetCreation {
             target_name,
             opener,
             can_access_opener,
+            disposition,
             session_storage_store,
             initial_empty_document_storage_key,
         }
@@ -618,6 +699,7 @@ pub(crate) async fn create_popup_target_from_renderer_output_background_events_a
         target_name,
         opener,
         can_access_opener,
+        disposition,
         session_storage_store,
         initial_empty_document_storage_key,
     } = creation;
@@ -635,29 +717,45 @@ pub(crate) async fn create_popup_target_from_renderer_output_background_events_a
         .target_id_for_window_name(&target_name)
         .map(str::to_owned)
     {
-        let transition_published = match conn.publish_renderer_auxiliary_navigation(
-            &browser_context_id,
-            &existing_target_id,
-            url,
-            BrowserAuxiliaryNavigationKind::NamedTargetReuse,
-        ) {
-            Ok(true) => true,
-            Ok(false) => {
-                tracing::debug!(
-                    browser_context_id,
-                    target_id = existing_target_id,
-                    "dropping named auxiliary Target transition after its Page retired"
-                );
-                false
-            }
-            Err(error) => {
-                tracing::error!(
-                    %error,
-                    browser_context_id,
-                    target_id = existing_target_id,
-                    "named auxiliary Target transition could not enter Browser Host"
-                );
-                false
+        let activation = (disposition == moli_core::page::RendererPopupDisposition::Foreground)
+            .then(|| {
+                PopupTargetActivationAction::capture_after_navigation(
+                    conn,
+                    &browser_context_id,
+                    &existing_target_id,
+                    url.clone(),
+                    BrowserAuxiliaryNavigationKind::NamedTargetReuse,
+                )
+            })
+            .flatten();
+        let transition_published = if let Some(activation) = activation {
+            conn.publish_popup_target_activation_action(activation);
+            true
+        } else {
+            match conn.publish_renderer_auxiliary_navigation(
+                &browser_context_id,
+                &existing_target_id,
+                url,
+                BrowserAuxiliaryNavigationKind::NamedTargetReuse,
+            ) {
+                Ok(true) => true,
+                Ok(false) => {
+                    tracing::debug!(
+                        browser_context_id,
+                        target_id = existing_target_id,
+                        "dropping named auxiliary Target transition after its Page retired"
+                    );
+                    false
+                }
+                Err(error) => {
+                    tracing::error!(
+                        %error,
+                        browser_context_id,
+                        target_id = existing_target_id,
+                        "named auxiliary Target transition could not enter Browser Host"
+                    );
+                    false
+                }
             }
         };
         return (transition_published
@@ -692,6 +790,9 @@ pub(crate) async fn create_popup_target_from_renderer_output_background_events_a
     let target_id = conn.gen_target_id();
     let auto_attach_page_owners = top_level_page_auto_attach_owner_sessions(conn);
     let auto_attach_tab_owners = top_level_tab_auto_attach_owner_sessions(conn);
+    let wait_for_debugger_on_start = auto_attach_page_owners.iter().any(|owner_session_id| {
+        conn.auto_attach_owner_waits_for_debugger_on_start(owner_session_id.as_deref())
+    });
     let auto_attached_page_sessions = auto_attach_page_owners
         .iter()
         .map(|owner_session_id| (owner_session_id.clone(), conn.gen_session_id()))
@@ -861,7 +962,25 @@ pub(crate) async fn create_popup_target_from_renderer_output_background_events_a
         &target_id,
         target_info,
     );
-    if !conn.auto_attach_wait_for_debugger_on_start {
+    let navigate_initial_document = !wait_for_debugger_on_start;
+    let activation = (disposition == moli_core::page::RendererPopupDisposition::Foreground)
+        .then(|| {
+            if navigate_initial_document {
+                PopupTargetActivationAction::capture_after_navigation(
+                    conn,
+                    &browser_context_id,
+                    &target_id,
+                    requested_url.clone(),
+                    BrowserAuxiliaryNavigationKind::InitialDocument,
+                )
+            } else {
+                PopupTargetActivationAction::capture(conn, &browser_context_id, &target_id)
+            }
+        })
+        .flatten();
+    if let Some(activation) = activation {
+        conn.publish_popup_target_activation_action(activation);
+    } else if navigate_initial_document {
         match conn.publish_renderer_auxiliary_navigation(
             &browser_context_id,
             &target_id,
@@ -883,6 +1002,24 @@ pub(crate) async fn create_popup_target_from_renderer_output_background_events_a
         }
     }
     Some(target_id)
+}
+
+pub(crate) async fn complete_popup_target_activation_action_async(
+    conn: &mut CdpConnection,
+    action: PopupTargetActivationAction,
+) -> crate::conn::CdpTurnOutcome {
+    let browser_context_id = action.browser_context_id().to_owned();
+    let target_id = action.target_id().to_owned();
+    let input = action.into_browser_owner_input();
+    if let Err(error) = conn.publish_browser_owner_input(input) {
+        tracing::error!(
+            %error,
+            browser_context_id,
+            target_id,
+            "popup Target activation could not enter Browser Host"
+        );
+    }
+    crate::conn::CdpTurnOutcome::new_with_protocol_events(Vec::new(), conn.take_scheduler_events())
 }
 
 fn remember_resolved_popup_target(
@@ -1025,6 +1162,9 @@ pub(super) fn start_close_target_command(
             return super::target_command_error(-32602, "InvalidParams");
         }
     };
+    if !conn.target_handler_may_close_target(cmd.session_id, &params.target_id) {
+        return super::target_command_error(-32000, "Not allowed");
+    }
     let command = build_cdp_close_target_command(cmd, params);
     super::start_devtools_target_command(
         conn,
@@ -1278,6 +1418,9 @@ pub(super) fn get_target_info(conn: &mut CdpConnection, cmd: &Cmd<'_>) -> Comman
             return CommandOutputPlan::error_without_session(-32602, e);
         }
     };
+    if !conn.target_handler_may_get_target_info(cmd.session_id, params.target_id.as_deref()) {
+        return CommandOutputPlan::error(-32000, "Not allowed");
+    }
     let command = build_cdp_get_target_info_command(cmd, params);
     match super::start_devtools_target_command(
         conn,
@@ -1318,12 +1461,30 @@ pub(super) fn execute_devtools_get_target_info_command(
     conn: &CdpConnection,
     command: DevToolsGetTargetInfoCommand,
 ) -> Result<DevToolsGetTargetInfoResult, DevToolsError> {
-    let Some(target_id) = command.target_id.as_ref() else {
+    let owner_target_id = command
+        .context
+        .target_id
+        .as_ref()
+        .map(|target_id| target_id.as_str().to_owned())
+        .or_else(|| {
+            conn.non_browser_target_id_for_session(
+                command
+                    .context
+                    .session_id
+                    .as_ref()
+                    .map(|session_id| session_id.as_str()),
+            )
+        });
+    let wanted = command
+        .target_id
+        .as_ref()
+        .map(|target_id| target_id.as_str())
+        .or(owner_target_id.as_deref());
+    let Some(wanted) = wanted else {
         return Ok(DevToolsGetTargetInfoResult {
             target_info: super::browser_context::devtools_browser_target_info(),
         });
     };
-    let wanted = target_id.as_str();
     if wanted == super::browser_context::DEVTOOLS_BROWSER_TARGET_ID {
         return Ok(DevToolsGetTargetInfoResult {
             target_info: super::browser_context::devtools_browser_target_info(),
@@ -1374,6 +1535,7 @@ struct AutoAttachParams {
     auto_attach: bool,
     #[serde(rename = "waitForDebuggerOnStart")]
     wait_for_debugger_on_start: bool,
+    flatten: Option<bool>,
     filter: Option<Vec<TargetFilterEntry>>,
 }
 
@@ -1522,6 +1684,17 @@ fn owner_already_auto_attached_to_target(
         })
 }
 
+fn owner_already_auto_attached_to_exact_target(
+    conn: &CdpConnection,
+    owner_session_id: Option<&str>,
+    target_id: &str,
+) -> bool {
+    let attached_sessions = conn.attached_sessions_for_target(target_id);
+    conn.auto_attached_sessions_for_owner(owner_session_id)
+        .iter()
+        .any(|session_id| attached_sessions.contains(session_id))
+}
+
 fn owner_already_auto_attached_to_page_target(
     conn: &CdpConnection,
     owner_session_id: Option<&str>,
@@ -1664,6 +1837,16 @@ pub(super) fn start_set_auto_attach_command(
             return super::target_command_error(-32602, "InvalidParams");
         }
     };
+    if cmd
+        .session_id
+        .is_some_and(|session_id| conn.is_browser_session_id(Some(session_id)))
+        && params.flatten != Some(true)
+    {
+        return super::target_command_error(
+            -32602,
+            "Only flatten protocol is supported with browser level auto-attach",
+        );
+    }
     if !params.auto_attach
         && params
             .filter
@@ -1698,7 +1881,8 @@ pub(super) fn start_set_auto_attach_command(
     }
     let pause_service_workers_on_start = params.auto_attach
         && params.wait_for_debugger_on_start
-        && target_filter.matches("service_worker");
+        && target_filter.matches("service_worker")
+        && super::browser_level_auto_attach_owner_session_allowed(conn, cmd.session_id);
     let pause_dedicated_workers_on_start =
         params.auto_attach && params.wait_for_debugger_on_start && target_filter.matches("worker");
     conn.set_auto_attach_owner(
@@ -1781,7 +1965,7 @@ async fn set_auto_attach_inner_async(
     out: &mut events::TargetProtocolSideEffects,
     auto_attach: bool,
     owner_session_id: Option<&str>,
-    owner_was_enabled: bool,
+    _owner_was_enabled: bool,
     legacy_disable_all: bool,
     command_context: &mut crate::conn::CommandDispatchContext,
 ) -> Result<(), DevToolsError> {
@@ -1791,7 +1975,6 @@ async fn set_auto_attach_inner_async(
         return Ok(());
     }
     if auto_attach
-        && !owner_was_enabled
         && let Some(owner_session_id) = owner_session_id
         && let Some(tab_target_id) = conn
             .tab_target_id_for_session_id(owner_session_id)
@@ -1814,9 +1997,6 @@ async fn set_auto_attach_inner_async(
             continue;
         }
         if auto_attach {
-            if owner_was_enabled {
-                continue;
-            }
             let attach_page_targets = conn
                 .auto_attach_owner_allows_target_type(owner_session_id, "page")
                 && super::browser_level_auto_attach_owner_session_allowed(conn, owner_session_id);
@@ -1828,8 +2008,9 @@ async fn set_auto_attach_inner_async(
                 && super::browser_level_auto_attach_owner_session_allowed(conn, owner_session_id);
             let attach_dedicated_worker_targets =
                 conn.auto_attach_owner_allows_target_type(owner_session_id, "worker");
-            let attach_service_worker_targets =
-                conn.auto_attach_owner_allows_target_type(owner_session_id, "service_worker");
+            let attach_service_worker_targets = conn
+                .auto_attach_owner_allows_target_type(owner_session_id, "service_worker")
+                && super::browser_level_auto_attach_owner_session_allowed(conn, owner_session_id);
             // waitForDebuggerOnStart applies to targets created after the
             // policy is installed. Chromium reports every target found by the
             // initial AddClient sweep as already running.
@@ -1894,6 +2075,13 @@ async fn set_auto_attach_inner_async(
                 if attach_shared_worker_targets {
                     bc.shared_worker_targets
                         .values()
+                        .filter(|target| {
+                            !owner_already_auto_attached_to_exact_target(
+                                conn,
+                                owner_session_id,
+                                &target.target_id,
+                            )
+                        })
                         .map(|target| target.target_id.clone())
                         .collect::<Vec<_>>()
                 } else {
@@ -1908,6 +2096,13 @@ async fn set_auto_attach_inner_async(
                 if attach_service_worker_targets {
                     bc.service_worker_targets
                         .values()
+                        .filter(|target| {
+                            !owner_already_auto_attached_to_exact_target(
+                                conn,
+                                owner_session_id,
+                                &target.target_id,
+                            )
+                        })
                         .map(|target| target.target_id.clone())
                         .collect::<Vec<_>>()
                 } else {
@@ -1927,6 +2122,10 @@ async fn set_auto_attach_inner_async(
                                 conn,
                                 owner_session_id,
                                 &target.owner_page,
+                            ) && !owner_already_auto_attached_to_exact_target(
+                                conn,
+                                owner_session_id,
+                                &target.target_id,
                             )
                         })
                         .map(|target| target.target_id.clone())
@@ -2051,8 +2250,10 @@ async fn set_auto_attach_inner_async(
                     .promote_background_target_to_active_for_connection_async(&promote_target_id)
                     .await
                 {
-                    Ok(true) => {}
-                    Ok(false) => {}
+                    Ok(Some(activation)) => {
+                        out.extend_background_events(activation.into_protocol_events());
+                    }
+                    Ok(None) => {}
                     Err(error) => {
                         tracing::warn!(
                             target_id = promote_target_id,
@@ -2873,7 +3074,12 @@ pub(super) async fn complete_activate_target_command_async(
     command: DevToolsActivateTargetCommand,
 ) -> CommandOutputPlan {
     match execute_devtools_activate_target_command_async(conn, command).await {
-        Ok(()) => CommandOutputPlan::success(),
+        Ok(events) => {
+            let mut plan = CommandOutputPlan::default();
+            plan.extend_background_events(events);
+            plan.push_success();
+            plan
+        }
         Err(error) => CommandOutputPlan::from_devtools_error(error),
     }
 }
@@ -2881,8 +3087,12 @@ pub(super) async fn complete_activate_target_command_async(
 pub(super) async fn execute_devtools_activate_target_command_async(
     conn: &mut CdpConnection,
     command: DevToolsActivateTargetCommand,
-) -> Result<(), DevToolsError> {
+) -> Result<Vec<BackgroundProtocolEvent>, DevToolsError> {
     let target_id = command.target_id.as_str().to_owned();
+    let target_id = conn
+        .page_target_id_for_tab_target_id(&target_id)
+        .map(str::to_owned)
+        .unwrap_or(target_id);
     let previously_active_browser_context_id = previously_active_browser_context_id(conn);
     if let Err(message) = select_browser_context_for_target(conn, &target_id) {
         restore_previously_active_browser_context(
@@ -2909,21 +3119,21 @@ pub(super) async fn execute_devtools_activate_target_command_async(
             conn,
             previously_active_browser_context_id.as_deref(),
         );
-        return Ok(());
+        return Ok(Vec::new());
     }
     if bc.has_dedicated_worker_target(&target_id) {
         restore_previously_active_browser_context(
             conn,
             previously_active_browser_context_id.as_deref(),
         );
-        return Ok(());
+        return Ok(Vec::new());
     }
     if bc.has_service_worker_target(&target_id) {
         restore_previously_active_browser_context(
             conn,
             previously_active_browser_context_id.as_deref(),
         );
-        return Ok(());
+        return Ok(Vec::new());
     }
     if !bc.has_active_target() && bc.background_targets.is_empty() {
         restore_previously_active_browser_context(
@@ -2935,7 +3145,7 @@ pub(super) async fn execute_devtools_activate_target_command_async(
             "TargetNotLoaded",
         ));
     }
-    if !matches!(
+    let protocol_events = if !matches!(
         bc.active_target_identity(),
         Some((ref active_target_id, _)) if active_target_id == &target_id
     ) && bc.background_target(&target_id).is_some()
@@ -2944,8 +3154,8 @@ pub(super) async fn execute_devtools_activate_target_command_async(
             .promote_background_target_to_active_for_connection_async(&target_id)
             .await;
         match promoted {
-            Ok(true) => {}
-            Ok(false) => {
+            Ok(Some(activation)) => activation.into_protocol_events(),
+            Ok(None) => {
                 restore_previously_active_browser_context(
                     conn,
                     previously_active_browser_context_id.as_deref(),
@@ -2975,13 +3185,15 @@ pub(super) async fn execute_devtools_activate_target_command_async(
             DevToolsErrorKind::NoSuchTarget,
             "UnknownTargetId",
         ));
-    }
+    } else {
+        Vec::new()
+    };
 
     restore_previously_active_browser_context(
         conn,
         previously_active_browser_context_id.as_deref(),
     );
-    Ok(())
+    Ok(protocol_events)
 }
 
 #[cfg(test)]
@@ -3127,8 +3339,12 @@ mod protocol_neutral_tests {
             CreateTargetParams {
                 url: "https://example.com/new".to_owned(),
                 browser_context_id: Some("BID-create".to_owned()),
+                for_tab: None,
+                background: None,
+                focus: None,
             },
-        );
+        )
+        .expect("valid createTarget parameters");
 
         assert_eq!(command.context.protocol, DevToolsProtocol::Cdp);
         assert_eq!(
@@ -3149,7 +3365,7 @@ mod protocol_neutral_tests {
             command.browser_context_id.as_ref().map(|id| id.as_str()),
             Some("BID-create")
         );
-        assert!(!command.activate);
+        assert!(command.activate);
     }
 
     #[test]

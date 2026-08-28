@@ -357,7 +357,7 @@ async fn wait_for_target_list(
     label: &str,
     predicate: impl Fn(&[serde_json::Value]) -> bool,
 ) -> Vec<serde_json::Value> {
-    timeout(Duration::from_secs(5), async {
+    let result = timeout(Duration::from_secs(5), async {
         loop {
             let response = fetch_server_json(addr, "/json/list").await;
             if let Some(targets) = response.as_array()
@@ -368,8 +368,14 @@ async fn wait_for_target_list(
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
-    .await
-    .unwrap_or_else(|_| panic!("{label}"))
+    .await;
+    match result {
+        Ok(targets) => targets,
+        Err(_) => {
+            let observed = fetch_server_json(addr, "/json/list").await;
+            panic!("{label}; observed={observed:#?}");
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -894,7 +900,7 @@ async fn page_agent_host_and_tab_host_survive_document_navigation() {
         "document navigation must update the Page target without mirroring a Tab event: {target_events:#?}"
     );
 
-    let descriptors = timeout(Duration::from_secs(5), async {
+    let descriptors = match timeout(Duration::from_secs(5), async {
         loop {
             let descriptors = fetch_server_json(addr, "/json/list?for_tab").await;
             if descriptors.as_array().is_some_and(|targets| {
@@ -910,7 +916,13 @@ async fn page_agent_host_and_tab_host_survive_document_navigation() {
         }
     })
     .await
-    .expect("Tab discovery metadata should follow its primary Page");
+    {
+        Ok(descriptors) => descriptors,
+        Err(_) => {
+            let observed = fetch_server_json(addr, "/json/list?for_tab").await;
+            panic!("Tab discovery metadata should follow its primary Page: {observed:#?}");
+        }
+    };
     assert!(descriptors.as_array().is_some_and(|targets| {
         targets.iter().any(|target| {
             target["id"] == json!(DEFAULT_TARGET_ID)

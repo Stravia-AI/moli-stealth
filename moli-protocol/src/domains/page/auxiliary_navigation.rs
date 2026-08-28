@@ -1,8 +1,13 @@
-use moli_core::browser_host::BrowserAuxiliaryNavigationKind;
+use moli_core::browser_host::{
+    BrowserAuxiliaryNavigationKind, BrowserContextHandle, BrowserTargetHandle,
+};
 
 use crate::conn::{CdpConnection, TargetPageResidenceIdentity};
 
-use super::{PageCommandTaskStep, start_session_owner_navigation_from_renderer_request_with_trace};
+use super::{
+    PageCommandTaskStep,
+    start_session_owner_navigation_from_renderer_request_with_trace_and_post_commit_activation,
+};
 
 /// Starts one actor-selected auxiliary browsing-context navigation.
 ///
@@ -15,6 +20,7 @@ pub(crate) fn start_page_owned_auxiliary_navigation(
     owner: &TargetPageResidenceIdentity,
     url: &str,
     kind: BrowserAuxiliaryNavigationKind,
+    post_commit_target_activation: Option<(BrowserContextHandle, BrowserTargetHandle)>,
 ) -> Option<PageCommandTaskStep> {
     let owner_route = match kind {
         BrowserAuxiliaryNavigationKind::InitialDocument => {
@@ -57,7 +63,7 @@ pub(crate) fn start_page_owned_auxiliary_navigation(
         return None;
     }
     Some(
-        start_session_owner_navigation_from_renderer_request_with_trace(
+        start_session_owner_navigation_from_renderer_request_with_trace_and_post_commit_activation(
             conn,
             None,
             url,
@@ -66,6 +72,7 @@ pub(crate) fn start_page_owned_auxiliary_navigation(
             &[],
             moli_fetch::BrowserNavigationRequestKind::Navigate,
             None,
+            post_commit_target_activation,
         ),
     )
 }

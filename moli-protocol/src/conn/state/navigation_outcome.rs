@@ -1,3 +1,4 @@
+use moli_core::browser_host::{BrowserContextHandle, BrowserTargetHandle};
 use moli_core::page::{
     Page, RendererMainDocumentCommit, RendererPageCreationArtifacts,
     RendererPendingDownloadActivation, RendererRuntimeRealmInfo,
@@ -335,6 +336,12 @@ pub struct NavigationDispatchState {
     pub request_load_policy: NavigationRequestLoadPolicy,
     pub timestamp: f64,
     pub(crate) source_document_security: NavigationSourceDocumentSecurityContext,
+    /// Exact foreground continuation for a renderer-created auxiliary Target.
+    ///
+    /// The continuation travels with the navigation completion instead of a
+    /// parallel connection map. It is published back to Browser Host only
+    /// after this navigation commits its successor Document.
+    pub(crate) post_commit_target_activation: Option<(BrowserContextHandle, BrowserTargetHandle)>,
 }
 
 impl NavigationDispatchState {

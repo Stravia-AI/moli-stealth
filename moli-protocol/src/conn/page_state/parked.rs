@@ -807,13 +807,7 @@ impl BrowserContext {
             aux_state,
         );
         if let Some(previous_active_slot) = previous_active {
-            Box::pin(
-                self.park_demoted_active_target_async(
-                    *previous_active_slot,
-                    synchronize_loaded_page,
-                ),
-            )
-            .await;
+            self.replace_background_target_slot(*previous_active_slot);
         }
         Some(synchronize_loaded_page)
     }
@@ -883,31 +877,6 @@ impl BrowserContext {
         self.synchronize_raw_cookie_manager_surface_to_loaded_page_async()
             .await;
         Ok(())
-    }
-
-    async fn park_demoted_active_target_async(
-        &mut self,
-        slot: TargetSlotState,
-        synchronize_loaded_page: bool,
-    ) {
-        let (mut target, aux_state) = slot.into_parts();
-        if synchronize_loaded_page {
-            let target_id = target.target_id().to_owned();
-            if let Err(error) = self
-                .apply_parked_surface_overrides_to_loaded_page_async(
-                    &mut target.runtime_slot,
-                    &aux_state.page_session_state,
-                )
-                .await
-            {
-                tracing::warn!(
-                    target_id,
-                    %error,
-                    "failed to update demoted page visibility"
-                );
-            }
-        }
-        self.replace_background_target_slot(TargetSlotState::new(target, aux_state));
     }
 
     #[cfg(test)]

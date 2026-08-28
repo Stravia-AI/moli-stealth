@@ -5,7 +5,7 @@ use crate::page::RendererDocumentSourcedTopLevelLocationNavigation;
 use super::{
     BrowserAuxiliaryNavigationInput, BrowserAuxiliaryNavigationKind, BrowserContextHandle,
     BrowserHistoryTraversalDestination, BrowserInitialTargetNavigationCommandInput,
-    BrowserInitialTargetNavigationInput, BrowserNavigationTraceContext,
+    BrowserInitialTargetNavigationInput, BrowserNavigationTraceContext, BrowserTargetHandle,
     BrowserTargetTerminationRequest, PageResidenceIdentity,
 };
 
@@ -187,6 +187,39 @@ impl BrowserOwnerInput {
         ))
     }
 
+    /// Admits foreground selection for one renderer-created auxiliary Target.
+    ///
+    /// The matching auxiliary navigation is published first. Keeping this
+    /// exact Context/Target capability in the same Browser Host mailbox makes
+    /// activation observe that navigation's admission order without exposing
+    /// protocol scheduler or frontend identity to Core.
+    pub fn renderer_auxiliary_target_activation(
+        browser_context: BrowserContextHandle,
+        target: BrowserTargetHandle,
+    ) -> Self {
+        Self::RendererIntent(RendererBrowserIntent::AuxiliaryTargetActivation(
+            BrowserAuxiliaryTargetActivationInput::new(browser_context, target, None),
+        ))
+    }
+
+    /// Admits one auxiliary navigation whose exact Target becomes foreground
+    /// only after that navigation reaches its Browser Host terminal.
+    pub fn renderer_auxiliary_navigation_and_target_activation(
+        page_owner: PageResidenceIdentity,
+        url: String,
+        kind: BrowserAuxiliaryNavigationKind,
+        browser_context: BrowserContextHandle,
+        target: BrowserTargetHandle,
+    ) -> Self {
+        Self::RendererIntent(RendererBrowserIntent::AuxiliaryTargetActivation(
+            BrowserAuxiliaryTargetActivationInput::new(
+                browser_context,
+                target,
+                Some(BrowserAuxiliaryNavigationInput::new(page_owner, url, kind)),
+            ),
+        ))
+    }
+
     /// Admits replacement of one Target's initial empty Document with its
     /// immutable creation URL.
     ///
@@ -250,6 +283,9 @@ impl BrowserOwnerInput {
             Self::RendererIntent(RendererBrowserIntent::AuxiliaryNavigation(_)) => {
                 BrowserOwnerInputKind::RendererAuxiliaryNavigation
             }
+            Self::RendererIntent(RendererBrowserIntent::AuxiliaryTargetActivation(_)) => {
+                BrowserOwnerInputKind::RendererAuxiliaryTargetActivation
+            }
             Self::InitialTargetNavigation(_) => BrowserOwnerInputKind::InitialTargetNavigation,
             Self::PageTermination(_) => BrowserOwnerInputKind::PageTermination,
             Self::TargetTermination(_) => BrowserOwnerInputKind::TargetTermination,
@@ -269,6 +305,7 @@ pub enum BrowserOwnerInputKind {
     RendererTopLevelLocationNavigation,
     RendererTopLevelHistoryTraversal,
     RendererAuxiliaryNavigation,
+    RendererAuxiliaryTargetActivation,
     InitialTargetNavigation,
     PageTermination,
     TargetTermination,
@@ -799,6 +836,56 @@ pub enum RendererBrowserIntent {
     TopLevelLocationNavigation(RendererTopLevelLocationNavigationInput),
     TopLevelHistoryTraversal(RendererTopLevelHistoryTraversalInput),
     AuxiliaryNavigation(BrowserAuxiliaryNavigationInput),
+    AuxiliaryTargetActivation(BrowserAuxiliaryTargetActivationInput),
+}
+
+/// Exact auxiliary Target selection produced by a renderer turn.
+///
+/// A public Target id is insufficient because the Context or Target may be
+/// removed and recreated while this input waits. Browser Host and its physical
+/// projection both revalidate these Core-issued capabilities before applying
+/// foreground selection.
+#[derive(Debug)]
+pub struct BrowserAuxiliaryTargetActivationInput {
+    browser_context: BrowserContextHandle,
+    target: BrowserTargetHandle,
+    navigation: Option<BrowserAuxiliaryNavigationInput>,
+}
+
+impl BrowserAuxiliaryTargetActivationInput {
+    fn new(
+        browser_context: BrowserContextHandle,
+        target: BrowserTargetHandle,
+        navigation: Option<BrowserAuxiliaryNavigationInput>,
+    ) -> Self {
+        Self {
+            browser_context,
+            target,
+            navigation,
+        }
+    }
+
+    pub fn browser_context(&self) -> &BrowserContextHandle {
+        &self.browser_context
+    }
+
+    pub fn target(&self) -> &BrowserTargetHandle {
+        &self.target
+    }
+
+    pub fn navigation(&self) -> Option<&BrowserAuxiliaryNavigationInput> {
+        self.navigation.as_ref()
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        BrowserContextHandle,
+        BrowserTargetHandle,
+        Option<BrowserAuxiliaryNavigationInput>,
+    ) {
+        (self.browser_context, self.target, self.navigation)
+    }
 }
 
 /// Exact Page-scoped top-level location navigation submitted to Browser Owner.

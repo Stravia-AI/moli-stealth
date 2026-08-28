@@ -319,6 +319,11 @@ impl BrowserNavigationHistory {
         (self.current_index.unwrap_or(0), self.entries.clone())
     }
 
+    pub(super) fn current_entry(&self) -> Option<&BrowserNavigationHistoryEntry> {
+        self.current_index
+            .and_then(|current_index| self.entries.get(current_index))
+    }
+
     /// Resolves and classifies a traversal without mutating the cursor.
     ///
     /// Browser Core owns both the current cursor and Document sequence

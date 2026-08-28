@@ -996,7 +996,6 @@ fn runtime_observable_console_payloads(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::conn::ParkedPageSessionState;
 
     fn active_session_state_mut(browser_context: &mut BrowserContext) -> TargetSessionStateMut<'_> {
         let (devtools_session_state, network_policy, tls_verify_host_override) =

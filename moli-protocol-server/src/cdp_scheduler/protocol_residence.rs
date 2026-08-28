@@ -108,6 +108,13 @@ pub(super) enum ClientTurnPredecessor {
 }
 
 impl ProtocolSchedulerResidence {
+    pub(super) fn bypasses_inflight_navigation_gate(&self) -> bool {
+        matches!(
+            self,
+            Self::ProtocolWork { work, .. } if work.bypasses_inflight_navigation_gate()
+        )
+    }
+
     fn should_yield_to_client_turn(&self) -> bool {
         matches!(
             self,
@@ -223,6 +230,12 @@ impl Default for SchedulerQueues {
 impl SchedulerQueues {
     pub(super) fn protocol_residence_len(&self) -> usize {
         self.protocol_residences.len()
+    }
+
+    pub(super) fn front_bypasses_inflight_navigation_gate(&self) -> bool {
+        self.protocol_residences
+            .front()
+            .is_some_and(ProtocolSchedulerResidence::bypasses_inflight_navigation_gate)
     }
 
     pub(super) fn enqueue_renderer_output_publication(

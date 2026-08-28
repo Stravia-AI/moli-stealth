@@ -1,6 +1,6 @@
+use super::session_owner::CdpSessionRoute;
 use super::target_session_owner::{TargetSessionOwnerMut, TargetSessionStateMut};
 use super::*;
-use crate::conn::CdpSessionRoute;
 use crate::conn::{CapturedBody, TargetRuntimeSlot};
 use crate::devtools_runtime::DevToolsNetworkDataType;
 use crate::domains::network::{

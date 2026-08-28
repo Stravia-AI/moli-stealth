@@ -2,7 +2,9 @@ use serde::Deserialize;
 
 use moli_core::browser_host::BrowserTargetStateSnapshot;
 
-use crate::conn::{BackgroundProtocolEvent, BrowserContext, CdpConnection, Cmd};
+use crate::conn::{
+    BackgroundProtocolEvent, BrowserContext, CdpConnection, Cmd, TargetHandlerAccessMode,
+};
 use crate::devtools_runtime::{
     DevToolsActivateTargetCommand, DevToolsCloseTargetCommand, DevToolsCommand,
     DevToolsCommandResult, DevToolsCreateTargetCommand, DevToolsError, DevToolsErrorKind,
@@ -13,17 +15,12 @@ use crate::domains::command_output::CommandOutputPlan;
 
 use super::page;
 
-mod activation;
 mod attachment;
-mod auto_attach;
 mod browser_context;
 mod browser_context_disposal;
 mod browser_context_disposal_owner_adapter;
 mod events;
-mod info;
-mod popup;
-#[cfg(test)]
-mod protocol_neutral_tests;
+mod lifecycle;
 #[cfg(test)]
 mod tests;
 mod worker_target;
@@ -41,7 +38,7 @@ pub use browser_context_disposal_owner_adapter::{
 
 pub(in crate::domains) use browser_context::devtools_client_window_info_for_target;
 pub(crate) use lifecycle::{
-    PopupTargetCreation, PopupTargetOpenerIdentity,
+    PopupTargetCreation, PopupTargetOpenerIdentity, complete_popup_target_activation_action_async,
     create_popup_target_from_renderer_output_background_events_async,
 };
 pub(crate) fn popup_activation_creates_new_target(
@@ -294,7 +291,7 @@ impl CdpConnection {
         let _ = self
             .detach_runtime_inspector_session_for_session_owner_async(None)
             .await;
-        auto_attach::release_attached_sessions_for_root_frontend_async(
+        lifecycle::release_attached_sessions_for_root_frontend_async(
             self,
             &mut side_effects,
             &mut command_context,
@@ -323,11 +320,12 @@ enum PendingTargetCommandKind {
     SetAutoAttach {
         auto_attach: bool,
         owner_session_id: Option<String>,
+        owner_was_enabled: bool,
         legacy_disable_all: bool,
     },
     CreateTarget {
         response_plan: CommandOutputPlan,
-        creation_commit: creation::TargetCreationCommit,
+        protocol_events: lifecycle::CreatedTargetProtocolEvents,
         initial_document_route: Option<crate::conn::CdpSessionRoute>,
         initial_document: Option<Box<crate::conn::PendingInitialDocumentPageBuild>>,
     },
@@ -365,11 +363,12 @@ enum CompletedTargetCommandKind {
     SetAutoAttach {
         auto_attach: bool,
         owner_session_id: Option<String>,
+        owner_was_enabled: bool,
         legacy_disable_all: bool,
     },
     CreateTarget {
         response_plan: CommandOutputPlan,
-        creation_commit: creation::TargetCreationCommit,
+        protocol_events: lifecycle::CreatedTargetProtocolEvents,
         initial_document_route: Option<crate::conn::CdpSessionRoute>,
         initial_document: Option<
             Result<
@@ -416,20 +415,22 @@ impl PendingTargetCommandDispatch {
             PendingTargetCommandKind::SetAutoAttach {
                 auto_attach,
                 owner_session_id,
+                owner_was_enabled,
                 legacy_disable_all,
             } => CompletedTargetCommandKind::SetAutoAttach {
                 auto_attach,
                 owner_session_id,
+                owner_was_enabled,
                 legacy_disable_all,
             },
             PendingTargetCommandKind::CreateTarget {
                 response_plan,
-                creation_commit,
+                protocol_events,
                 initial_document_route,
                 initial_document,
             } => CompletedTargetCommandKind::CreateTarget {
                 response_plan,
-                creation_commit,
+                protocol_events,
                 initial_document_route,
                 initial_document: match initial_document {
                     Some(pending) => Some(pending.wait().await.map(Box::new)),
@@ -503,7 +504,7 @@ pub(crate) fn try_start_target_command_dispatch(
         Some(TargetAction::CreateBrowserContext) => Some(TargetCommandTaskStep::Complete(
             browser_context::create_browser_context(conn, cmd),
         )),
-        Some(TargetAction::CreateTarget) => Some(creation::start_create_target_command(conn, cmd)),
+        Some(TargetAction::CreateTarget) => Some(lifecycle::start_create_target_command(conn, cmd)),
         Some(TargetAction::AttachToTarget) => {
             Some(attachment::start_attach_to_target_command(conn, cmd))
         }
@@ -511,19 +512,19 @@ pub(crate) fn try_start_target_command_dispatch(
             attachment::attach_to_browser_target_command(conn, cmd),
         )),
         Some(TargetAction::GetTargetInfo) => Some(TargetCommandTaskStep::Complete(
-            info::get_target_info(conn, cmd),
+            lifecycle::get_target_info(conn, cmd),
         )),
         Some(TargetAction::SetDiscoverTargets) => Some(TargetCommandTaskStep::Complete(
             set_discover_targets(conn, cmd),
         )),
         Some(TargetAction::ActivateTarget) => {
-            Some(activation::start_activate_target_command(conn, cmd))
+            Some(lifecycle::start_activate_target_command(conn, cmd))
         }
         Some(TargetAction::SetAutoAttach) => {
-            Some(auto_attach::start_set_auto_attach_command(conn, cmd))
+            Some(lifecycle::start_set_auto_attach_command(conn, cmd))
         }
         Some(TargetAction::AutoAttachRelated) => Some(TargetCommandTaskStep::Complete(
-            auto_attach::auto_attach_related(conn, cmd),
+            lifecycle::auto_attach_related(conn, cmd),
         )),
         Some(TargetAction::DetachFromTarget) => {
             Some(attachment::start_detach_from_target_command(cmd))
@@ -546,14 +547,14 @@ fn start_devtools_target_command(
     command: DevToolsCommand,
 ) -> TargetCommandTaskStep {
     match command {
-        DevToolsCommand::CreateTarget(command) => creation::start_devtools_create_target_command(
+        DevToolsCommand::CreateTarget(command) => lifecycle::start_devtools_create_target_command(
             conn,
             command_id,
             command_session_id,
             command,
         ),
         DevToolsCommand::CloseTarget(command) => {
-            closing::start_devtools_close_target_command(command_id, command_session_id, command)
+            lifecycle::start_devtools_close_target_command(command_id, command_session_id, command)
         }
         DevToolsCommand::ActivateTarget(command) => {
             pending_activate_target_command(command_id, command_session_id, command)
@@ -595,7 +596,7 @@ fn start_devtools_target_command(
             )),
         ),
         DevToolsCommand::GetTargetInfo(command) => TargetCommandTaskStep::Complete(
-            info::start_devtools_get_target_info_command(conn, command),
+            lifecycle::start_devtools_get_target_info_command(conn, command),
         ),
         _ => target_command_error(-32000, "UnsupportedDevToolsCommand"),
     }
@@ -610,7 +611,7 @@ pub(crate) fn execute_immediate_devtools_target_command_with_protocol_events(
 ) {
     match command {
         DevToolsCommand::CreateTarget(command) => {
-            let result = creation::execute_devtools_create_target_command(conn, command)
+            let result = lifecycle::execute_devtools_create_target_command(conn, command)
                 .map(|execution| DevToolsCommandResult::CreateTarget(execution.result));
             (result, Vec::new())
         }
@@ -641,7 +642,7 @@ pub(crate) fn execute_immediate_devtools_target_command_with_protocol_events(
             Vec::new(),
         ),
         DevToolsCommand::GetTargetInfo(command) => (
-            info::execute_devtools_get_target_info_command(conn, command)
+            lifecycle::execute_devtools_get_target_info_command(conn, command)
                 .map(DevToolsCommandResult::GetTargetInfo),
             Vec::new(),
         ),
@@ -663,27 +664,28 @@ pub(crate) async fn execute_devtools_create_target_command_async_with_protocol_e
     Vec<crate::conn::BackgroundProtocolEvent>,
     Option<moli_core::RendererOutputFence>,
 ) {
-    let execution = match creation::execute_devtools_create_target_command(conn, command) {
+    let execution = match lifecycle::execute_devtools_create_target_command(conn, command) {
         Ok(execution) => execution,
         Err(error) => return (Err(error), Vec::new(), None),
     };
     let result = execution.result;
-    let creation_commit = execution.commit;
     let mut protocol_events = Vec::new();
     let (initial_document_events, renderer_output_predecessor) = conn
         .ensure_created_target_initial_document_page(&result.target_id)
         .await;
     protocol_events.extend(initial_document_events);
-    if let Some(activation) = creation_commit.activation() {
+    if let Some(activation) = execution.protocol_events.activation() {
         protocol_events.extend(
             conn.complete_staged_target_activation_async(activation)
                 .await
                 .into_protocol_events(),
         );
     }
-    if let Err(error) =
-        creation::emit_target_creation_protocol_events(conn, creation_commit, &mut protocol_events)
-    {
+    if let Err(error) = lifecycle::emit_created_target_protocol_events(
+        conn,
+        execution.protocol_events,
+        &mut protocol_events,
+    ) {
         return (Err(error), Vec::new(), renderer_output_predecessor);
     }
     (
@@ -704,7 +706,7 @@ pub(crate) async fn execute_devtools_target_command_async_with_protocol_events(
         DevToolsCommand::CloseTarget(command) => {
             let mut command_context = crate::conn::CommandDispatchContext::default();
             let mut side_effects = events::TargetProtocolSideEffects::default();
-            let result = closing::execute_devtools_close_target_command_async(
+            let result = lifecycle::execute_devtools_close_target_command_async(
                 conn,
                 command,
                 &mut side_effects,
@@ -717,7 +719,7 @@ pub(crate) async fn execute_devtools_target_command_async_with_protocol_events(
             (result, protocol_events)
         }
         DevToolsCommand::ActivateTarget(command) => {
-            match activation::execute_devtools_activate_target_command_async(conn, command).await {
+            match lifecycle::execute_devtools_activate_target_command_async(conn, command).await {
                 Ok(events) => (Ok(DevToolsCommandResult::Empty), events),
                 Err(error) => (Err(error), Vec::new()),
             }
@@ -751,17 +753,22 @@ pub(crate) async fn execute_devtools_target_command_async_with_protocol_events(
     }
 }
 
-fn created_target_response_plan_after_initial_document(
+async fn created_target_response_plan_after_initial_document(
     conn: &mut CdpConnection,
     response_plan: CommandOutputPlan,
-    creation_commit: creation::TargetCreationCommit,
-    activation_events: Vec<BackgroundProtocolEvent>,
+    protocol_events: lifecycle::CreatedTargetProtocolEvents,
 ) -> CommandOutputPlan {
-    let target_id = creation_commit.page_target_id().to_owned();
+    let target_id = protocol_events.target_id().to_owned();
     let mut plan = CommandOutputPlan::default();
-    let mut events = activation_events;
+    let mut events = if let Some(activation) = protocol_events.activation() {
+        conn.complete_staged_target_activation_async(activation)
+            .await
+            .into_protocol_events()
+    } else {
+        Vec::new()
+    };
     if let Err(error) =
-        creation::emit_target_creation_protocol_events(conn, creation_commit, &mut events)
+        lifecycle::emit_created_target_protocol_events(conn, protocol_events, &mut events)
     {
         return CommandOutputPlan::from_devtools_error(error);
     }
@@ -799,19 +806,21 @@ pub(crate) async fn complete_pending_target_command(
         }
         CompletedTargetCommandKind::ActivateTarget { command } => {
             return TargetCommandTaskStep::Complete(
-                activation::complete_activate_target_command_async(conn, command).await,
+                lifecycle::complete_activate_target_command_async(conn, command).await,
             );
         }
         CompletedTargetCommandKind::SetAutoAttach {
             auto_attach,
             owner_session_id,
+            owner_was_enabled,
             legacy_disable_all,
         } => {
             return TargetCommandTaskStep::Complete(
-                auto_attach::complete_set_auto_attach_command_async(
+                lifecycle::complete_set_auto_attach_command_async(
                     conn,
                     auto_attach,
                     owner_session_id.as_deref(),
+                    owner_was_enabled,
                     legacy_disable_all,
                     command_context,
                 )
@@ -820,17 +829,10 @@ pub(crate) async fn complete_pending_target_command(
         }
         CompletedTargetCommandKind::CreateTarget {
             response_plan,
-            creation_commit,
+            protocol_events,
             initial_document_route,
             initial_document,
         } => {
-            let activation_events = if let Some(activation) = creation_commit.activation() {
-                conn.complete_staged_target_activation_async(activation)
-                    .await
-                    .into_protocol_events()
-            } else {
-                Vec::new()
-            };
             match initial_document {
                 Some(Ok(completed_initial_document)) => {
                     let completed_initial_document = *completed_initial_document;
@@ -869,11 +871,14 @@ pub(crate) async fn complete_pending_target_command(
                 }
                 None => {}
             }
-            TargetCommandTaskStep::Complete(created_target_response_plan_after_initial_document(
-                conn,
-                response_plan,
-                protocol_events,
-            ))
+            TargetCommandTaskStep::Complete(
+                created_target_response_plan_after_initial_document(
+                    conn,
+                    response_plan,
+                    protocol_events,
+                )
+                .await,
+            )
         }
         CompletedTargetCommandKind::DetachFromTarget {
             target_id,
@@ -892,7 +897,8 @@ pub(crate) async fn complete_pending_target_command(
         }
         CompletedTargetCommandKind::CloseTarget { command } => {
             return TargetCommandTaskStep::Complete(
-                closing::complete_close_target_command_async(conn, command, command_context).await,
+                lifecycle::complete_close_target_command_async(conn, command, command_context)
+                    .await,
             );
         }
         CompletedTargetCommandKind::DisposeBrowserContext { completion } => {
@@ -949,6 +955,7 @@ fn pending_set_auto_attach_command(
     session_id: Option<&str>,
     auto_attach: bool,
     owner_session_id: Option<&str>,
+    owner_was_enabled: bool,
     legacy_disable_all: bool,
 ) -> TargetCommandTaskStep {
     TargetCommandTaskStep::Pending(PendingTargetCommandDispatch {
@@ -957,6 +964,7 @@ fn pending_set_auto_attach_command(
         kind: Box::new(PendingTargetCommandKind::SetAutoAttach {
             auto_attach,
             owner_session_id: owner_session_id.map(str::to_owned),
+            owner_was_enabled,
             legacy_disable_all,
         }),
     })

@@ -11,10 +11,11 @@ use chromiumoxide_cdp::cdp::browser_protocol::page::{
     NavigateParams, NavigateToHistoryEntryParams, ReloadParams,
 };
 use moli_core::browser_host::{
-    BrowserExactHistoryTraversalResolutionError, BrowserHistoryTraversalDestination,
-    BrowserHistoryTraversalResolution, BrowserHistoryTraversalResolutionError,
-    BrowserHistoryTraversalResult, BrowserNavigationFailure, BrowserNavigationTraceContext,
-    BrowserNavigationTraceEvent, BrowserNavigationTraceSource,
+    BrowserContextHandle, BrowserExactHistoryTraversalResolutionError,
+    BrowserHistoryTraversalDestination, BrowserHistoryTraversalResolution,
+    BrowserHistoryTraversalResolutionError, BrowserHistoryTraversalResult,
+    BrowserNavigationFailure, BrowserNavigationTraceContext, BrowserNavigationTraceEvent,
+    BrowserNavigationTraceSource, BrowserOwnerInput, BrowserTargetHandle,
 };
 use moli_core::page::{
     ChildFrameDocumentOpenedSnapshot, CompletedPageCommand, PendingPageCommand,
@@ -71,6 +72,7 @@ pub(super) struct PendingChildFrameNavigateCommand {
 pub(super) struct PendingSameDocumentNavigateCommand {
     pending: PendingPageCommand,
     result_payload: Value,
+    post_commit_target_activation: Option<(BrowserContextHandle, BrowserTargetHandle)>,
 }
 
 pub(super) struct CompletedChildFrameNavigateCommand {
@@ -85,6 +87,7 @@ pub(super) struct CompletedChildFrameNavigateCommand {
 pub(super) struct CompletedSameDocumentNavigateCommand {
     completed: Result<CompletedPageCommand, String>,
     result_payload: Value,
+    post_commit_target_activation: Option<(BrowserContextHandle, BrowserTargetHandle)>,
 }
 
 pub(super) struct PendingContinueNavigationWithoutRequestPauseCommand {
@@ -168,6 +171,7 @@ impl PendingSameDocumentNavigateCommand {
         CompletedSameDocumentNavigateCommand {
             completed: self.pending.wait().await.map_err(|error| error.to_string()),
             result_payload: self.result_payload,
+            post_commit_target_activation: self.post_commit_target_activation,
         }
     }
 }
@@ -1537,7 +1541,7 @@ pub(super) fn start_page_owned_frontend_navigate_command(
         reloaded_after_crash_session_ids_for_session_owner(conn, execution_session_id);
     let start = if same_document {
         let result_payload = cdp_navigate_result_payload(None, owner.target_id(), None, url);
-        start_top_level_same_document_navigate(conn, None, url.to_owned(), result_payload)
+        start_top_level_same_document_navigate(conn, None, url.to_owned(), result_payload, None)
     } else {
         start_navigate_to_url_command_with_background_policy(
             conn,
@@ -1602,6 +1606,7 @@ fn start_top_level_same_document_navigate_command(
         command_session_id,
         command.url.clone(),
         result_payload,
+        None,
     )
 }
 
@@ -1610,6 +1615,7 @@ fn start_top_level_same_document_navigate(
     command_session_id: Option<&str>,
     url: String,
     result_payload: Value,
+    post_commit_target_activation: Option<(BrowserContextHandle, BrowserTargetHandle)>,
 ) -> NavigateCommandStart {
     let Some(page) = conn
         .runtime_session_owner_slot_mut(command_session_id)
@@ -1626,6 +1632,7 @@ fn start_top_level_same_document_navigate(
             PendingSameDocumentNavigateCommand {
                 pending,
                 result_payload,
+                post_commit_target_activation,
             },
         )),
         Err(error) => {
@@ -2375,6 +2382,7 @@ pub(super) fn start_session_owner_navigation_from_renderer(
     request_headers: &[(String, String)],
     browser_navigation_kind: moli_fetch::BrowserNavigationRequestKind,
     trace: Option<BrowserNavigationTraceContext>,
+    post_commit_target_activation: Option<(BrowserContextHandle, BrowserTargetHandle)>,
 ) -> NavigateCommandStart {
     let trace = trace.or_else(|| {
         conn.prepare_navigation_trace_context_for_session_owner(
@@ -2406,7 +2414,13 @@ pub(super) fn start_session_owner_navigation_from_renderer(
         // classification as Page.navigate. In particular, a freshly created
         // popup's `about:blank#fragment` target must not discard its initial
         // Document by trying to fetch the non-fetchable about: URL.
-        start_top_level_same_document_navigate(conn, session_id, url.to_owned(), result_payload)
+        start_top_level_same_document_navigate(
+            conn,
+            session_id,
+            url.to_owned(),
+            result_payload,
+            post_commit_target_activation,
+        )
     } else {
         let result_projection = NavigationResultProjection::Cdp(result_payload);
         start_navigate_to_url_command_with_background_policy_request_and_trace(
@@ -2442,6 +2456,7 @@ pub(super) fn start_session_owner_navigation_from_renderer(
             },
             NavigationStartInitiator::Renderer,
             trace,
+            post_commit_target_activation,
         )
     };
     clear_crash_state_for_renderer_navigation(
@@ -3005,6 +3020,7 @@ fn start_navigate_to_url_command_with_background_policy(
         request_load_policy,
         initiator,
         trace,
+        None,
     )
 }
 
@@ -3033,6 +3049,7 @@ fn start_navigate_to_url_command_with_background_policy_request_and_trace(
     request_load_policy: NavigationRequestLoadPolicy,
     initiator: NavigationStartInitiator,
     trace: Option<BrowserNavigationTraceContext>,
+    post_commit_target_activation: Option<(BrowserContextHandle, BrowserTargetHandle)>,
 ) -> NavigateCommandStart {
     let mut out = Vec::new();
     let timestamp = monotonic_timestamp_seconds();
@@ -3120,6 +3137,7 @@ fn start_navigate_to_url_command_with_background_policy_request_and_trace(
             inherited_security_origin,
             inherited_secure_context_type,
         ),
+        post_commit_target_activation,
     };
     let mut pending_fetch_navigation = None;
 
@@ -3523,6 +3541,7 @@ pub(super) async fn complete_pending_same_document_navigate_command(
     let CompletedSameDocumentNavigateCommand {
         completed,
         result_payload,
+        post_commit_target_activation,
     } = completed;
     let completion = match completed {
         Ok(completion) => completion,
@@ -3555,6 +3574,7 @@ pub(super) async fn complete_pending_same_document_navigate_command(
             "Navigation is not same-document",
         ));
     }
+    publish_post_commit_target_activation(conn, post_commit_target_activation);
 
     let mut plan = CommandOutputPlan::default();
     plan.push_result(result_payload);
@@ -3772,6 +3792,27 @@ pub(super) async fn apply_materialized_navigation_into_buffer_async(
         }
     }
     committed_owner
+}
+
+pub(crate) fn publish_post_commit_target_activation(
+    conn: &CdpConnection,
+    activation: Option<(BrowserContextHandle, BrowserTargetHandle)>,
+) {
+    let Some((browser_context, target)) = activation else {
+        return;
+    };
+    let browser_context_id = browser_context.browser_context_id().to_owned();
+    let target_id = target.target_id().to_owned();
+    if let Err(error) = conn.publish_browser_owner_input(
+        BrowserOwnerInput::renderer_auxiliary_target_activation(browser_context, target),
+    ) {
+        tracing::error!(
+            %error,
+            browser_context_id,
+            target_id,
+            "post-commit auxiliary Target activation could not enter Browser Host"
+        );
+    }
 }
 
 fn emit_materialized_navigation_ready_trace(

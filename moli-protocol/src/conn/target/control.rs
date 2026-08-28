@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 
-use super::graph::TabTarget;
 use crate::devtools_runtime::{
     DevToolsSessionId, DevToolsTargetFilterEntry, DevToolsTargetId, DevToolsTargetInfo,
     DevToolsTargetKind, TargetAttachmentEvent, TargetDetachmentEvent,
@@ -21,9 +20,13 @@ pub(crate) struct TargetControlPlane {
 }
 
 impl TargetControlPlane {
-    pub(crate) fn register_tab(&mut self, tab_target_id: String, primary_page_target_id: String) {
+    pub(crate) fn register_top_level_page(
+        &mut self,
+        page_target_id: String,
+        tab_target_id: String,
+    ) {
         self.registry
-            .register_tab(tab_target_id, primary_page_target_id);
+            .register_top_level_page(page_target_id, tab_target_id);
     }
 
     pub(crate) fn register_worker(&mut self, target_id: String, kind: DevToolsTargetKind) {
@@ -39,12 +42,9 @@ impl TargetControlPlane {
             .tab_target_id_for_page_target_id(page_target_id)
     }
 
-    pub(crate) fn primary_page_target_id_for_tab_target_id(
-        &self,
-        tab_target_id: &str,
-    ) -> Option<&str> {
+    pub(crate) fn page_target_id_for_tab_target_id(&self, tab_target_id: &str) -> Option<&str> {
         self.registry
-            .primary_page_target_id_for_tab_target_id(tab_target_id)
+            .page_target_id_for_tab_target_id(tab_target_id)
     }
 
     pub(crate) fn primary_session_id_for_tab_target_id(&self, tab_target_id: &str) -> Option<&str> {
@@ -66,15 +66,24 @@ impl TargetControlPlane {
         self.registry.remove_tab_session(session_id)
     }
 
-    pub(crate) fn remove_tab_by_page_target_id(
+    pub(crate) fn remove_top_level_page_by_page_target_id(
         &mut self,
         page_target_id: &str,
     ) -> Option<TargetClosurePlan> {
-        self.registry.remove_tab_by_page_target_id(page_target_id)
+        self.registry
+            .remove_top_level_page_by_page_target_id(page_target_id)
     }
 
     pub(crate) fn tab_target_id_for_session_id(&self, session_id: &str) -> Option<&str> {
         self.registry.tab_target_id_for_session_id(session_id)
+    }
+
+    pub(crate) fn auto_attached_target_ids_for_owner(
+        &self,
+        owner_session_id: Option<&str>,
+    ) -> Vec<String> {
+        self.sessions
+            .auto_attached_target_ids_for_owner(owner_session_id)
     }
 
     pub(crate) fn tab_target_info_for_page_target_info(
@@ -85,48 +94,48 @@ impl TargetControlPlane {
             return None;
         }
         let page_target_id = page_target_info.target_id.as_ref()?.as_str();
-        let target = self.registry.tab_for_page_target_id(page_target_id)?;
+        let target = self
+            .registry
+            .top_level_target_for_page_target_id(page_target_id)?;
         Some(super::projection::tab_target_info_from_page_target_info(
             target,
             page_target_info,
         ))
     }
 
-    pub(crate) fn project_page_tab_target_infos_for_destruction(
+    pub(crate) fn project_tab_page_target_infos(
         &self,
         target_info: DevToolsTargetInfo,
     ) -> Vec<DevToolsTargetInfo> {
-        let target = target_info
-            .target_id
-            .as_ref()
-            .and_then(|target_id| self.registry.tab_for_page_target_id(target_id.as_str()));
-        super::projection::project_page_tab_target_infos_for_destruction(target, target_info)
+        let target = target_info.target_id.as_ref().and_then(|target_id| {
+            self.registry
+                .top_level_target_for_page_target_id(target_id.as_str())
+        });
+        super::projection::project_tab_page_target_infos(target, target_info)
     }
 
-    fn paired_tab_target(&self, target_id: &str) -> Option<&TabTarget> {
+    fn paired_top_level_target(&self, target_id: &str) -> Option<&super::graph::TopLevelTarget> {
         self.registry
-            .tab_for_page_target_id(target_id)
-            .or_else(|| self.registry.tab(target_id))
+            .top_level_target_for_page_target_id(target_id)
+            .or_else(|| self.registry.top_level_target_for_tab_target_id(target_id))
     }
 
     pub(crate) fn target_created_deltas(&self, target_id: &str) -> Vec<TargetHostDelta> {
-        let Some(target) = self.paired_tab_target(target_id) else {
+        let Some(target) = self.paired_top_level_target(target_id) else {
             return vec![TargetHostDelta::created(target_id.to_owned())];
         };
-        target
-            .target_ids_in_creation_order()
-            .into_iter()
-            .map(TargetHostDelta::created)
-            .collect()
+        vec![
+            TargetHostDelta::created(target.tab_target_id()),
+            TargetHostDelta::created(target.page_target_id()),
+        ]
     }
 
     pub(crate) fn target_destroyed_deltas(&self, target_id: &str) -> Vec<TargetHostDelta> {
-        if let Some(target) = self.paired_tab_target(target_id) {
-            return target
-                .target_ids_in_destruction_order()
-                .into_iter()
-                .map(TargetHostDelta::destroyed)
-                .collect();
+        if let Some(target) = self.paired_top_level_target(target_id) {
+            return vec![
+                TargetHostDelta::destroyed(target.page_target_id()),
+                TargetHostDelta::destroyed(target.tab_target_id()),
+            ];
         }
         vec![TargetHostDelta::destroyed(target_id.to_owned())]
     }
@@ -477,25 +486,12 @@ impl TargetControlPlane {
         self.sessions.attached_sessions_for_target(target_id)
     }
 
-    pub(crate) fn target_has_waiting_for_debugger_session(&self, target_id: &str) -> bool {
-        self.sessions
-            .target_has_waiting_for_debugger_session(target_id)
-    }
-
     pub(crate) fn auto_attached_sessions_for_owner(
         &self,
         owner_session_id: Option<&str>,
     ) -> Vec<String> {
         self.sessions
             .auto_attached_sessions_for_owner(owner_session_id)
-    }
-
-    pub(crate) fn auto_attached_target_ids_for_owner(
-        &self,
-        owner_session_id: Option<&str>,
-    ) -> Vec<String> {
-        self.sessions
-            .auto_attached_target_ids_for_owner(owner_session_id)
     }
 
     pub(crate) fn attached_session_cascade_for_owner(

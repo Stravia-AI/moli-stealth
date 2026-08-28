@@ -5087,6 +5087,10 @@ async fn same_context_named_popup_reuse_navigates_and_promotes_loaded_owner() {
     let response = take_response_by_id(&mut ctx, 1041949446);
     assert_eq!(response["result"]["result"]["type"], json!("boolean"));
     assert_eq!(response["result"]["result"]["value"], json!(true));
+    ctx.wait_for_only_background_navigation_gate_to_settle(
+        "named background popup navigation disposal and replay",
+    )
+    .await;
     ctx.wait_until_scheduler_state(
         "named popup navigation commit and foreground activation",
         |conn| {
@@ -5101,10 +5105,6 @@ async fn same_context_named_popup_reuse_navigates_and_promotes_loaded_owner() {
                         )
                 })
         },
-    )
-    .await;
-    ctx.wait_for_only_background_navigation_gate_to_settle(
-        "named background popup navigation disposal and replay",
     )
     .await;
     let emitted = ctx.take_all();

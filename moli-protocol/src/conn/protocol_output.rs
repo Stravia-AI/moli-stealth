@@ -183,6 +183,10 @@ impl CdpConnection {
                     self.take_scheduler_events(),
                 )
             }
+            ReadyProtocolSchedulerWork::PopupTargetActivationAction(action) => {
+                crate::domains::target::complete_popup_target_activation_action_async(self, action)
+                    .await
+            }
         }
     }
 

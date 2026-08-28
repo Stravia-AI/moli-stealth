@@ -1,4 +1,4 @@
-use crate::browser_host::PageResidenceIdentity;
+use crate::browser_host::{BrowserFactPublishError, PageResidenceIdentity};
 use crate::page::SameDocumentHistoryUpdate;
 
 use super::{
@@ -6,7 +6,8 @@ use super::{
     BrowserHistoryTraversalResolutionError, BrowserNavigationHistory,
     BrowserNavigationHistoryEntry, BrowserNavigationHistoryPageSnapshot,
     BrowserNavigationHistorySeed, BrowserNavigationOwner, BrowserPageOwnerKey,
-    BrowserSameDocumentHistoryUpdateError, target_runtime_registry::BrowserTargetRuntimeRegistry,
+    BrowserSameDocumentHistoryUpdateError, BrowserTargetMetadataTransition,
+    target_runtime_registry::BrowserTargetRuntimeRegistry,
 };
 
 /// Exact reason an actor-selected Page could not resolve a history traversal.
@@ -433,10 +434,31 @@ impl BrowserNavigationOwner {
         &mut self,
         expected_page: &PageResidenceIdentity,
         title: String,
-    ) -> Option<bool> {
-        let key = self.page_owner_key_if_current(expected_page)?;
-        self.navigation_histories
-            .update_current_title(&mut self.target_runtimes, &key, title)
+    ) -> Result<Option<bool>, BrowserFactPublishError> {
+        let Some(key) = self.page_owner_key_if_current(expected_page) else {
+            return Ok(None);
+        };
+        let changed =
+            self.navigation_histories
+                .update_current_title(&mut self.target_runtimes, &key, title);
+        if changed != Some(true) {
+            return Ok(changed);
+        }
+        let Some(entry) = self
+            .target_runtimes
+            .entries
+            .get(&key)
+            .and_then(|runtime| runtime.navigation_history.as_ref())
+            .and_then(|history| history.history.current_entry())
+        else {
+            return Ok(None);
+        };
+        let transition = BrowserTargetMetadataTransition::document_title_changed(
+            entry.url.clone(),
+            entry.title.clone(),
+        );
+        self.record_document_title_changed_fact(expected_page, transition)?;
+        Ok(Some(true))
     }
 
     /// Atomically commits a renderer same-Document history fact for one exact

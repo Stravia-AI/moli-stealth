@@ -962,18 +962,6 @@ fn shared_worker_auto_attach_owner_sessions(conn: &CdpConnection) -> Vec<Option<
         .collect()
 }
 
-fn service_worker_auto_attach_owner_sessions(conn: &CdpConnection) -> Vec<Option<String>> {
-    conn.auto_attach_owner_sessions_for_target_type("service_worker")
-        .into_iter()
-        .filter(|owner_session_id| {
-            super::browser_level_auto_attach_owner_session_allowed(
-                conn,
-                owner_session_id.as_deref(),
-            )
-        })
-        .collect()
-}
-
 fn dedicated_worker_auto_attach_owner_sessions(
     conn: &CdpConnection,
     owner_page: &TargetPageResidenceIdentity,
@@ -1618,7 +1606,8 @@ fn register_service_worker_target_with_active_run(
     }
     let target_id = conn.gen_target_id();
     let should_emit_created = conn.has_any_target_discovery();
-    let mut auto_attach_owners = service_worker_auto_attach_owner_sessions(conn)
+    let mut auto_attach_owners = conn
+        .auto_attach_owner_sessions_for_target_type("service_worker")
         .into_iter()
         .map(|owner_session_id| {
             let waiting_for_debugger =

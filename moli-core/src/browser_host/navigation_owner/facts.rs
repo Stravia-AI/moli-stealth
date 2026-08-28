@@ -231,6 +231,21 @@ impl BrowserNavigationOwner {
         )
     }
 
+    /// Publishes a renderer-observed metadata update for one exact current
+    /// Page after Browser-owned history accepted the same value.
+    pub(super) fn record_document_title_changed_fact(
+        &mut self,
+        page: &PageResidenceIdentity,
+        transition: BrowserTargetMetadataTransition,
+    ) -> Result<Vec<Arc<BrowserFactEnvelope>>, BrowserFactPublishError> {
+        debug_assert!(transition.is_document_title_change());
+        debug_assert!(self.page_owner_key_if_current(page).is_some());
+        self.browser_facts.publish_batch(
+            page.clone(),
+            vec![BrowserFact::TargetMetadataChanged { transition }],
+        )
+    }
+
     /// Publishes the immutable Target terminal fact after Target lifecycle,
     /// Page generation, request state, runtime ownership and history have
     /// committed together.

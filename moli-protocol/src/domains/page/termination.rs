@@ -587,6 +587,7 @@ fn finish_page_target_termination_projection(
         target_host_closure.destroyed_target_lifecycle_event(&expected_target_id);
     let project_bidi_lifecycle = conn.webdriver_bidi_target_lifecycle_projection_enabled();
     let closed_target_id = closed.target_id.clone();
+    let promoted_target_id = closed.promoted_target_id().map(str::to_owned);
     let (target_detached_info_deltas, target_destroyed_deltas) = target_host_closure.into_parts();
     let mut terminal_events = Vec::new();
     for sid in closed.inspector_detached_session_ids() {
@@ -611,6 +612,18 @@ fn finish_page_target_termination_projection(
         &closed_target_id,
         Some("Render process gone."),
     ));
+    if let Some(promoted_target_id) = promoted_target_id {
+        terminal_events.extend(
+            conn.page_screencast_session_ids_for_target(&promoted_target_id)
+                .into_iter()
+                .map(|session_id| {
+                    BackgroundProtocolEvent::page_screencast_visibility_changed(
+                        session_id.as_deref(),
+                        true,
+                    )
+                }),
+        );
+    }
     if project_bidi_lifecycle {
         terminal_events
             .extend(conn.prepared_top_level_target_host_deltas_event_plan(target_destroyed_deltas));

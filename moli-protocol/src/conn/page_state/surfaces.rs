@@ -1,7 +1,7 @@
 use super::super::cookie_manager_surface::BrowserContextCookieManagerSurfaceSnapshot;
 use super::super::{
     BrowserContext, DocumentStartScript, EmulatedDeviceMetrics, EmulatedGeolocationOverrideState,
-    EmulatedNetworkConditions, EmulatedViewportSurface, ParkedPageSessionState, TargetRuntimeSlot,
+    EmulatedNetworkConditions, EmulatedViewportSurface, ParkedPageSessionState,
     viewport_surface_install_script,
 };
 #[cfg(test)]
@@ -370,13 +370,6 @@ impl BrowserContext {
             default_state = ParkedPageSessionState::default();
             &default_state
         };
-        self.generated_surface_override_script_for_parked_state(state)
-    }
-
-    fn generated_surface_override_script_for_parked_state(
-        &self,
-        state: &ParkedPageSessionState,
-    ) -> Option<DocumentStartScript> {
         Self::generated_surface_override_script_from_inputs(&SurfaceOverrideInputs::from_parked(
             state,
             self.default_network_conditions
@@ -388,31 +381,24 @@ impl BrowserContext {
         ))
     }
 
-    pub(crate) async fn apply_parked_surface_overrides_to_loaded_page_async(
-        &self,
-        runtime_slot: &mut TargetRuntimeSlot,
-        state: &ParkedPageSessionState,
-    ) -> Result<(), String> {
-        let Some(script) = self.generated_surface_override_script_for_parked_state(state) else {
-            return Ok(());
-        };
-        let Some(page) = runtime_slot.loaded_page_mut() else {
-            return Ok(());
-        };
-        page.run_page_surface_override_script_async(&script.source)
-            .await
-            .map_err(|error| format!("failed to hide demoted page surface: {error}"))
-    }
-
     pub(crate) async fn apply_parked_target_surface_overrides_async(
         &mut self,
         target_id: &str,
     ) -> Result<bool, String> {
+        // A modal JavaScript dialog blocks script execution in its renderer.
+        // Target selection itself must still complete (WebDriver and CDP both
+        // allow switching away while the dialog remains owned by this Page),
+        // so do not synchronously inject the hidden-surface shim into a
+        // prompted target. Its parked state remains authoritative and the
+        // active surface is synchronized if the target is selected again.
+        if self.has_pending_javascript_dialog() {
+            return Ok(false);
+        }
         let Some(script) = self.generated_surface_override_script_for_parked_target(target_id)
         else {
             return Ok(false);
         };
-        let Some(page) = self
+        let Some(mut page) = self
             .background_target_mut(target_id)
             .and_then(|target| target.runtime_slot.loaded_page_mut())
         else {

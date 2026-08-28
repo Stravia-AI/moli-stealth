@@ -467,7 +467,7 @@ impl BrowserHostState {
         &self,
         expected_page: &PageResidenceIdentity,
         title: String,
-    ) -> Option<bool> {
+    ) -> Result<Option<bool>, BrowserFactPublishError> {
         self.navigation_owner_mut()
             .update_current_document_title(expected_page, title)
     }

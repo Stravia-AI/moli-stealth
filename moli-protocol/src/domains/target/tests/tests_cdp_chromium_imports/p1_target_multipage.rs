@@ -1232,6 +1232,21 @@ async fn rust_cdp_chromium_target_resetting_opener_clears_popup_opener_reference
         .expect("popup target id")
         .to_owned();
 
+    ctx.wait_until_scheduler_state("foreground popup activation before opener reset", |conn| {
+        conn.browser_context_by_id("BID-popup-reset")
+            .is_some_and(|browser_context| {
+                browser_context.active_target_id() == Some(target_id.as_str())
+            })
+    })
+    .await;
+    assert!(
+        ctx.conn
+            .promote_background_target_to_active_for_connection_async("TID-reset-opener")
+            .await
+            .expect("opener reactivation should succeed")
+            .is_some()
+    );
+
     ctx.conn
         .browser_context
         .as_mut()

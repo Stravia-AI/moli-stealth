@@ -1,9 +1,10 @@
 #[cfg(test)]
 use moli_core::browser_host::PageResidenceIdentity;
 use moli_core::browser_host::{
-    BrowserFrontendCommand, BrowserHistoryTraversalDestination, BrowserHistoryTraversalResult,
-    BrowserHostActor, BrowserHostTurn, BrowserHostTurnExecutor, BrowserNavigateCommandOutcome,
-    BrowserNavigateCommandResult, BrowserOwnerInput, BrowserTargetId, RendererBrowserIntent,
+    BrowserContextHandle, BrowserFrontendCommand, BrowserHistoryTraversalDestination,
+    BrowserHistoryTraversalResult, BrowserHostActor, BrowserHostTurn, BrowserHostTurnExecutor,
+    BrowserNavigateCommandOutcome, BrowserNavigateCommandResult, BrowserOwnerInput,
+    BrowserTargetHandle, BrowserTargetId, RendererBrowserIntent,
 };
 
 use crate::domains::fetch::{
@@ -23,6 +24,10 @@ use crate::domains::target::{
 };
 
 use super::BrowserHostTurnExecutorOwner;
+use super::browser_target_engine_handoff::{
+    BrowserTargetPromotionStart, CompletedBrowserTargetPromotion, PendingBrowserTargetPromotion,
+    TargetActivationTransition,
+};
 use super::{
     BrowserHostTurnExecution, CdpConnection, CdpRendererOwnerTurnOutcome, CdpTurnOutcome,
     CommandDispatchContext,
@@ -125,6 +130,10 @@ enum PendingBrowserHostTurnParticipant {
         pending: Box<PendingPausedNavigationDecisionOwnerTask>,
         reply: tokio::sync::oneshot::Sender<CompletedBrowserOwnerPausedNavigationDecisionCommand>,
     },
+    AuxiliaryTargetActivation {
+        pending: Option<Box<PendingBrowserTargetPromotion>>,
+        transition: TargetActivationTransition,
+    },
     TargetClose(PendingTargetCloseOwnerTask),
 }
 
@@ -186,6 +195,16 @@ impl PendingBrowserHostTurn {
                     reply,
                 }
             }
+            PendingBrowserHostTurnParticipant::AuxiliaryTargetActivation {
+                pending,
+                transition,
+            } => CompletedBrowserHostTurnParticipant::AuxiliaryTargetActivation {
+                completed: match pending {
+                    Some(pending) => Some(pending.wait().await),
+                    None => None,
+                },
+                transition,
+            },
             PendingBrowserHostTurnParticipant::TargetClose(pending) => {
                 CompletedBrowserHostTurnParticipant::TargetClose(pending.wait().await)
             }
@@ -219,6 +238,10 @@ enum CompletedBrowserHostTurnParticipant {
     PausedNavigationDecision {
         completed: Box<CompletedPausedNavigationDecisionOwnerTask>,
         reply: tokio::sync::oneshot::Sender<CompletedBrowserOwnerPausedNavigationDecisionCommand>,
+    },
+    AuxiliaryTargetActivation {
+        completed: Option<CompletedBrowserTargetPromotion>,
+        transition: TargetActivationTransition,
     },
     TargetClose(CompletedTargetCloseOwnerTask),
 }
@@ -564,6 +587,37 @@ impl BrowserHostTurnExecutor for BrowserHostTurnExecution<'_> {
                     &page_owner,
                     &url,
                     kind,
+                    None,
+                ) else {
+                    return BrowserHostTurnDispatch::complete(
+                        CdpTurnOutcome::new_with_protocol_events(
+                            Vec::new(),
+                            self.take_scheduler_events(),
+                        ),
+                    );
+                };
+                self.browser_host_dispatch_from_page_step(step, CommandDispatchContext::default())
+            }
+            BrowserOwnerInput::RendererIntent(
+                RendererBrowserIntent::AuxiliaryTargetActivation(input),
+            ) => {
+                let (browser_context, target, navigation) = input.into_parts();
+                let Some(navigation) = navigation else {
+                    let scheduler_events = self.take_scheduler_events();
+                    return self.start_browser_host_auxiliary_target_activation(
+                        browser_context,
+                        target,
+                        Vec::new(),
+                        scheduler_events,
+                    );
+                };
+                let (page_owner, url, kind) = navigation.into_parts();
+                let Some(step) = crate::domains::page::start_page_owned_auxiliary_navigation(
+                    self,
+                    &page_owner,
+                    &url,
+                    kind,
+                    Some((browser_context, target)),
                 ) else {
                     return BrowserHostTurnDispatch::complete(
                         CdpTurnOutcome::new_with_protocol_events(
@@ -686,11 +740,132 @@ impl BrowserHostTurnExecution<'_> {
                 .await;
                 self.browser_host_dispatch_from_paused_navigation_decision_step(step, reply)
             }
+            CompletedBrowserHostTurnParticipant::AuxiliaryTargetActivation {
+                completed,
+                transition,
+            } => {
+                let activation_succeeded = match completed {
+                    Some(completed) => match self
+                        .finish_promote_background_target_to_active_for_connection(completed)
+                    {
+                        Ok(true) => true,
+                        Ok(false) => false,
+                        Err(error) => {
+                            tracing::debug!(
+                                %error,
+                                "popup Target activation synchronization could not complete"
+                            );
+                            false
+                        }
+                    },
+                    None => true,
+                };
+                let protocol_events = if activation_succeeded {
+                    self.complete_staged_target_activation_async(&transition)
+                        .await
+                        .into_protocol_events()
+                } else {
+                    Vec::new()
+                };
+                BrowserHostTurnDispatch::complete(CdpTurnOutcome::new_with_protocol_events(
+                    protocol_events,
+                    self.take_scheduler_events(),
+                ))
+            }
             CompletedBrowserHostTurnParticipant::TargetClose(completed) => {
                 let step = crate::domains::page::complete_target_close_owner_task(self, completed);
                 self.browser_host_dispatch_from_target_close_step(step)
             }
         }
+    }
+
+    fn start_browser_host_auxiliary_target_activation(
+        &mut self,
+        browser_context_handle: BrowserContextHandle,
+        target_handle: BrowserTargetHandle,
+        prefix_protocol_events: Vec<crate::conn::BackgroundProtocolEvent>,
+        prefix_scheduler_events: Vec<crate::conn::CdpSchedulerEvent>,
+    ) -> BrowserHostTurnDispatch {
+        let browser_context_id = browser_context_handle.browser_context_id().to_owned();
+        let target_id = target_handle.target_id().to_owned();
+        let core_is_current_and_selected = {
+            let browser_host_state = self.browser_host_state();
+            let owner = browser_host_state.navigation_owner();
+            owner.selected_browser_context_id() == Some(browser_context_id.as_str())
+                && owner.browser_context_handle_is_current(&browser_context_handle)
+                && owner.target_handle_is_current(&target_handle)
+        };
+        let physical_is_current = self
+            .browser_context
+            .as_ref()
+            .is_some_and(|browser_context| {
+                browser_context.browser_context_handle() == &browser_context_handle
+                    && browser_context.top_level_target_handle(&target_id) == Some(&target_handle)
+                    && (browser_context.is_active_target(&target_id)
+                        || browser_context.background_target(&target_id).is_some())
+            });
+        if !core_is_current_and_selected || !physical_is_current {
+            tracing::debug!(
+                browser_context_id,
+                target_id,
+                "dropping popup activation after its exact selected Target retired or moved"
+            );
+            return BrowserHostTurnDispatch::complete(CdpTurnOutcome::new_with_protocol_events(
+                prefix_protocol_events,
+                prefix_scheduler_events,
+            ));
+        }
+
+        let previous_active_target_id = self
+            .browser_context
+            .as_ref()
+            .and_then(|browser_context| browser_context.active_target_id_owned());
+        let transition =
+            TargetActivationTransition::new(target_id.clone(), previous_active_target_id);
+        let pending =
+            match self.start_promote_background_target_to_active_for_connection(&target_id) {
+                Ok(BrowserTargetPromotionStart::Complete(true)) => None,
+                Ok(BrowserTargetPromotionStart::Pending(pending)) => Some(pending),
+                Ok(BrowserTargetPromotionStart::Complete(false)) => {
+                    tracing::debug!(
+                        browser_context_id,
+                        target_id,
+                        "dropping popup activation after its Target lost foreground eligibility"
+                    );
+                    return BrowserHostTurnDispatch::complete(
+                        CdpTurnOutcome::new_with_protocol_events(
+                            prefix_protocol_events,
+                            prefix_scheduler_events,
+                        ),
+                    );
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        %error,
+                        browser_context_id,
+                        target_id,
+                        "popup Target could not begin activation"
+                    );
+                    return BrowserHostTurnDispatch::complete(
+                        CdpTurnOutcome::new_with_protocol_events(
+                            prefix_protocol_events,
+                            prefix_scheduler_events,
+                        ),
+                    );
+                }
+            };
+        BrowserHostTurnDispatch::pending(
+            CdpTurnOutcome::new_with_protocol_events(
+                prefix_protocol_events,
+                prefix_scheduler_events,
+            ),
+            PendingBrowserHostTurn {
+                participant: PendingBrowserHostTurnParticipant::AuxiliaryTargetActivation {
+                    pending,
+                    transition,
+                },
+            },
+        )
     }
 }
 
@@ -706,7 +881,9 @@ impl CdpConnection {
             .complete_browser_host_turn(completed)
             .await
     }
+}
 
+impl BrowserHostTurnExecution<'_> {
     async fn complete_browser_host_page_command_turn(
         &mut self,
         completed: CompletedPageCommandDispatch,
@@ -732,7 +909,9 @@ impl CdpConnection {
         .await;
         self.browser_host_dispatch_from_page_step_with_completion(step, command_context, completion)
     }
+}
 
+impl CdpConnection {
     #[cfg(test)]
     pub(crate) async fn finish_browser_host_turn_for_test(
         &mut self,

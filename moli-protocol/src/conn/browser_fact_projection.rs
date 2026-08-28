@@ -52,6 +52,10 @@ pub enum BrowserFactProjectionError {
         navigation: BrowserDocumentNavigation,
         page: Box<PageResidenceIdentity>,
     },
+    MissingDocumentTitleMetadataFact {
+        page: Box<PageResidenceIdentity>,
+        title: String,
+    },
     MissingNavigationAdmissionFact {
         navigation: BrowserDocumentNavigation,
     },
@@ -131,6 +135,10 @@ impl fmt::Display for BrowserFactProjectionError {
             Self::MissingNavigationTargetMetadataFact { navigation, page } => write!(
                 formatter,
                 "committed navigation {navigation:?} for Page {page:?} has no exact Target metadata Browser fact"
+            ),
+            Self::MissingDocumentTitleMetadataFact { page, title } => write!(
+                formatter,
+                "renderer title {title:?} for Page {page:?} has no exact Target metadata Browser fact"
             ),
             Self::MissingNavigationAdmissionFact { navigation } => write!(
                 formatter,
@@ -514,7 +522,7 @@ impl CdpBrowserFactProjector {
                     pending.envelope.fact(),
                     BrowserFact::TargetMetadataChanged {
                         transition: observed,
-                    } if observed.navigation() == navigation
+                    } if observed.navigation() == Some(navigation)
                 )
         });
         let Some(position) = position else {
@@ -530,6 +538,42 @@ impl CdpBrowserFactProjector {
                 BrowserFactProjectionError::MissingNavigationTargetMetadataFact {
                     navigation: navigation.clone(),
                     page: Box::new(page.clone()),
+                },
+            ));
+        };
+        self.record_projected(changed.envelope.sequence());
+        Ok(BrowserTargetMetadataFactProjection {
+            envelope: changed.envelope,
+        })
+    }
+
+    pub(crate) fn take_document_title_target_metadata_changed_fact(
+        &mut self,
+        page: &PageResidenceIdentity,
+        title: &str,
+    ) -> Result<BrowserTargetMetadataFactProjection, BrowserFactProjectionError> {
+        self.capture_available()?;
+        let position = self.pending_facts.iter().position(|pending| {
+            pending.envelope.page_residence() == page
+                && matches!(
+                    pending.envelope.fact(),
+                    BrowserFact::TargetMetadataChanged { transition }
+                        if transition.is_document_title_change() && transition.title() == title
+                )
+        });
+        let Some(position) = position else {
+            return Err(self.fail(
+                BrowserFactProjectionError::MissingDocumentTitleMetadataFact {
+                    page: Box::new(page.clone()),
+                    title: title.to_owned(),
+                },
+            ));
+        };
+        let Some(changed) = self.pending_facts.remove(position) else {
+            return Err(self.fail(
+                BrowserFactProjectionError::MissingDocumentTitleMetadataFact {
+                    page: Box::new(page.clone()),
+                    title: title.to_owned(),
                 },
             ));
         };
@@ -1066,6 +1110,15 @@ impl CdpConnection {
             .take_navigation_target_metadata_changed_fact(navigation, page)
     }
 
+    pub(crate) fn take_document_title_target_metadata_changed_fact(
+        &mut self,
+        page: &PageResidenceIdentity,
+        title: &str,
+    ) -> Result<BrowserTargetMetadataFactProjection, BrowserFactProjectionError> {
+        self.browser_fact_projector
+            .take_document_title_target_metadata_changed_fact(page, title)
+    }
+
     /// Revalidates that a delayed frontend creation projection still names
     /// the same Target Page-slot instance. Initial Document generation changes
     /// are allowed; close/reuse of the public Target id is not.
@@ -1438,7 +1491,10 @@ mod tests {
             metadata_projection.envelope().sequence().get(),
             commit_projection.sequence().get() + 1
         );
-        assert_eq!(metadata_projection.transition().navigation(), &committed);
+        assert_eq!(
+            metadata_projection.transition().navigation(),
+            Some(&committed)
+        );
         assert_eq!(
             metadata_projection.transition().url(),
             "https://example.test/committed"
@@ -1548,7 +1604,7 @@ mod tests {
             )
             .expect("second metadata should remain claimable");
 
-        assert_eq!(second_metadata.transition().navigation(), &second);
+        assert_eq!(second_metadata.transition().navigation(), Some(&second));
         assert_eq!(projector.pending_fact_count(), 0);
     }
 

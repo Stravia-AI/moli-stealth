@@ -76,6 +76,7 @@ mod termination;
 mod tests;
 
 pub(crate) use auxiliary_navigation::start_page_owned_auxiliary_navigation;
+pub(crate) use navigation::publish_post_commit_target_activation;
 
 /// Builds a letter-sized raster PDF using the same defaults as
 /// `Page.printToPDF`.
@@ -1288,20 +1289,11 @@ impl PageOutputProjectionStep {
                 {
                     let mut events = Vec::new();
                     for change in changes {
-                        let target_id = conn
-                            .target_owner_identity_for_session(context.session_id)
-                            .and_then(|(_, target_id)| target_id);
-                        if conn
-                            .apply_renderer_document_title_for_session_owner(
-                                context.session_id,
-                                &change,
-                            )
-                            .unwrap_or(false)
-                            && let Some(target_id) = target_id
-                        {
-                            events.extend(
-                                conn.frontend_attachment_info_changed_event_plan(&target_id),
-                            );
+                        if let Some(plan) = conn.apply_renderer_document_title_for_session_owner(
+                            context.session_id,
+                            &change,
+                        ) {
+                            events.extend(plan);
                         }
                     }
                     context.command.protocol_events_mut().extend(events);
@@ -1488,8 +1480,8 @@ async fn bring_session_route_to_front_async(
         .promote_background_target_to_active_for_connection_async(&target_id)
         .await
     {
-        Ok(true) => Ok(()),
-        Ok(false) => Err("UnknownTargetId".into()),
+        Ok(Some(activation)) => Ok(activation.into_protocol_events()),
+        Ok(None) => Err("UnknownTargetId".into()),
         Err(error) => Err(error.to_string()),
     }
 }
@@ -2530,6 +2522,34 @@ fn start_session_owner_navigation_from_renderer_request_with_trace(
     browser_navigation_kind: moli_fetch::BrowserNavigationRequestKind,
     trace: Option<moli_core::browser_host::BrowserNavigationTraceContext>,
 ) -> PageCommandTaskStep {
+    start_session_owner_navigation_from_renderer_request_with_trace_and_post_commit_activation(
+        conn,
+        session_id,
+        url,
+        request_method,
+        request_body,
+        request_headers,
+        browser_navigation_kind,
+        trace,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn start_session_owner_navigation_from_renderer_request_with_trace_and_post_commit_activation(
+    conn: &mut CdpConnection,
+    session_id: Option<&str>,
+    url: &str,
+    request_method: &str,
+    request_body: Option<&[u8]>,
+    request_headers: &[(String, String)],
+    browser_navigation_kind: moli_fetch::BrowserNavigationRequestKind,
+    trace: Option<moli_core::browser_host::BrowserNavigationTraceContext>,
+    post_commit_target_activation: Option<(
+        moli_core::browser_host::BrowserContextHandle,
+        moli_core::browser_host::BrowserTargetHandle,
+    )>,
+) -> PageCommandTaskStep {
     let start = navigation::start_session_owner_navigation_from_renderer(
         conn,
         session_id,
@@ -2539,6 +2559,7 @@ fn start_session_owner_navigation_from_renderer_request_with_trace(
         request_headers,
         browser_navigation_kind,
         trace,
+        post_commit_target_activation,
     );
     navigation::finish_started_navigation_command_for_parts(conn, None, session_id, start, &[])
 }
@@ -2864,15 +2885,15 @@ mod producer_tests {
             "TID-title-source",
             predecessor,
         );
-        assert_eq!(
+        assert!(
             conn.apply_renderer_document_title_for_session_owner(
                 Some("SID-title-source"),
                 &RendererDocumentTitleChanged {
                     source_document: predecessor,
                     title: "predecessor".to_owned(),
                 },
-            ),
-            Some(true)
+            )
+            .is_some()
         );
 
         let replacement = renderer_document_identity_for_test(2, 2);
@@ -2882,15 +2903,15 @@ mod producer_tests {
             "TID-title-source",
             replacement,
         );
-        assert_eq!(
+        assert!(
             conn.apply_renderer_document_title_for_session_owner(
                 Some("SID-title-source"),
                 &RendererDocumentTitleChanged {
                     source_document: replacement,
                     title: "replacement".to_owned(),
                 },
-            ),
-            Some(true)
+            )
+            .is_some()
         );
 
         assert_eq!(
@@ -6896,7 +6917,7 @@ fn try_start_page_enable_command(
             "BrowserContextNotLoaded",
         )));
     }
-    if conn.session_owner_target_has_waiting_for_debugger_session(cmd.session_id) {
+    if conn.auto_attach_wait_for_debugger_on_start {
         return Some(PageCommandTaskStep::Complete(CommandOutputPlan::success()));
     }
     match conn.runtime_session_owner_slot(cmd.session_id) {

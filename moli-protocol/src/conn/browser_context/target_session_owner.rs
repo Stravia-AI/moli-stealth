@@ -11,7 +11,7 @@ use crate::conn::{
     InitialDocumentPageOwner, IsolatedWorldDefinition, NETWORK_ERROR_PAGE_URL,
     NetworkErrorPageNavigation, PausedDocumentTransfer, PendingFetchAuthNavigation,
     PendingFetchNavigation, PendingSubresourceFetchAuthRequest, PendingSubresourceFetchRequest,
-    PendingSubresourceFetchResponseRequest, RuntimeBindingDefinition,
+    PendingSubresourceFetchResponseRequest, RuntimeBindingDefinition, TargetEventPlan,
 };
 use crate::devtools_runtime::{DevToolsNetworkInterceptId, DevToolsNetworkResourceType};
 use moli_cookie_jar::{StoredCookieQueryReport, StoredCookieSetReport};
@@ -81,6 +81,7 @@ pub(crate) struct ClosedPageTarget {
     pub(crate) target_id: String,
     pub(crate) primary_session_id: Option<String>,
     pub(crate) auxiliary_session_ids: Vec<String>,
+    pub(super) promoted_target_id: Option<String>,
 }
 
 impl ClosedPageTarget {
@@ -89,6 +90,10 @@ impl ClosedPageTarget {
             .as_deref()
             .into_iter()
             .chain(self.auxiliary_session_ids.iter().map(String::as_str))
+    }
+
+    pub(crate) fn promoted_target_id(&self) -> Option<&str> {
+        self.promoted_target_id.as_deref()
     }
 
     pub(crate) fn into_detach_cleanup_plan(
@@ -2027,7 +2032,7 @@ impl CdpConnection {
         &mut self,
         session_id: Option<&str>,
         change: &moli_core::RendererDocumentTitleChanged,
-    ) -> Option<bool> {
+    ) -> Option<TargetEventPlan> {
         let page_owner = self
             .target_root_document_protocol_attachment_identity_for_session(
                 session_id,
@@ -2036,13 +2041,45 @@ impl CdpConnection {
             .attachment()
             .page_owner()
             .clone();
-        self.browser_host_state
-            .update_current_document_title(&page_owner, change.title.clone());
+        let core_changed = match self
+            .browser_host_state
+            .update_current_document_title(&page_owner, change.title.clone())
+        {
+            Ok(changed) => changed,
+            Err(error) => {
+                tracing::error!(
+                    %error,
+                    browser_context_id = page_owner.browser_context_id(),
+                    target_id = page_owner.target_id(),
+                    "renderer Document title could not enter the Browser fact journal"
+                );
+                return None;
+            }
+        };
         let physical_changed = self
             .with_target_owner_state_for_session_mut(session_id, |owner_state| {
                 owner_state.commit_document_title(change.title.clone())
             })?;
-        Some(physical_changed)
+        if core_changed == Some(true) {
+            match self.take_document_title_target_metadata_changed_fact(&page_owner, &change.title)
+            {
+                Ok(projection) => {
+                    return Some(self.project_target_metadata_changed_fact(projection));
+                }
+                Err(error) => tracing::error!(
+                    %error,
+                    browser_context_id = page_owner.browser_context_id(),
+                    target_id = page_owner.target_id(),
+                    "refusing to project renderer title without its exact Browser fact"
+                ),
+            }
+        }
+        let target_id = page_owner.target_id()?;
+        Some(if physical_changed {
+            self.frontend_attachment_info_changed_event_plan(target_id)
+        } else {
+            TargetEventPlan::default()
+        })
     }
 
     pub(crate) fn with_target_devtools_session_state_for_session_mut<R>(

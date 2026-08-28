@@ -28,7 +28,7 @@ impl CdpFrontendTargetControl {
         frontend_router: &CdpFrontendRouter,
         target_id: &str,
     ) -> Result<String> {
-        if target_id == scheduler.conn.default_tab_target_id() {
+        if target_id == scheduler.host_adapter.view().default_tab_target_id() {
             self.ensure_default_target_is_materialized(scheduler, frontend_router)
                 .await?;
         }
@@ -59,7 +59,7 @@ impl CdpFrontendTargetControl {
             .with_context(|| format!("CDP target {target_id} did not return an attach session"))?
             .to_owned();
         if target_id == scheduler.host_adapter.view().default_target_id() {
-            self.default_target_materialized = true;
+            self.default_page_materialized = true;
         }
         Ok(session_id)
     }
@@ -145,7 +145,8 @@ impl CdpFrontendTargetControl {
             .map(str::to_owned)
             .context("Target.createTarget returned no targetId")?;
         let tab_target_id = scheduler
-            .conn
+            .host_adapter
+            .view()
             .tab_target_id_for_page_target_id(&page_target_id)
             .map(str::to_owned)
             .context("created page target has no tab target")?;

@@ -15,7 +15,55 @@ use crate::devtools_runtime::{DevToolsError, DevToolsErrorKind};
 #[cfg(test)]
 use moli_core::browser_host::BrowserTargetRegistryError;
 
-use super::{CdpConnection, TargetProjectionError};
+use super::{BackgroundProtocolEvent, CdpConnection, TargetProjectionError};
+
+/// The stable Target identities on both sides of one foreground selection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TargetActivationTransition {
+    promoted_target_id: String,
+    previous_active_target_id: Option<String>,
+}
+
+impl TargetActivationTransition {
+    pub(crate) fn new(
+        promoted_target_id: impl Into<String>,
+        previous_active_target_id: Option<String>,
+    ) -> Self {
+        Self {
+            promoted_target_id: promoted_target_id.into(),
+            previous_active_target_id,
+        }
+    }
+
+    fn promoted_target_id(&self) -> &str {
+        &self.promoted_target_id
+    }
+
+    fn demoted_target_id(&self) -> Option<&str> {
+        self.previous_active_target_id
+            .as_deref()
+            .filter(|target_id| *target_id != self.promoted_target_id())
+    }
+
+    fn changed_active_target(&self) -> bool {
+        self.previous_active_target_id.as_deref() != Some(self.promoted_target_id())
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct CompletedTargetActivation {
+    protocol_events: Vec<BackgroundProtocolEvent>,
+}
+
+impl CompletedTargetActivation {
+    fn new(protocol_events: Vec<BackgroundProtocolEvent>) -> Self {
+        Self { protocol_events }
+    }
+
+    pub(crate) fn into_protocol_events(self) -> Vec<BackgroundProtocolEvent> {
+        self.protocol_events
+    }
+}
 
 #[derive(Debug)]
 pub(crate) enum BrowserTargetPromotionError {
@@ -123,6 +171,84 @@ impl From<BrowserTargetPromotionError> for DevToolsError {
 /// Browser Core with protocol-neutral `{context, target}` identity. It must not
 /// consult CDP session attachment when authorizing a handoff.
 impl CdpConnection {
+    /// Completes renderer-surface updates for a foreground transition that was
+    /// already committed synchronously by Browser Core and its physical
+    /// projection.
+    pub(crate) async fn complete_staged_target_activation_async(
+        &mut self,
+        transition: &TargetActivationTransition,
+    ) -> CompletedTargetActivation {
+        let Some(demoted_target_id) = transition.demoted_target_id() else {
+            return CompletedTargetActivation::new(Vec::new());
+        };
+        let protocol_events = self
+            .page_screencast_session_ids_for_target(demoted_target_id)
+            .into_iter()
+            .map(|session_id| {
+                BackgroundProtocolEvent::page_screencast_visibility_changed(
+                    session_id.as_deref(),
+                    false,
+                )
+            })
+            .collect();
+        if let Err(error) = self
+            .apply_parked_target_surface_overrides_async(demoted_target_id)
+            .await
+        {
+            tracing::warn!(
+                target_id = demoted_target_id,
+                promoted_target_id = transition.promoted_target_id(),
+                %error,
+                "failed to update Page visibility after target activation"
+            );
+        }
+        CompletedTargetActivation::new(protocol_events)
+    }
+
+    /// Completes a foreground transition initiated for an already resident
+    /// Target. Unlike target creation, both sides may already have active
+    /// screencasts, so the promoted surface must also become visible.
+    async fn complete_target_activation_async(
+        &mut self,
+        transition: &TargetActivationTransition,
+    ) -> CompletedTargetActivation {
+        let mut protocol_events = self
+            .complete_staged_target_activation_async(transition)
+            .await
+            .into_protocol_events();
+        if transition.changed_active_target() {
+            protocol_events.extend(
+                self.page_screencast_session_ids_for_target(transition.promoted_target_id())
+                    .into_iter()
+                    .map(|session_id| {
+                        BackgroundProtocolEvent::page_screencast_visibility_changed(
+                            session_id.as_deref(),
+                            true,
+                        )
+                    }),
+            );
+        }
+        CompletedTargetActivation::new(protocol_events)
+    }
+
+    pub(crate) fn page_screencast_session_ids_for_target(
+        &mut self,
+        target_id: &str,
+    ) -> Vec<Option<String>> {
+        let Some(route) = self.target_session_route_for_target_id(target_id) else {
+            return Vec::new();
+        };
+        let mut route_scope = self.scoped_none_session_owner_route_override(route);
+        let conn = route_scope.conn_mut();
+        conn.page_event_session_ids_for_session_owner(None)
+            .into_iter()
+            .filter(|session_id| {
+                conn.target_page_session_state_for_session(session_id.as_deref())
+                    .is_some_and(|state| state.page_screencast.is_active())
+            })
+            .collect()
+    }
+
     pub(super) fn selected_target_engine_disposition(
         &self,
     ) -> BrowserSelectedTargetEngineDisposition {
@@ -255,13 +381,26 @@ impl CdpConnection {
     pub(crate) async fn promote_background_target_to_active_for_connection_async(
         &mut self,
         target_id: &str,
-    ) -> Result<bool, BrowserTargetPromotionError> {
-        match self.start_promote_background_target_to_active_for_connection(target_id)? {
+    ) -> Result<Option<CompletedTargetActivation>, BrowserTargetPromotionError> {
+        let previous_active_target_id = self
+            .browser_context
+            .as_ref()
+            .and_then(|browser_context| browser_context.active_target_id_owned());
+        let transition = TargetActivationTransition::new(target_id, previous_active_target_id);
+        let promoted = match self
+            .start_promote_background_target_to_active_for_connection(target_id)?
+        {
             BrowserTargetPromotionStart::Complete(promoted) => Ok(promoted),
             BrowserTargetPromotionStart::Pending(pending) => {
                 self.finish_promote_background_target_to_active_for_connection(pending.wait().await)
             }
+        }?;
+        if !promoted {
+            return Ok(None);
         }
+        Ok(Some(
+            self.complete_target_activation_async(&transition).await,
+        ))
     }
 
     pub(crate) fn start_promote_background_target_to_active_for_connection(
@@ -278,6 +417,7 @@ impl CdpConnection {
             return Ok(BrowserTargetPromotionStart::Complete(false));
         }
         let projected = self.activate_target_projection(target_id)?;
+        self.notify_target_host_activated(target_id);
         if projected.synchronize_loaded_page()
             && let Some(pending) = self.start_active_target_promotion_page_synchronization()?
         {
@@ -741,6 +881,7 @@ mod tests {
             conn.promote_background_target_to_active_for_connection_async("target-b")
                 .await
                 .expect("target B promotion should run")
+                .is_some()
         );
         assert_eq!(
             conn.browser_host_state
@@ -760,6 +901,7 @@ mod tests {
             conn.promote_background_target_to_active_for_connection_async("target-a")
                 .await
                 .expect("target A promotion should run")
+                .is_some()
         );
         assert_eq!(
             conn.browser_host_state
@@ -795,10 +937,10 @@ mod tests {
             .active_renderer_owner_id_for_diagnostics();
 
         assert!(
-            !conn
-                .promote_background_target_to_active_for_connection_async("missing-target")
+            conn.promote_background_target_to_active_for_connection_async("missing-target")
                 .await
                 .expect("unknown Target lookup should not fail")
+                .is_none()
         );
         assert_eq!(
             conn.browser_host_state

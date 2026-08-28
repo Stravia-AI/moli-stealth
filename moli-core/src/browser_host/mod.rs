@@ -92,14 +92,15 @@ pub use network_body::{
     ensure_materialize_limit as ensure_browser_network_body_materialize_limit,
 };
 pub use owner_input::{
-    BrowserCommandId, BrowserContextDisposalCommandInput, BrowserFrontendCommand,
-    BrowserHistoryTraversalCommandInput, BrowserNavigateCommandInput, BrowserOwnerInput,
-    BrowserOwnerInputKind, BrowserPageTerminationInput, BrowserPausedNavigationAuthDecision,
-    BrowserPausedNavigationContinueDecision, BrowserPausedNavigationDecision,
-    BrowserPausedNavigationDecisionInput, BrowserPausedNavigationFulfillDecision,
-    BrowserPausedNavigationResponseDecision, BrowserReloadCommandInput,
-    BrowserStopLoadingCommandInput, BrowserTargetTerminationInput, RendererBrowserIntent,
-    RendererTopLevelHistoryTraversalInput, RendererTopLevelLocationNavigationInput,
+    BrowserAuxiliaryTargetActivationInput, BrowserCommandId, BrowserContextDisposalCommandInput,
+    BrowserFrontendCommand, BrowserHistoryTraversalCommandInput, BrowserNavigateCommandInput,
+    BrowserOwnerInput, BrowserOwnerInputKind, BrowserPageTerminationInput,
+    BrowserPausedNavigationAuthDecision, BrowserPausedNavigationContinueDecision,
+    BrowserPausedNavigationDecision, BrowserPausedNavigationDecisionInput,
+    BrowserPausedNavigationFulfillDecision, BrowserPausedNavigationResponseDecision,
+    BrowserReloadCommandInput, BrowserStopLoadingCommandInput, BrowserTargetTerminationInput,
+    RendererBrowserIntent, RendererTopLevelHistoryTraversalInput,
+    RendererTopLevelLocationNavigationInput,
 };
 pub use page_payload::{
     BrowserPageRuntimeAccess, BrowserPageRuntimeLease, BrowserPageRuntimeOwner,

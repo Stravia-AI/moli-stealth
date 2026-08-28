@@ -516,6 +516,7 @@ async fn clear_browser_cache_keeps_pending_response_navigation_transfer() {
             request_load_policy: crate::conn::NavigationRequestLoadPolicy::DocumentInitiated,
             timestamp: 0.0,
             source_document_security: Default::default(),
+            post_commit_target_activation: None,
         },
         DocumentBodySource::BufferedRaw {
             requested_url: url.clone(),

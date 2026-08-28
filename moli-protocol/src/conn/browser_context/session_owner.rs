@@ -4,6 +4,13 @@ use crate::conn::{
 };
 use crate::devtools_runtime::DevToolsTargetInfo;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TargetHandlerAccessMode {
+    Browser,
+    Regular,
+    AutoAttachOnly,
+}
+
 impl CdpConnection {
     /// Projects only frontend-owned attachment state. Browser URL/title
     /// changes require an exact `BrowserFact::TargetMetadataChanged` and use
@@ -76,6 +83,45 @@ impl CdpSessionRoute {
             } => Some(browser_context_id),
         }
     }
+
+    /// Whether Chromium installs a handler for this CDP domain on the routed
+    /// DevToolsAgentHost. Browser and Tab hosts must not fall through to the
+    /// currently active Page merely because they share one connection.
+    pub(crate) fn supports_cdp_domain(&self, domain: &str) -> bool {
+        match self {
+            Self::Browser => matches!(
+                domain,
+                "Browser"
+                    | "Fetch"
+                    | "IO"
+                    | "Security"
+                    | "Storage"
+                    | "SystemInfo"
+                    | "Target"
+                    | "Tracing"
+            ),
+            Self::TabTarget { .. } => matches!(domain, "IO" | "Target" | "Tracing"),
+            Self::ActiveTarget { .. }
+            | Self::AuxiliaryTarget { .. }
+            | Self::BackgroundTarget { .. }
+            | Self::SharedWorkerTarget { .. }
+            | Self::DedicatedWorkerTarget { .. }
+            | Self::ServiceWorkerTarget { .. } => true,
+        }
+    }
+
+    pub(crate) fn target_handler_access_mode(&self) -> TargetHandlerAccessMode {
+        match self {
+            Self::Browser => TargetHandlerAccessMode::Browser,
+            Self::TabTarget { .. }
+            | Self::ActiveTarget { .. }
+            | Self::AuxiliaryTarget { .. }
+            | Self::BackgroundTarget { .. } => TargetHandlerAccessMode::Regular,
+            Self::SharedWorkerTarget { .. }
+            | Self::DedicatedWorkerTarget { .. }
+            | Self::ServiceWorkerTarget { .. } => TargetHandlerAccessMode::AutoAttachOnly,
+        }
+    }
 }
 
 pub(super) enum TargetSessionOwner {
@@ -92,6 +138,57 @@ pub(super) enum TargetSessionOwner {
 }
 
 impl CdpConnection {
+    pub(crate) fn target_handler_access_mode(
+        &self,
+        session_id: Option<&str>,
+    ) -> TargetHandlerAccessMode {
+        let Some(session_id) = session_id else {
+            return TargetHandlerAccessMode::Browser;
+        };
+        self.session_route(Some(session_id))
+            .map(|route| route.target_handler_access_mode())
+            .unwrap_or(TargetHandlerAccessMode::Regular)
+    }
+
+    pub(crate) fn target_handler_may_get_target_info(
+        &self,
+        session_id: Option<&str>,
+        target_id: Option<&str>,
+    ) -> bool {
+        if self.target_handler_access_mode(session_id) != TargetHandlerAccessMode::AutoAttachOnly {
+            return true;
+        }
+        let Some(session_id) = session_id else {
+            return false;
+        };
+        let owner_target_id = self.non_browser_target_id_for_session(Some(session_id));
+        let Some(target_id) = target_id.or(owner_target_id.as_deref()) else {
+            return false;
+        };
+        owner_target_id.as_deref() == Some(target_id)
+    }
+
+    pub(crate) fn target_handler_may_close_target(
+        &self,
+        session_id: Option<&str>,
+        target_id: &str,
+    ) -> bool {
+        if self.target_handler_access_mode(session_id) != TargetHandlerAccessMode::AutoAttachOnly {
+            return true;
+        }
+        let Some(session_id) = session_id else {
+            return false;
+        };
+        self.non_browser_target_id_for_session(Some(session_id))
+            .as_deref()
+            == Some(target_id)
+            || self
+                .target_control
+                .auto_attached_target_ids_for_owner(Some(session_id))
+                .iter()
+                .any(|attached_target_id| attached_target_id == target_id)
+    }
+
     pub(crate) fn session_route(&self, session_id: Option<&str>) -> Option<CdpSessionRoute> {
         let session_id = session_id?;
         if self.browser_session_ids.contains(session_id) {
@@ -162,6 +259,36 @@ impl CdpConnection {
             | CdpSessionRoute::DedicatedWorkerTarget { target_id, .. }
             | CdpSessionRoute::ServiceWorkerTarget { target_id, .. } => Some(target_id),
             _ => None,
+        }
+    }
+
+    /// Returns the DevToolsAgentHost owned by a non-browser session.
+    pub(crate) fn non_browser_target_id_for_session(
+        &self,
+        session_id: Option<&str>,
+    ) -> Option<String> {
+        match self.session_route(session_id)? {
+            CdpSessionRoute::TabTarget {
+                tab_target_id: target_id,
+                ..
+            }
+            | CdpSessionRoute::AuxiliaryTarget { target_id, .. }
+            | CdpSessionRoute::BackgroundTarget { target_id, .. }
+            | CdpSessionRoute::SharedWorkerTarget { target_id, .. }
+            | CdpSessionRoute::DedicatedWorkerTarget { target_id, .. }
+            | CdpSessionRoute::ServiceWorkerTarget { target_id, .. }
+            | CdpSessionRoute::ActiveTarget {
+                target_id: Some(target_id),
+                ..
+            } => Some(target_id),
+            CdpSessionRoute::ActiveTarget {
+                browser_context_id,
+                target_id: None,
+            } => self
+                .browser_context_by_id(&browser_context_id)
+                .and_then(BrowserContext::active_target_id)
+                .map(str::to_owned),
+            CdpSessionRoute::Browser => None,
         }
     }
 

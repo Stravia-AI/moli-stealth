@@ -118,7 +118,6 @@ impl CdpConnection {
             target_url.to_string(),
             page.document_title(),
         );
-
         let Some(permit) = self
             .browser_host_state
             .navigation_owner()

@@ -55,6 +55,7 @@ pub(crate) use browser_page_replacement::{
     LoadedPageReplacementOutcome, LoadedPageReplacementStart, PendingLoadedPageReplacement,
 };
 pub(crate) mod browser_target_engine_handoff;
+pub(crate) use browser_target_engine_handoff::TargetActivationTransition;
 mod browser_target_termination;
 mod command_owner_scope;
 mod command_view;
@@ -71,6 +72,7 @@ mod fetch_support;
 mod inspector_route;
 mod output;
 mod page_state;
+mod popup_activation_work;
 mod protocol_output;
 mod renderer_command_turn;
 mod resource_runtime_support;
@@ -96,6 +98,7 @@ pub(crate) use bidi_channel_work::{
     BidiChannelPageOwner,
 };
 pub(crate) use body_spool::{CapturedBody, CapturedBodyWriter};
+pub(crate) use browser_context::{CdpSessionRoute, TargetHandlerAccessMode};
 pub(crate) use browser_context::{
     ClosedPageTarget, PageLifecycleEventsEnableResult, ProjectedActiveTargetClose,
     ProjectedClosedPageTarget, SessionOwnerInspectorEnableResult,
@@ -162,7 +165,7 @@ pub use moli_protocol_cdp::{
     CdpRendererCommandAccess, CdpRendererCommandPolicy, CdpRendererCommandReplacement,
     CdpRendererCommandReplayDispatch, CdpRequest, ParsedCdpCommand,
 };
-pub(crate) use target::{CdpSessionRoute, TargetActivationTransition, TargetHandlerAccessMode};
+pub(crate) use popup_activation_work::PopupTargetActivationAction;
 
 #[derive(Clone, Debug)]
 pub enum CdpTargetHostLifecycleDelta {
@@ -688,7 +691,8 @@ pub(crate) use state::{
 };
 pub(crate) use target::{
     PreparedTargetAttach, PreparedTargetHostClosure, PreparedTargetHostDelta,
-    TargetAttachSessionCommit, TargetBindingCleanupAction, TargetClosureCleanupPlan,
+    TargetAttachRollbackPlan, TargetAttachSessionCommit, TargetAutoAttachedSessionDetachPlan,
+    TargetBindingCleanupAction, TargetBindingCleanupPlan, TargetClosureCleanupPlan,
     TargetSessionDetachCleanupPlan,
 };
 use target::{
@@ -3021,14 +3025,18 @@ impl CdpConnection {
         DEFAULT_CDP_TAB_TARGET_ID
     }
 
+    pub(crate) fn derived_tab_target_id(page_target_id: &str) -> String {
+        format!("TAB-{page_target_id}")
+    }
+
     pub(crate) fn register_top_level_page_target(&mut self, page_target_id: &str) -> String {
         let tab_target_id = if page_target_id == self.default_target_id() {
             self.default_tab_target_id().to_owned()
         } else {
-            self.gen_tab_target_id()
+            Self::derived_tab_target_id(page_target_id)
         };
         self.target_control
-            .register_tab(tab_target_id.clone(), page_target_id.to_owned());
+            .register_top_level_page(page_target_id.to_owned(), tab_target_id.clone());
         for target_id in [&tab_target_id, page_target_id] {
             if let Some(target_info) = self.target_info_for_host_delta(target_id) {
                 self.notify_target_host_lifecycle(CdpTargetHostLifecycleDelta::Created(
@@ -3052,18 +3060,21 @@ impl CdpConnection {
         self.target_control.remove_worker(target_id)
     }
 
-    #[doc(hidden)]
-    pub fn tab_target_id_for_page_target_id(&self, page_target_id: &str) -> Option<&str> {
+    pub(crate) fn tab_target_id_for_page_target_id(&self, page_target_id: &str) -> Option<&str> {
         self.target_control
             .tab_target_id_for_page_target_id(page_target_id)
+    }
+
+    pub(crate) fn page_target_id_for_tab_target_id(&self, tab_target_id: &str) -> Option<&str> {
+        self.target_control
+            .page_target_id_for_tab_target_id(tab_target_id)
     }
 
     pub(crate) fn primary_page_target_id_for_tab_target_id(
         &self,
         tab_target_id: &str,
     ) -> Option<&str> {
-        self.target_control
-            .primary_page_target_id_for_tab_target_id(tab_target_id)
+        self.page_target_id_for_tab_target_id(tab_target_id)
     }
 
     pub(crate) fn primary_session_id_for_tab_target_id(&self, tab_target_id: &str) -> Option<&str> {
@@ -3085,13 +3096,13 @@ impl CdpConnection {
         self.target_control.remove_tab_session(session_id)
     }
 
-    pub(crate) fn remove_tab_for_page_target(
+    pub(crate) fn remove_top_level_page_target_by_page_target_id(
         &mut self,
         page_target_id: &str,
     ) -> Option<TargetClosurePlan> {
         let closure_plan = self
             .target_control
-            .remove_tab_by_page_target_id(page_target_id)?;
+            .remove_top_level_page_by_page_target_id(page_target_id)?;
         for target_id in closure_plan.destroyed_target_ids() {
             self.notify_target_host_lifecycle(CdpTargetHostLifecycleDelta::Destroyed {
                 target_id: target_id.to_owned(),
@@ -3105,7 +3116,9 @@ impl CdpConnection {
         page_target_id: &str,
         reason: Option<&str>,
     ) -> TargetEventPlan {
-        let Some(closure_plan) = self.remove_tab_for_page_target(page_target_id) else {
+        let Some(closure_plan) =
+            self.remove_top_level_page_target_by_page_target_id(page_target_id)
+        else {
             return TargetEventPlan::default();
         };
         debug_assert!(
@@ -3113,9 +3126,9 @@ impl CdpConnection {
                 .destroyed_target_ids()
                 .any(|target_id| target_id == page_target_id)
         );
-        let target = closure_plan.tab_target();
-        let tab_target_id = target.id().to_owned();
-        let tab_session_ids = target.session_ids();
+        let target = closure_plan.top_level_target();
+        let tab_target_id = target.tab_target_id().to_owned();
+        let tab_session_ids = target.tab_session_ids();
         self.detach_target_closure_cleanup_event_plan(
             TargetClosureCleanupPlan::new(tab_target_id, reason, tab_session_ids),
             None,
@@ -3126,10 +3139,12 @@ impl CdpConnection {
         &mut self,
         page_target_id: &str,
     ) {
-        let Some(closure_plan) = self.remove_tab_for_page_target(page_target_id) else {
+        let Some(closure_plan) =
+            self.remove_top_level_page_target_by_page_target_id(page_target_id)
+        else {
             return;
         };
-        for session_id in closure_plan.tab_target().session_ids() {
+        for session_id in closure_plan.top_level_target().tab_session_ids() {
             self.clear_auto_attach_owner(Some(&session_id));
             self.rollback_attached_session_without_event(&session_id);
         }
@@ -3170,6 +3185,11 @@ impl CdpConnection {
             .browser_contexts()
             .find_map(|browser_context| browser_context.devtools_target_info(page_target_id))?;
         self.tab_target_info_for_page_target_info(&page_target_info)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tab_target_count(&self) -> usize {
+        self.target_control.len()
     }
 
     pub(crate) fn set_target_discovery_for_owner(
@@ -3271,17 +3291,8 @@ impl CdpConnection {
     }
 
     fn target_created_event_plan_for_target_delta(&mut self, target_id: &str) -> TargetEventPlan {
-        let deltas = self.target_deltas_for_target_id(target_id, TargetHostDelta::created);
+        let deltas = self.target_control.target_created_deltas(target_id);
         self.target_host_delta_events(deltas)
-    }
-
-    fn target_deltas_for_target_id(
-        &self,
-        target_id: &str,
-        build_delta: fn(String) -> TargetHostDelta,
-    ) -> Vec<TargetHostDelta> {
-        self.target_control
-            .target_deltas_for_target_id(target_id, build_delta)
     }
 
     fn target_host_delta_events(
@@ -3453,21 +3464,19 @@ impl CdpConnection {
         &self,
         target_info: DevToolsTargetInfo,
     ) -> Vec<BackgroundProtocolEvent> {
-        target_destroyed_automation_events(
-            self.project_page_tab_target_infos_for_destruction(target_info),
-        )
+        target_destroyed_automation_events(self.project_tab_page_target_infos(target_info))
     }
 
-    fn project_page_tab_target_infos_for_destruction(
+    fn project_tab_page_target_infos(
         &self,
         target_info: DevToolsTargetInfo,
     ) -> Vec<DevToolsTargetInfo> {
         self.target_control
-            .project_page_tab_target_infos_for_destruction(target_info)
+            .project_tab_page_target_infos(target_info)
     }
 
     #[cfg(test)]
-    pub(crate) fn tab_target_count(&self) -> usize {
+    pub(crate) fn top_level_target_graph_len(&self) -> usize {
         self.target_control.len()
     }
 
@@ -3537,29 +3546,6 @@ impl CdpConnection {
                         || context.has_service_worker_target(&target_id)
                 });
             if !target_id_is_live {
-                return target_id;
-            }
-        }
-    }
-
-    fn gen_tab_target_id(&mut self) -> String {
-        loop {
-            let id = if let Some(allocator) = self.shared_tab_target_id_allocator.as_ref() {
-                allocator
-                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                        current.checked_add(1)
-                    })
-                    .expect("shared tab target id space exhausted")
-                    + 1
-            } else {
-                self.next_tab_target_id = self
-                    .next_tab_target_id
-                    .checked_add(1)
-                    .expect("tab target id space exhausted");
-                u64::from(self.next_tab_target_id)
-            };
-            let target_id = format!("TAB-{id}");
-            if self.target_control.host_kind(&target_id).is_none() {
                 return target_id;
             }
         }

@@ -2572,6 +2572,7 @@ async fn page_navigate_network_failure_commits_error_document() {
                 "http://127.0.0.1".to_owned(),
                 "InsecureScheme".to_owned(),
             ),
+            post_commit_target_activation: None,
         },
         None,
         Ok(crate::conn::CapturedBody::from_string(

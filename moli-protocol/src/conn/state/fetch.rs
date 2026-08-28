@@ -2411,6 +2411,7 @@ mod tests {
                 request_load_policy: crate::conn::NavigationRequestLoadPolicy::DocumentInitiated,
                 timestamp: 0.0,
                 source_document_security: Default::default(),
+                post_commit_target_activation: None,
             },
             request_cookie_report: None,
             auth_response: PendingFetchAuthNavigation::test_auth_response(test_url("auth-page")),

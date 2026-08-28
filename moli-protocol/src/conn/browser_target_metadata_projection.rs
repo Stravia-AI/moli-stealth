@@ -66,23 +66,22 @@ impl CdpConnection {
         target_info.url = projection.transition().url().to_owned();
         target_info.title = projection.transition().title().to_owned();
 
+        let tab_target_info = self.tab_target_info_for_page_target_info(&target_info);
         self.notify_target_host_lifecycle(CdpTargetHostLifecycleDelta::InfoChanged(
             target_info.clone(),
         ));
+        if let Some(tab_target_info) = tab_target_info {
+            self.notify_target_host_lifecycle(CdpTargetHostLifecycleDelta::InfoChanged(
+                tab_target_info,
+            ));
+        }
         if !self.has_any_target_info_observer() {
             return TargetEventPlan::default();
         }
-        let prepared = self
-            .project_tab_page_target_infos(target_info)
-            .into_iter()
-            .filter_map(|target_info| {
-                let target_id = target_info.target_id.as_ref()?.as_str().to_owned();
-                Some(PreparedTargetHostDelta::info_changed(
-                    target_id,
-                    Some(target_info),
-                ))
-            });
-        self.prepared_target_host_deltas_event_plan(prepared)
+        self.prepared_target_host_delta_event_plan(PreparedTargetHostDelta::info_changed(
+            target_id.to_owned(),
+            Some(target_info),
+        ))
     }
 }
 
@@ -136,15 +135,21 @@ mod tests {
             .as_mut()
             .expect("default BrowserContext")
             .set_target_url("https://example.test/drift".to_owned());
+        let expected_page_target_id = conn.default_target_id().to_owned();
+        let expected_tab_target_id = conn.default_tab_target_id().to_owned();
 
         let observed_metadata = Arc::new(Mutex::new(Vec::new()));
         let callback_metadata = Arc::clone(&observed_metadata);
         conn.set_target_host_lifecycle_observer(CdpTargetHostLifecycleObserver::new(
             move |delta| {
                 if let CdpTargetHostLifecycleDelta::InfoChanged(target_info) = delta {
-                    callback_metadata
-                        .lock()
-                        .push((target_info.url, target_info.title));
+                    callback_metadata.lock().push((
+                        target_info
+                            .target_id
+                            .map(|target_id| target_id.as_str().to_owned()),
+                        target_info.url,
+                        target_info.title,
+                    ));
                 }
             },
         ));
@@ -153,7 +158,18 @@ mod tests {
         assert!(plan.into_iter().next().is_none());
         assert_eq!(
             *observed_metadata.lock(),
-            vec![(expected_url.to_owned(), expected_title.to_owned())],
+            vec![
+                (
+                    Some(expected_page_target_id),
+                    expected_url.to_owned(),
+                    expected_title.to_owned(),
+                ),
+                (
+                    Some(expected_tab_target_id),
+                    expected_url.to_owned(),
+                    expected_title.to_owned(),
+                ),
+            ],
             "frontend projection must use immutable Browser fact values, not later physical drift",
         );
     }

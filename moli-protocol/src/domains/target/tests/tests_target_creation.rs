@@ -1482,6 +1482,21 @@ async fn resetting_opener_target_clears_live_opener_but_keeps_frame_attribution(
         json!("TID-opener-reset")
     );
 
+    ctx.wait_until_scheduler_state("foreground popup activation before opener reset", |conn| {
+        conn.browser_context_by_id("BID-popup-reset")
+            .is_some_and(|browser_context| {
+                browser_context.active_target_id() == Some(popup_target_id.as_str())
+            })
+    })
+    .await;
+    assert!(
+        ctx.conn
+            .promote_background_target_to_active_for_connection_async("TID-opener-reset")
+            .await
+            .expect("opener reactivation should succeed")
+            .is_some()
+    );
+
     ctx.conn
         .browser_context
         .as_mut()
@@ -1930,6 +1945,19 @@ async fn window_open_named_target_reused_in_same_command_emits_one_page_event() 
     }))
     .await;
 
+    let popup_target_id = ctx
+        .sent
+        .iter()
+        .find(|message| message["method"] == json!("Target.targetCreated"))
+        .and_then(|message| message["params"]["targetInfo"]["targetId"].as_str())
+        .expect("same-command named popup target id")
+        .to_owned();
+    ctx.wait_until_scheduler_state("same-command named popup successor navigation", |conn| {
+        conn.browser_context_by_id("BID-popup-name-same-command")
+            .and_then(|browser_context| loaded_page_for_target(browser_context, &popup_target_id))
+            .is_some_and(|page| page.final_url().as_str() == "https://example.com/second-popup")
+    })
+    .await;
     let sent = ctx.take_all();
     let window_open_events = sent
         .iter()
@@ -1954,8 +1982,11 @@ async fn window_open_named_target_reused_in_same_command_emits_one_page_event() 
     let browser_context = ctx.conn.browser_context.as_ref().unwrap();
     assert_eq!(browser_context.background_targets.len(), 1);
     assert_eq!(
-        browser_context.background_targets[0].target_url(),
-        "https://example.com/second-popup"
+        loaded_page_for_target(browser_context, &popup_target_id)
+            .expect("named popup should keep its successor Document")
+            .final_url()
+            .as_str(),
+        "https://example.com/second-popup",
     );
 }
 
@@ -2024,6 +2055,18 @@ async fn named_popup_reuse_with_catchall_discovery_only_changes_the_page_target_
     }))
     .await;
 
+    crate::testing::wait_until_scheduler_message(
+        &mut ctx,
+        "named popup successor metadata",
+        |message| {
+            message["method"] == json!("Target.targetInfoChanged")
+                && message["params"]["targetInfo"]["targetId"] == json!(page_target_id)
+                && message["params"]["targetInfo"]["url"]
+                    == json!("https://example.com/second-popup")
+        },
+    )
+    .await;
+
     let second_sent = ctx.take_all();
     let response_position = second_sent
         .iter()
@@ -2041,20 +2084,22 @@ async fn named_popup_reuse_with_catchall_discovery_only_changes_the_page_target_
         response_position < first_second_url_change_position,
         "Chromium returns window.open before the named Target's successor Document commits: {second_sent:?}",
     );
-    let second_url_changes = second_sent
-        .iter()
-        .filter(|message| {
+    assert!(
+        second_sent.iter().all(|message| {
+            message["method"] != json!("Target.targetInfoChanged")
+                || message["params"]["targetInfo"]["targetId"] != json!(tab_target_id)
+        }),
+        "document navigation must not mirror Page targetInfoChanged onto the stable Tab host: {second_sent:?}"
+    );
+    assert!(
+        second_sent.iter().any(|message| {
             message["method"] == json!("Target.targetInfoChanged")
+                && message["params"]["targetInfo"]["targetId"] == json!(page_target_id)
+                && message["params"]["targetInfo"]["type"] == json!("page")
                 && message["params"]["targetInfo"]["url"]
                     == json!("https://example.com/second-popup")
-                && (message["params"]["targetInfo"]["targetId"] == json!(tab_target_id)
-                    || message["params"]["targetInfo"]["targetId"] == json!(page_target_id))
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        second_url_changes.len(),
-        2,
-        "one committed Document metadata occurrence should fan out to tab/page: {second_sent:?}",
+        }),
+        "catch-all discovery should report page targetInfoChanged: {second_sent:?}"
     );
     let second_url_facts = ctx
         .conn
@@ -2083,7 +2128,13 @@ async fn named_popup_reuse_with_catchall_discovery_only_changes_the_page_target_
         metadata_transition.url(),
         "https://example.com/second-popup"
     );
-    assert_eq!(metadata_transition.navigation().target_id(), page_target_id);
+    assert_eq!(
+        metadata_transition
+            .navigation()
+            .expect("navigation metadata transition")
+            .target_id(),
+        page_target_id
+    );
     assert!(
         second_sent.iter().all(|message| {
             message["method"] != json!("Target.targetInfoChanged")
@@ -2199,6 +2250,13 @@ async fn anchor_left_click_promotes_blank_target_to_foreground() {
 
             let sent = ctx.take_all();
             let popup_target_id = popup_target_id_for_url(&sent, POPUP_URL);
+            ctx.wait_until_scheduler_state("foreground anchor popup activation", |conn| {
+                conn.browser_context_by_id("BID-anchor-foreground")
+                    .is_some_and(|browser_context| {
+                        browser_context.active_target_id() == Some(popup_target_id.as_str())
+                    })
+            })
+            .await;
             let browser_context = ctx
                 .conn
                 .browser_context_by_id("BID-anchor-foreground")
@@ -3201,7 +3259,7 @@ async fn incomplete_popup_rollback_clears_tab_page_sessions_and_target_graph() {
     assert!(ctx.conn.session_route(Some("SID-popup-page-aux")).is_some());
     assert_eq!(ctx.conn.tab_target_count(), 1);
 
-    popup::rollback_incomplete_popup_target_async(
+    lifecycle::rollback_incomplete_popup_target_async(
         &mut ctx.conn,
         Some("BID-popup-rollback"),
         page_target_id,
@@ -3243,7 +3301,7 @@ async fn incomplete_popup_rollback_rejects_active_target() {
     let page_target_id = "TID-active-popup-rollback";
     load_bc_with_target(&mut ctx, "BID-active-popup-rollback", page_target_id);
 
-    popup::rollback_incomplete_popup_target_async(
+    lifecycle::rollback_incomplete_popup_target_async(
         &mut ctx.conn,
         Some("BID-active-popup-rollback"),
         page_target_id,

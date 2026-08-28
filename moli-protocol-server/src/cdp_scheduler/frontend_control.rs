@@ -1,4 +1,7 @@
-use tokio::sync::mpsc;
+use std::collections::HashMap;
+
+use anyhow::Result;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::{cdp_frontend::CdpFrontendControlRequest, cdp_frontend_router::CdpFrontendRouter};
 
@@ -15,6 +18,7 @@ pub(crate) struct CdpOwnerActorLifecycle {
 pub(super) struct CdpFrontendControlState {
     next_frontend_id: u64,
     target_control: CdpFrontendTargetControl,
+    pending_target_close_completions: HashMap<String, Vec<oneshot::Sender<Result<()>>>>,
 }
 
 impl CdpFrontendControlState {
@@ -142,6 +146,12 @@ impl CdpFrontendControlState {
             }
             CdpFrontendControlRequest::TargetDestroyed { target_id } => {
                 frontend_router.unregister_frontends_for_target(&target_id);
+                if let Some(completions) = self.pending_target_close_completions.remove(&target_id)
+                {
+                    for completion in completions {
+                        let _ = completion.send(Ok(()));
+                    }
+                }
                 true
             }
             CdpFrontendControlRequest::ActivateTarget {
@@ -163,7 +173,16 @@ impl CdpFrontendControlState {
                     .target_control
                     .close_target(scheduler, frontend_router, &target_id)
                     .await;
-                let _ = completion_tx.send(result);
+                match result {
+                    Ok(()) => self
+                        .pending_target_close_completions
+                        .entry(target_id)
+                        .or_default()
+                        .push(completion_tx),
+                    Err(error) => {
+                        let _ = completion_tx.send(Err(error));
+                    }
+                }
                 send_profile_flush_request(owner_lifecycle);
                 true
             }
