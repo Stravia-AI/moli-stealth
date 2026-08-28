@@ -4432,6 +4432,26 @@ fn data_transfer_types_is_a_cached_frozen_array_per_item_list_mutation() {
 }
 
 #[test]
+fn data_transfer_types_lazily_publishes_first_snapshot_after_mutation() {
+    let mut vm = new_storage_test_vm("https://data-transfer-types-lazy-cache.test/");
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const transfer = new DataTransfer();
+  transfer.setData('text/plain', 'alpha');
+  const first = transfer.types;
+  return [first.join(','), Object.isFrozen(first), first === transfer.types].join('|');
+})()
+"#,
+        )
+        .expect("DataTransfer types should publish its first snapshot lazily");
+
+    assert_eq!(result, "text/plain|true|true");
+}
+
+#[test]
 fn data_transfer_types_snapshot_tracks_file_and_failed_item_mutations() {
     let mut vm = new_storage_test_vm("https://data-transfer-file-types-cache.test/");
 

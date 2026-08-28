@@ -16,7 +16,6 @@ const DATA_TRANSFER_FILES_SLOT: &str = "__lmDataTransferFiles";
 const DATA_TRANSFER_BRAND_SLOT: &str = "__lmDataTransferBrand";
 const DATA_TRANSFER_ITEMS_SLOT: &str = "__lmDataTransferItems";
 const DATA_TRANSFER_TYPES_SLOT: &str = "__lmDataTransferTypes";
-const DATA_TRANSFER_TYPES_DIRTY_SLOT: &str = "__lmDataTransferTypesDirty";
 const DATA_TRANSFER_DROP_EFFECT_SLOT: &str = "__lmDataTransferDropEffect";
 const DATA_TRANSFER_EFFECT_ALLOWED_SLOT: &str = "__lmDataTransferEffectAllowed";
 const DATA_TRANSFER_ITEM_LIST_ARRAY_SLOT: &str = "__lmDataTransferItemArray";
@@ -53,12 +52,10 @@ struct DataTransferObjectDeclaration<'s> {
     files: v8::Local<'s, v8::Object>,
     #[webapi(slot = DATA_TRANSFER_ITEMS_SLOT)]
     items: v8::Local<'s, v8::Object>,
-    // Web IDL exposes `types` as a CachedAttribute FrozenArray. The slot retains the last
-    // published snapshot while this flag defers rebuilding it until the next getter call.
-    #[webapi(slot = DATA_TRANSFER_TYPES_SLOT, constructor_default = Vec::new())]
-    types: Vec<v8::Local<'s, v8::Value>>,
-    #[webapi(slot = DATA_TRANSFER_TYPES_DIRTY_SLOT, constructor_default = true)]
-    types_dirty: bool,
+    // `undefined` means that no FrozenArray snapshot has been published for the current
+    // item-list generation. The getter replaces it with the cached snapshot on first read.
+    #[webapi(slot = DATA_TRANSFER_TYPES_SLOT, init = "undefined")]
+    types: (),
     #[webapi(slot = DATA_TRANSFER_DROP_EFFECT_SLOT, constructor_default = "none")]
     drop_effect: &'static str,
     #[webapi(slot = DATA_TRANSFER_EFFECT_ALLOWED_SLOT, constructor_default = "none")]
@@ -80,7 +77,7 @@ struct DataTransferShellDeclaration {
     files: (),
     #[webapi(slot = DATA_TRANSFER_ITEMS_SLOT, init = "null")]
     items: (),
-    #[webapi(slot = DATA_TRANSFER_TYPES_SLOT, init = "array")]
+    #[webapi(slot = DATA_TRANSFER_TYPES_SLOT, init = "undefined")]
     types: (),
     #[webapi(slot = DATA_TRANSFER_DROP_EFFECT_SLOT, init = string("none"))]
     drop_effect: (),
@@ -425,16 +422,6 @@ fn set_private_number<'s>(
     value: f64,
 ) {
     let value = v8::Number::new(scope, value);
-    set_private_value(scope, object, slot, value.into());
-}
-
-fn set_private_bool<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    object: v8::Local<'s, v8::Object>,
-    slot: &'static str,
-    value: bool,
-) {
-    let value = v8::Boolean::new(scope, value);
     set_private_value(scope, object, slot, value.into());
 }
 
@@ -989,7 +976,12 @@ fn data_transfer_item_list_did_change<'s>(
     };
     // Invalidate the cached FrozenArray before refreshing live views so a re-entrant getter
     // cannot observe the previous item-list generation.
-    set_private_bool(scope, owner, DATA_TRANSFER_TYPES_DIRTY_SLOT, true);
+    set_private_value(
+        scope,
+        owner,
+        DATA_TRANSFER_TYPES_SLOT,
+        v8::undefined(scope).into(),
+    );
     let Some(item_array) = item_list_array(scope, item_list) else {
         return;
     };
@@ -1037,17 +1029,20 @@ fn ensure_data_transfer_types_snapshot<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     owner: v8::Local<'s, v8::Object>,
 ) -> Option<v8::Local<'s, v8::Value>> {
-    if private_bool_property(scope, owner, DATA_TRANSFER_TYPES_DIRTY_SLOT).unwrap_or(false) {
-        let item_list = get_private_object(scope, owner, DATA_TRANSFER_ITEMS_SLOT)?;
-        let item_array = item_list_array(scope, item_list)?;
-        let types = data_transfer_types_from_items(&item_summaries_from_array(scope, item_array));
-        let types_array = crate::util::serialize_v8_array(scope, types.as_slice())
-            .unwrap_or_else(|| v8::Array::new(scope, 0));
-        let _ = types_array.set_integrity_level(scope, v8::IntegrityLevel::Frozen);
-        set_private_value(scope, owner, DATA_TRANSFER_TYPES_SLOT, types_array.into());
-        set_private_bool(scope, owner, DATA_TRANSFER_TYPES_DIRTY_SLOT, false);
+    if let Some(snapshot) =
+        get_private_value(scope, owner, DATA_TRANSFER_TYPES_SLOT).filter(|value| value.is_array())
+    {
+        return Some(snapshot);
     }
-    get_private_value(scope, owner, DATA_TRANSFER_TYPES_SLOT)
+
+    let item_list = get_private_object(scope, owner, DATA_TRANSFER_ITEMS_SLOT)?;
+    let item_array = item_list_array(scope, item_list)?;
+    let types = data_transfer_types_from_items(&item_summaries_from_array(scope, item_array));
+    let types_array = crate::util::serialize_v8_array(scope, types.as_slice())
+        .unwrap_or_else(|| v8::Array::new(scope, 0));
+    let _ = types_array.set_integrity_level(scope, v8::IntegrityLevel::Frozen);
+    set_private_value(scope, owner, DATA_TRANSFER_TYPES_SLOT, types_array.into());
+    Some(types_array.into())
 }
 
 fn data_transfer_files_getter<'s>(
