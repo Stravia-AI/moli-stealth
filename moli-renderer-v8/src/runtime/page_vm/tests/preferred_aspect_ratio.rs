@@ -89,3 +89,58 @@ document.body.innerHTML = `
     .await
     .expect("preferred aspect-ratio fixture should run");
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn screenshot_caps_transferred_ratio_minimums_with_authored_maximums() {
+    run_page_vm_async_test(async move {
+        let loader =
+            crate::network::ResourceRequestClient::new(&FetchConfig::default()).expect("loader");
+        let mut page_vm = test_page_vm_with_loader_and_document_url(
+            &loader,
+            Vec::new(),
+            Url::parse("https://example.com/aspect-ratio-constraint-transfer.html")?,
+        );
+        page_vm.vm_mut().eval(
+            r#"
+document.head.innerHTML = `<style>
+html,body{margin:0}
+.host{width:400px;height:240px}
+#flex{display:flex;align-items:flex-start}
+#grid{display:grid;align-items:start;justify-items:start}
+.target{
+  width:50px;
+  height:auto;
+  min-width:100px;
+  max-height:100px;
+  aspect-ratio:1/2;
+}
+</style>`;
+document.body.innerHTML = `
+  <div id=block class=host><div class=target></div></div>
+  <div id=flex class=host><div class=target></div></div>
+  <div id=grid class=host><div class=target></div></div>`;
+'installed'
+"#,
+        )?;
+        page_vm.vm_mut().sync_live_document_style_sources();
+        page_vm
+            .vm_mut()
+            .screenshot_layout_snapshot(moli_layout::PaintViewport::new(480, 800, 1.0))?
+            .expect("aspect-ratio constraint transfer fixture must retain a layout root");
+
+        let geometry = page_vm.vm_mut().eval(
+            r#"JSON.stringify(Object.fromEntries(['block','flex','grid'].map(id=>{const r=document.querySelector(`#${id} .target`).getBoundingClientRect();return [id,[r.width,r.height]]})))"#,
+        )?;
+        let geometry: serde_json::Value = serde_json::from_str(&geometry)?;
+        for id in ["block", "flex", "grid"] {
+            assert_eq!(
+                geometry[id],
+                serde_json::json!([100, 100]),
+                "the authored max-height must cap the min-height transferred from min-width in {id} layout: {geometry}",
+            );
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("aspect-ratio constraint transfer fixture should run");
+}
