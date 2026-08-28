@@ -1153,6 +1153,16 @@ impl BrowserContext {
     }
 
     #[cfg(test)]
+    pub(crate) fn target_owner_state(&self, target_id: &str) -> Option<&ParkedTargetOwnerState> {
+        if self.is_active_target(target_id) {
+            Some(&self.active_target.owner_state)
+        } else {
+            self.background_target(target_id)?;
+            self.parked_target_owner_state(target_id)
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn parked_target_owner_state_or_default(
         &self,
         target_id: &str,

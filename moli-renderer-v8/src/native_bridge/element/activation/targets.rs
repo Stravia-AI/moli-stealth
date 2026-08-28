@@ -1,6 +1,6 @@
 use crate::{
-    RendererPendingPopupActivation, RendererPendingWindowOpenEvent,
-    RendererPopupDisposition, RendererPopupNewTargetDisposition, RendererTopLevelNavigationRequest,
+    RendererPendingPopupActivation, RendererPendingWindowOpenEvent, RendererPopupDisposition,
+    RendererPopupNewTargetDisposition, RendererTopLevelNavigationRequest,
     context_bootstrap::{
         dispatch_cross_document_navigation_navigate_event_for_window,
         dispatch_cross_document_navigation_navigate_event_for_window_with_form_data,

@@ -584,6 +584,7 @@ fn admit_popup_activation(
 ) {
     let (
         _source,
+        _disposition,
         _popup_id,
         _requested_url,
         destination_request,

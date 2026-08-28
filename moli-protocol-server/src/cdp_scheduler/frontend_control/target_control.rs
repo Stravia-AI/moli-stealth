@@ -31,12 +31,8 @@ impl CdpFrontendTargetControl {
         target_id: &str,
     ) -> Result<String> {
         if target_id == scheduler.conn.default_tab_target_id() {
-            self.ensure_default_target_is_materialized(
-                scheduler,
-                frontend_router,
-                renderer_fence,
-            )
-            .await?;
+            self.ensure_default_target_is_materialized(scheduler, frontend_router, renderer_fence)
+                .await?;
         }
         self.attach_target_session(scheduler, frontend_router, renderer_fence, target_id)
             .await

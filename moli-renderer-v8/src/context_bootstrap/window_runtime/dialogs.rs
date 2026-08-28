@@ -1,8 +1,7 @@
 use super::super::navigation_cancellation::inform_about_canceled_navigation_for_window;
 use crate::{
     native_bridge::{
-        InputNavigationPolicy,
-        WindowExecutionContextBinding, WindowOperationReceiver,
+        InputNavigationPolicy, WindowExecutionContextBinding, WindowOperationReceiver,
         WindowOperationReceiverCaptureError,
         element::{
             SpecialBrowsingContextTarget,

@@ -4788,6 +4788,7 @@ mod producer_tests {
                             None,
                             requested_url.to_owned(),
                             "creationOnlyFormTarget".to_owned(),
+                            moli_core::page::RendererPopupDisposition::Background,
                         )
                         .without_destination_navigation(),
                     ],
@@ -4877,6 +4878,7 @@ mod producer_tests {
                         None,
                         popup_url.to_owned(),
                         "_blank".to_owned(),
+                        moli_core::page::RendererPopupDisposition::Background,
                     )],
                 ),
             ));

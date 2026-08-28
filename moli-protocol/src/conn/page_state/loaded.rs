@@ -28,6 +28,52 @@ impl BrowserContext {
         self.active_target.runtime_slot.loaded_page()
     }
 
+    /// Resolves a loaded Page by logical target identity, independent of
+    /// whether foreground activation currently stores it in the active or a
+    /// background slot.
+    #[cfg(test)]
+    pub(crate) fn loaded_page_for_target(&self, target_id: &str) -> Option<&Page> {
+        if self.is_active_target(target_id) {
+            self.loaded_page()
+        } else {
+            self.background_target(target_id)
+                .and_then(BackgroundTarget::loaded_page)
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn loaded_page_for_target_mut(&mut self, target_id: &str) -> Option<&mut Page> {
+        if self.is_active_target(target_id) {
+            self.active_target.runtime_slot.loaded_page_mut()
+        } else {
+            self.background_target_mut(target_id)
+                .and_then(BackgroundTarget::loaded_page_mut)
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn target_url_for_target(&self, target_id: &str) -> Option<&str> {
+        if self.is_active_target(target_id) {
+            Some(self.target_url())
+        } else {
+            self.background_target(target_id)
+                .map(BackgroundTarget::target_url)
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn auxiliary_browsing_context_id_for_target(&self, target_id: &str) -> Option<u64> {
+        if self.is_active_target(target_id) {
+            self.active_target
+                .runtime_slot
+                .page_slot()
+                .auxiliary_browsing_context_id()
+        } else {
+            self.background_target(target_id)
+                .and_then(BackgroundTarget::auxiliary_browsing_context_id)
+        }
+    }
+
     pub(crate) fn has_loaded_page(&self) -> bool {
         self.active_target.runtime_slot.has_loaded_page()
     }

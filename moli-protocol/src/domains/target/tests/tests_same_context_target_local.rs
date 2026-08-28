@@ -262,7 +262,7 @@ async fn popup_initial_about_blank_adopts_renderer_page_and_related_script_agent
         .conn
         .browser_context
         .as_mut()
-        .and_then(|browser_context| browser_context.active_target.runtime_slot.loaded_page_mut())
+        .and_then(|browser_context| browser_context.loaded_page_for_target_mut("TID-popup-opener"))
         .expect("opener should remain loaded")
         .runtime_heap_usage_async()
         .await
@@ -271,17 +271,21 @@ async fn popup_initial_about_blank_adopts_renderer_page_and_related_script_agent
         .runtime
         .script_agent_id;
     let (popup_renderer_page_id, popup_browsing_context_id, popup_script_agent_id) = {
-        let popup = ctx
+        let popup_browsing_context_id = ctx
+            .conn
+            .browser_context
+            .as_ref()
+            .and_then(|browser_context| {
+                browser_context.auxiliary_browsing_context_id_for_target(&popup_target_id)
+            })
+            .expect("popup target should retain its renderer browsing-context identity");
+        let popup_page = ctx
             .conn
             .browser_context
             .as_mut()
-            .and_then(|browser_context| browser_context.background_target_mut(&popup_target_id))
-            .expect("popup target should remain staged");
-        let popup_browsing_context_id = popup
-            .auxiliary_browsing_context_id()
-            .expect("popup target should retain its renderer browsing-context identity");
-        let popup_page = popup
-            .loaded_page_mut()
+            .and_then(|browser_context| {
+                browser_context.loaded_page_for_target_mut(&popup_target_id)
+            })
             .expect("popup initial empty Document should be loaded");
         let popup_renderer_page_id = popup_page.renderer_page_id().as_u64();
         let popup_script_agent_id = popup_page
@@ -377,17 +381,21 @@ async fn popup_initial_about_blank_adopts_renderer_page_and_related_script_agent
         .expect("noopener popup target id should be present")
         .to_owned();
     let noopener_script_agent_id = {
-        let popup = ctx
+        let popup_browsing_context_id = ctx
+            .conn
+            .browser_context
+            .as_ref()
+            .and_then(|browser_context| {
+                browser_context.auxiliary_browsing_context_id_for_target(&noopener_target_id)
+            })
+            .expect("noopener popup should retain its auxiliary browsing-context identity");
+        let popup_page = ctx
             .conn
             .browser_context
             .as_mut()
-            .and_then(|browser_context| browser_context.background_target_mut(&noopener_target_id))
-            .expect("noopener popup target should remain staged");
-        let popup_browsing_context_id = popup
-            .auxiliary_browsing_context_id()
-            .expect("noopener popup should retain its auxiliary browsing-context identity");
-        let popup_page = popup
-            .loaded_page_mut()
+            .and_then(|browser_context| {
+                browser_context.loaded_page_for_target_mut(&noopener_target_id)
+            })
             .expect("noopener popup initial empty Document should be loaded");
         assert_eq!(
             popup_page.renderer_page_id().as_u64(),
@@ -421,7 +429,7 @@ async fn popup_initial_about_blank_adopts_renderer_page_and_related_script_agent
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn cross_origin_popup_remote_window_proxy_routes_through_exact_background_target() {
+async fn cross_origin_popup_remote_window_proxy_routes_through_exact_target_capability() {
     async fn opener_document() -> impl IntoResponse {
         (
             [(CONTENT_TYPE.as_str(), "text/html")],
@@ -533,7 +541,9 @@ addEventListener("message", event => {
         .conn
         .browser_context
         .as_mut()
-        .and_then(|browser_context| browser_context.active_target.runtime_slot.loaded_page_mut())
+        .and_then(|browser_context| {
+            browser_context.loaded_page_for_target_mut("TID-remote-window-opener")
+        })
         .expect("remote opener Page")
         .runtime_heap_usage_async()
         .await
@@ -542,8 +552,7 @@ addEventListener("message", event => {
         .conn
         .browser_context
         .as_mut()
-        .and_then(|browser_context| browser_context.background_target_mut(&popup_target_id))
-        .and_then(crate::conn::BackgroundTarget::loaded_page_mut)
+        .and_then(|browser_context| browser_context.loaded_page_for_target_mut(&popup_target_id))
         .expect("remote popup Page")
         .runtime_heap_usage_async()
         .await
@@ -646,10 +655,23 @@ addEventListener("message", event => {
         ctx.conn
             .browser_context
             .as_ref()
-            .and_then(|browser_context| browser_context.background_target(&popup_target_id))
-            .is_some_and(|target| !target.has_loaded_page()),
+            .is_some_and(|browser_context| {
+                browser_context
+                    .devtools_target_info(&popup_target_id)
+                    .is_some()
+                    && browser_context
+                        .loaded_page_for_target(&popup_target_id)
+                        .is_none()
+            }),
         "crashing the remote owner must retire its exact renderer Page"
     );
+    let crashed_target_url = ctx
+        .conn
+        .browser_context
+        .as_ref()
+        .and_then(|browser_context| browser_context.target_url_for_target(&popup_target_id))
+        .expect("crashed popup target should remain addressable")
+        .to_owned();
 
     ctx.sent.clear();
     ctx.process_async(json!({
@@ -678,19 +700,22 @@ addEventListener("message", event => {
         .browser_context
         .as_ref()
         .expect("remote popup browser context");
-    assert_eq!(
-        browser_context.active_target_id(),
-        Some("TID-remote-window-opener")
-    );
-    assert_eq!(
-        browser_context.background_targets.len(),
-        1,
-        "a stale remote command must neither revive nor alias another target"
+    assert!(
+        browser_context
+            .loaded_page_for_target("TID-remote-window-opener")
+            .is_some(),
+        "the explicit opener session must preserve its exact Page"
     );
     assert!(
         browser_context
-            .background_target(&popup_target_id)
-            .is_some_and(|target| !target.has_loaded_page())
+            .loaded_page_for_target(&popup_target_id)
+            .is_none(),
+        "a stale remote command must not revive the crashed popup Page"
+    );
+    assert_eq!(
+        browser_context.target_url_for_target(&popup_target_id),
+        Some(crashed_target_url.as_str()),
+        "a stale remote command must not retarget or alias the crashed popup"
     );
 
     opener_server.abort();

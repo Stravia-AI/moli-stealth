@@ -341,7 +341,7 @@ impl ScriptVm {
                             source_run: completion_seed.source_run,
                             result: Ok(None),
                         },
-                );
+                    );
                 return Err(error);
             }
         };

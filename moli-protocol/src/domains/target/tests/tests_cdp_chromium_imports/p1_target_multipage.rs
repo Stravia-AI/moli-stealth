@@ -235,8 +235,9 @@ async fn wait_for_coop_sandbox_blocked_error_document(
         !conn.has_pending_document_navigation_for_session_owner(Some(popup_session_id))
             && conn
                 .browser_context_by_id(browser_context_id)
-                .and_then(|browser_context| browser_context.background_target(popup_target_id))
-                .and_then(|target| target.loaded_page())
+                .and_then(|browser_context| {
+                    loaded_page_for_target(browser_context, popup_target_id)
+                })
                 .is_some_and(|page| page.final_url().as_str() == NETWORK_ERROR_PAGE_URL)
     })
     .await;
@@ -824,6 +825,12 @@ async fn run_popup_coop_redirect_fetch_response_override_regression() {
             .await;
             set_auto_attach_waiting_for_debugger(&mut ctx, 2_602_700).await;
             ctx.take_all();
+            let opener_session_id = "SID-popup-coop-opener";
+            ctx.conn
+                .browser_context
+                .as_mut()
+                .expect("COOP opener browser context")
+                .attach_active_session(opener_session_id);
 
             let requested_url = fixture.url("/coop-redirect-start");
             let coop_url = fixture.url("/coop-redirect-final");
@@ -918,9 +925,8 @@ async fn run_popup_coop_redirect_fetch_response_override_regression() {
                     && conn
                         .browser_context_by_id("BID-popup-coop")
                         .and_then(|browser_context| {
-                            browser_context.background_target(&popup_target_id)
+                            loaded_page_for_target(browser_context, &popup_target_id)
                         })
-                        .and_then(|target| target.loaded_page())
                         .is_some_and(|page| page.final_url().as_str() == coop_url)
             })
             .await;
@@ -967,6 +973,7 @@ async fn run_popup_coop_redirect_fetch_response_override_regression() {
             ctx.process_async(json!({
                 "id": 2_602_706,
                 "method": "Runtime.evaluate",
+                "sessionId": opener_session_id,
                 "params": {
                     "expression": "({ oldProxyClosed: __lmCoopPopup.closed, openerClosed: closed })",
                     "returnByValue": true
@@ -981,6 +988,7 @@ async fn run_popup_coop_redirect_fetch_response_override_regression() {
             ctx.process_async(json!({
                 "id": 2_602_707,
                 "method": "Runtime.evaluate",
+                "sessionId": opener_session_id,
                 "params": {
                     "expression": r#"(() => {
   const stale = globalThis.__lmCoopPopup;
@@ -1050,6 +1058,7 @@ async fn run_popup_coop_redirect_fetch_response_override_regression() {
             ctx.process_async(json!({
                 "id": 2_602_709,
                 "method": "Runtime.evaluate",
+                "sessionId": opener_session_id,
                 "params": {
                     "expression": "globalThis.__lmStaleEndpointSelfMessages",
                     "returnByValue": true
@@ -1102,6 +1111,12 @@ async fn popup_sandboxed_coop_redirect_is_blocked_before_follow_and_commits_one_
                 .await;
                 set_auto_attach_waiting_for_debugger(&mut ctx, 2_602_900).await;
                 ctx.take_all();
+                let opener_session_id = "SID-popup-coop-sandbox-opener";
+                ctx.conn
+                    .browser_context
+                    .as_mut()
+                    .expect("sandboxed COOP opener browser context")
+                    .attach_active_session(opener_session_id);
 
                 let blocked_url = fixture.url("/coop-sandbox-blocked-redirect");
                 let messages = open_popup_from_runtime(
@@ -1210,6 +1225,7 @@ async fn popup_sandboxed_coop_redirect_is_blocked_before_follow_and_commits_one_
                 ctx.process_async(json!({
                     "id": 2_602_907,
                     "method": "Runtime.evaluate",
+                    "sessionId": opener_session_id,
                     "params": {
                         "expression": "({ popupClosed: __lmBlockedCoopPopup.closed, openerClosed: closed })",
                         "returnByValue": true
@@ -1370,6 +1386,12 @@ async fn popup_response_csp_sandbox_does_not_block_later_unsandboxed_coop_naviga
                 .await;
                 set_auto_attach_waiting_for_debugger(&mut ctx, 2_602_940).await;
                 ctx.take_all();
+                let opener_session_id = "SID-popup-response-csp-opener";
+                ctx.conn
+                    .browser_context
+                    .as_mut()
+                    .expect("response CSP opener browser context")
+                    .attach_active_session(opener_session_id);
 
                 let initial_url = fixture.url("/csp-sandbox-navigate-to-coop");
                 let final_url = fixture.url("/coop-same-origin");
@@ -1455,9 +1477,8 @@ async fn popup_response_csp_sandbox_does_not_block_later_unsandboxed_coop_naviga
                         && conn
                             .browser_context_by_id("BID-popup-response-csp")
                             .and_then(|browser_context| {
-                                browser_context.background_target(&popup_target_id)
+                                loaded_page_for_target(browser_context, &popup_target_id)
                             })
-                            .and_then(|target| target.loaded_page())
                             .is_some_and(|page| page.final_url().as_str() == final_url)
                 })
                 .await;
@@ -1494,6 +1515,7 @@ async fn popup_response_csp_sandbox_does_not_block_later_unsandboxed_coop_naviga
                 ctx.process_async(json!({
                     "id": 2_602_947,
                     "method": "Runtime.evaluate",
+                    "sessionId": opener_session_id,
                     "params": {
                         "expression": "__lmResponseCspPopup.closed",
                         "returnByValue": true
@@ -1538,10 +1560,17 @@ async fn popup_window_close_retires_target_and_parks_stable_window_proxy() {
             .await;
             set_auto_attach(&mut ctx, 2_602_430, true).await;
             ctx.take_all();
+            let opener_session_id = "SID-popup-window-close-opener";
+            ctx.conn
+                .browser_context
+                .as_mut()
+                .expect("window.close opener browser context")
+                .attach_active_session(opener_session_id);
 
             ctx.process_async(json!({
                 "id": 2_602_431,
                 "method": "Runtime.evaluate",
+                "sessionId": opener_session_id,
                 "params": {
                     "expression": format!(r#"(() => {{
   const popup = window.open({destination_url:?}, "_blank");
@@ -1643,6 +1672,7 @@ async fn popup_window_close_retires_target_and_parks_stable_window_proxy() {
             ctx.process_async(json!({
                 "id": 2_602_432,
                 "method": "Runtime.evaluate",
+                "sessionId": opener_session_id,
                 "params": {
                     "expression": r#"(() => {
   const popup = globalThis.__lmClosedPopup;
@@ -2098,6 +2128,12 @@ async fn popup_transport_failure_commits_error_document_in_stable_auxiliary_page
             .await;
             set_auto_attach_waiting_for_debugger(&mut ctx, 260_223).await;
             ctx.take_all();
+            let opener_session_id = "SID-popup-network-error-opener";
+            ctx.conn
+                .browser_context
+                .as_mut()
+                .expect("network-error opener browser context")
+                .attach_active_session(opener_session_id);
 
             let unreachable_url = format!("http://{failing_addr}/popup-error");
             let messages = open_popup_from_runtime(
@@ -2204,9 +2240,8 @@ async fn popup_transport_failure_commits_error_document_in_stable_auxiliary_page
                     && conn
                         .browser_context_by_id("BID-popup-network-error")
                         .and_then(|browser_context| {
-                            browser_context.background_target(&popup_target_id)
+                            loaded_page_for_target(browser_context, &popup_target_id)
                         })
-                        .and_then(|target| target.loaded_page())
                         .is_some_and(|page| page.final_url().as_str() == NETWORK_ERROR_PAGE_URL)
             })
             .await;
@@ -2358,6 +2393,7 @@ async fn popup_transport_failure_commits_error_document_in_stable_auxiliary_page
             ctx.process_async(json!({
                 "id": 260_234,
                 "method": "Runtime.evaluate",
+                "sessionId": opener_session_id,
                 "params": {
                     "expression": r#"(() => {
   const popup = __networkErrorPopup;
@@ -2516,6 +2552,7 @@ async fn popup_transport_failure_commits_error_document_in_stable_auxiliary_page
             ctx.process_async(json!({
                 "id": 260_236,
                 "method": "Runtime.evaluate",
+                "sessionId": opener_session_id,
                 "params": {
                     "expression": "__networkErrorPopup.postMessage({ kind: 'related-page', value: 41 }, '*'); 'queued'",
                     "returnByValue": true
@@ -2563,6 +2600,7 @@ async fn popup_transport_failure_commits_error_document_in_stable_auxiliary_page
             ctx.process_async(json!({
                 "id": 260_238,
                 "method": "Runtime.evaluate",
+                "sessionId": opener_session_id,
                 "params": {
                     "expression": format!(
                         "__networkErrorPopup.location = {related_location_url:?}; 'navigating'"
@@ -2589,9 +2627,8 @@ async fn popup_transport_failure_commits_error_document_in_stable_auxiliary_page
                     && conn
                         .browser_context_by_id("BID-popup-network-error")
                         .and_then(|browser_context| {
-                            browser_context.background_target(&popup_target_id)
+                            loaded_page_for_target(browser_context, &popup_target_id)
                         })
-                        .and_then(|target| target.loaded_page())
                         .is_some_and(|page| page.final_url().as_str() == related_location_url)
             })
             .await;
@@ -2634,6 +2671,7 @@ async fn popup_transport_failure_commits_error_document_in_stable_auxiliary_page
             ctx.process_async(json!({
                 "id": 260_240,
                 "method": "Runtime.evaluate",
+                "sessionId": opener_session_id,
                 "params": {
                     "expression": format!(
                         "__networkErrorPopup.location.replace({related_replace_url:?}); 'replacing'"
@@ -2660,9 +2698,8 @@ async fn popup_transport_failure_commits_error_document_in_stable_auxiliary_page
                     && conn
                         .browser_context_by_id("BID-popup-network-error")
                         .and_then(|browser_context| {
-                            browser_context.background_target(&popup_target_id)
+                            loaded_page_for_target(browser_context, &popup_target_id)
                         })
-                        .and_then(|target| target.loaded_page())
                         .is_some_and(|page| page.final_url().as_str() == related_replace_url)
             })
             .await;
@@ -2689,6 +2726,7 @@ async fn popup_transport_failure_commits_error_document_in_stable_auxiliary_page
             ctx.process_async(json!({
                 "id": 260_242,
                 "method": "Runtime.evaluate",
+                "sessionId": opener_session_id,
                 "params": {
                     "expression": "__networkErrorPopup === __networkErrorPopupAlias && typeof __networkErrorPopup.postMessage === 'function'",
                     "returnByValue": true
@@ -2733,6 +2771,12 @@ async fn popup_coop_redirect_then_transport_error_still_severs_old_group_proxy()
             .await;
             set_auto_attach_waiting_for_debugger(&mut ctx, 2_602_800).await;
             ctx.take_all();
+            let opener_session_id = "SID-popup-coop-error-opener";
+            ctx.conn
+                .browser_context
+                .as_mut()
+                .expect("COOP error opener browser context")
+                .attach_active_session(opener_session_id);
 
             let messages = open_popup_from_runtime(
                 &mut ctx,
@@ -2789,9 +2833,8 @@ async fn popup_coop_redirect_then_transport_error_still_severs_old_group_proxy()
                     && conn
                         .browser_context_by_id("BID-popup-coop-error")
                         .and_then(|browser_context| {
-                            browser_context.background_target(&popup_target_id)
+                            loaded_page_for_target(browser_context, &popup_target_id)
                         })
-                        .and_then(|target| target.loaded_page())
                         .is_some_and(|page| page.final_url().as_str() == NETWORK_ERROR_PAGE_URL)
             })
             .await;
@@ -2817,6 +2860,7 @@ async fn popup_coop_redirect_then_transport_error_still_severs_old_group_proxy()
             ctx.process_async(json!({
                 "id": 2_602_806,
                 "method": "Runtime.evaluate",
+                "sessionId": opener_session_id,
                 "params": {
                     "expression": "({ popupClosed: __lmCoopErrorPopup.closed, openerClosed: closed })",
                     "returnByValue": true
@@ -3381,8 +3425,9 @@ async fn ordinary_popup_navigation_then_javascript_url_preserves_renderer_protoc
             ctx.wait_until_scheduler_state("ordinary popup destination commit", |conn| {
                 conn.browser_context
                     .as_ref()
-                    .and_then(|browser_context| browser_context.background_target(&popup_target_id))
-                    .and_then(|target| target.loaded_page())
+                    .and_then(|browser_context| {
+                        loaded_page_for_target(browser_context, &popup_target_id)
+                    })
                     .is_some_and(|page| page.final_url().as_str() == ordinary_url.as_str())
             })
             .await;
@@ -3563,6 +3608,12 @@ async fn rust_cdp_chromium_target_resetting_opener_clears_popup_opener_reference
         .as_str()
         .expect("popup target id")
         .to_owned();
+
+    ctx.conn
+        .promote_background_target_to_active_for_connection_async("TID-reset-opener")
+        .await
+        .expect("opener target promotion should succeed")
+        .expect("foreground popup should have demoted its opener");
 
     ctx.conn
         .browser_context

@@ -36,8 +36,8 @@ pub use javascript_dialog::{
 pub(crate) use popup_activation::RendererPopupCreationUserActivation;
 pub use popup_activation::{
     RendererAuxiliaryBrowsingContextPolicy, RendererMainDocumentResponseBlock,
-    RendererPendingPopupActivation, RendererPopupActivationSource,
-    RendererPopupDisposition, RendererPopupNewTargetDisposition, RendererResolvedPopupTarget,
+    RendererPendingPopupActivation, RendererPopupActivationSource, RendererPopupDisposition,
+    RendererPopupNewTargetDisposition, RendererResolvedPopupTarget,
 };
 pub(crate) use remote_window_proxy::{
     RendererRemoteFrameNavigationId, RendererRemoteJavaScriptUrlSource,

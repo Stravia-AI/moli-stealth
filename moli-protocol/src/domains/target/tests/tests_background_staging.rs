@@ -116,7 +116,11 @@ __focusEvents.length = 0;
     ctx.process_async(json!({
         "id": 8102,
         "method": "Target.createTarget",
-        "params": { "browserContextId": "BID-FOCUS", "url": "about:blank#focus-b" }
+        "params": {
+            "browserContextId": "BID-FOCUS",
+            "url": "about:blank#focus-b",
+            "background": true
+        }
     }))
     .await;
     let created = ctx.take_one();

@@ -997,9 +997,8 @@ self.addEventListener("notificationclick", event => {
             ctx.wait_until_scheduler_state("clients.openWindow committed Page", |conn| {
                 conn.browser_context_by_id("BID-1")
                     .and_then(|browser_context| {
-                        browser_context.background_target(&popup_target_id)
+                        browser_context.loaded_page_for_target(&popup_target_id)
                     })
-                    .and_then(|target| target.loaded_page())
                     .is_some_and(|page| page.final_url().as_str() == opened_url)
             })
             .await;
@@ -1007,8 +1006,7 @@ self.addEventListener("notificationclick", event => {
             let popup_client_id = ctx
                 .conn
                 .browser_context_by_id("BID-1")
-                .and_then(|browser_context| browser_context.background_target(&popup_target_id))
-                .and_then(|target| target.loaded_page())
+                .and_then(|browser_context| browser_context.loaded_page_for_target(&popup_target_id))
                 .expect("committed clients.openWindow Page")
                 .service_worker_client_id();
             let controlled_client_ids = renderer_runtime
@@ -1045,8 +1043,7 @@ self.addEventListener("notificationclick", event => {
             let popup_page = ctx
                 .conn
                 .browser_context_by_id("BID-1")
-                .and_then(|browser_context| browser_context.background_target(&popup_target_id))
-                .and_then(|target| target.loaded_page())
+                .and_then(|browser_context| browser_context.loaded_page_for_target(&popup_target_id))
                 .expect("clients.openWindow target must own a loaded renderer Page");
             assert_eq!(popup_page.final_url().as_str(), opened_url);
             assert_ne!(popup_page.renderer_page_id(), source_page_id);
@@ -1120,9 +1117,8 @@ self.addEventListener("notificationclick", event => {
                 .conn
                 .browser_context_by_id("BID-1")
                 .and_then(|browser_context| {
-                    browser_context.background_target(&no_content_target_id)
+                    browser_context.loaded_page_for_target(&no_content_target_id)
                 })
-                .and_then(|target| target.loaded_page())
                 .expect("204 target should preserve its real initial Page");
             assert_eq!(no_content_page.final_url().as_str(), "about:blank");
             assert_ne!(no_content_page.renderer_page_id(), source_page_id);
@@ -1172,9 +1168,8 @@ self.addEventListener("notificationclick", event => {
             ctx.wait_until_scheduler_state("notification action committed Page", |conn| {
                 conn.browser_context_by_id("BID-1")
                     .and_then(|browser_context| {
-                        browser_context.background_target(&notification_target_id)
+                        browser_context.loaded_page_for_target(&notification_target_id)
                     })
-                    .and_then(|target| target.loaded_page())
                     .is_some_and(|page| page.final_url().as_str() == notification_opened_url)
             })
             .await;
@@ -1182,9 +1177,8 @@ self.addEventListener("notificationclick", event => {
                 .conn
                 .browser_context_by_id("BID-1")
                 .and_then(|browser_context| {
-                    browser_context.background_target(&notification_target_id)
+                    browser_context.loaded_page_for_target(&notification_target_id)
                 })
-                .and_then(|target| target.loaded_page())
                 .expect("notification action target must own a real Page");
             assert_ne!(notification_page.renderer_page_id(), source_page_id);
             assert_ne!(notification_page.renderer_page_id(), redirected_page_id);
@@ -1442,8 +1436,9 @@ self.addEventListener("notificationclick", event => {
             let popup_page = ctx
                 .conn
                 .browser_context_by_id("BID-1")
-                .and_then(|browser_context| browser_context.background_target(&popup_target_id))
-                .and_then(|target| target.loaded_page())
+                .and_then(|browser_context| {
+                    browser_context.loaded_page_for_target(&popup_target_id)
+                })
                 .expect("Fetch-fulfilled clients.openWindow Page");
             assert_eq!(popup_page.final_url().as_str(), target_url);
             ctx.process_async(json!({

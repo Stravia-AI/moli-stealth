@@ -3054,9 +3054,7 @@ impl CdpConnection {
                 .await
             {
                 match self
-                    .promote_background_target_to_active_for_connection_async(
-                        next_active_target_id,
-                    )
+                    .promote_background_target_to_active_for_connection_async(next_active_target_id)
                     .await
                 {
                     Ok(Some(activation)) => out.extend(activation.into_protocol_events()),

@@ -104,8 +104,7 @@ pub(crate) use main_document_progress::{
     materialize_navigation_failure_preserving_committed_document,
     materialize_navigation_load_result, materialize_stable_page_navigation_progress,
     record_completed_main_document_response_body, record_failed_main_document_response_body,
-    record_main_document_request_body,
-    response_stage_main_document_navigation_network_progress,
+    record_main_document_request_body, response_stage_main_document_navigation_network_progress,
     start_observed_main_document_navigation_progress_background_events,
 };
 pub(crate) use output::{

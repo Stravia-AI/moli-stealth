@@ -1562,6 +1562,7 @@ async fn noopener_and_noreferrer_popups_have_one_real_navigation_with_creator_re
             .active_target
             .runtime_slot
             .replace_loaded_page(Some(page));
+        browser_context.attach_active_session("SID-popup-referrer-opener");
     }
     observations.requests.lock().clear();
     ctx.enable_background_navigation_scheduler_for_test();
@@ -1661,6 +1662,7 @@ async fn noopener_and_noreferrer_popups_have_one_real_navigation_with_creator_re
                 ctx.process_async(json!({
                     "id": command_id,
                     "method": "Runtime.evaluate",
+                    "sessionId": "SID-popup-referrer-opener",
                     "params": {
                         "expression": expression,
                         "returnByValue": true
@@ -1675,7 +1677,7 @@ async fn noopener_and_noreferrer_popups_have_one_real_navigation_with_creator_re
                             "value": true
                         }
                     }),
-                    None,
+                    Some("SID-popup-referrer-opener"),
                 );
                 let popup_target_id = ctx
                     .sent
@@ -1692,9 +1694,8 @@ async fn noopener_and_noreferrer_popups_have_one_real_navigation_with_creator_re
                     |conn| {
                         conn.browser_context_by_id("BID-popup-referrer-policy")
                             .and_then(|browser_context| {
-                                browser_context.background_target(&popup_target_id)
+                                loaded_page_for_target(browser_context, &popup_target_id)
                             })
-                            .and_then(|target| target.loaded_page())
                             .is_some_and(|page| page.final_url().as_str() == popup_url)
                     },
                 )
@@ -1860,9 +1861,8 @@ async fn noopener_popup_retains_creator_sandbox_policy_across_document_navigatio
             ctx.wait_until_scheduler_state("sandboxed noopener popup navigation commit", |conn| {
                 conn.browser_context_by_id("BID-popup-sandbox-carrier")
                     .and_then(|browser_context| {
-                        browser_context.background_target(&popup_target_id)
+                        loaded_page_for_target(browser_context, &popup_target_id)
                     })
-                    .and_then(|target| target.loaded_page())
                     .is_some_and(|page| page.final_url().as_str() == first_popup_url)
             })
             .await;
@@ -1896,9 +1896,8 @@ async fn noopener_popup_retains_creator_sandbox_policy_across_document_navigatio
                         |conn| {
                             conn.browser_context_by_id("BID-popup-sandbox-carrier")
                                 .and_then(|browser_context| {
-                                    browser_context.background_target(&popup_target_id)
+                                    loaded_page_for_target(browser_context, &popup_target_id)
                                 })
-                                .and_then(|target| target.loaded_page())
                                 .is_some_and(|page| page.final_url().as_str() == expected_url)
                         },
                     )
@@ -1963,9 +1962,8 @@ async fn noopener_popup_retains_creator_sandbox_policy_across_document_navigatio
             ctx.wait_until_scheduler_state("sandboxed anchor popup navigation commit", |conn| {
                 conn.browser_context_by_id("BID-popup-sandbox-carrier")
                     .and_then(|browser_context| {
-                        browser_context.background_target(&anchor_popup_target_id)
+                        loaded_page_for_target(browser_context, &anchor_popup_target_id)
                     })
-                    .and_then(|target| target.loaded_page())
                     .is_some_and(|page| page.final_url().as_str() == anchor_initial_url)
             })
             .await;
@@ -1998,9 +1996,8 @@ async fn noopener_popup_retains_creator_sandbox_policy_across_document_navigatio
                         |conn| {
                             conn.browser_context_by_id("BID-popup-sandbox-carrier")
                                 .and_then(|browser_context| {
-                                    browser_context.background_target(&anchor_popup_target_id)
+                                    loaded_page_for_target(browser_context, &anchor_popup_target_id)
                                 })
-                                .and_then(|target| target.loaded_page())
                                 .is_some_and(|page| page.final_url().as_str() == expected_url)
                         },
                     )
@@ -2137,9 +2134,8 @@ async fn fresh_noopener_popup_applies_response_sandbox_before_realm_observation(
                 |conn| {
                     conn.browser_context_by_id("BID-popup-response-sandbox-carrier")
                         .and_then(|browser_context| {
-                            browser_context.background_target(&popup_target_id)
+                            loaded_page_for_target(browser_context, &popup_target_id)
                         })
-                        .and_then(|target| target.loaded_page())
                         .is_some_and(|page| page.final_url().as_str() == popup_url)
                 },
             )
@@ -2298,6 +2294,12 @@ async fn resetting_opener_target_clears_live_opener_but_keeps_frame_attribution(
     );
 
     ctx.conn
+        .promote_background_target_to_active_for_connection_async("TID-opener-reset")
+        .await
+        .expect("opener target promotion should succeed")
+        .expect("foreground popup should have demoted its opener");
+
+    ctx.conn
         .browser_context
         .as_mut()
         .unwrap()
@@ -2361,7 +2363,7 @@ async fn popup_initial_empty_document_record_captures_creator_identity() {
 
     let browser_context = ctx.conn.browser_context.as_ref().unwrap();
     let initial = browser_context
-        .parked_target_owner_state(popup_target_id)
+        .target_owner_state(popup_target_id)
         .and_then(|owner_state| owner_state.initial_empty_document_state())
         .expect("popup target should record initial empty document");
     let creator = initial
@@ -2445,7 +2447,7 @@ async fn popup_initial_empty_document_frame_tree_inherits_opener_origin() {
 
     let browser_context = ctx.conn.browser_context.as_ref().unwrap();
     let initial = browser_context
-        .parked_target_owner_state(&popup_target_id)
+        .target_owner_state(&popup_target_id)
         .and_then(|owner_state| owner_state.initial_empty_document_state())
         .expect("popup target should still record initial empty document");
     assert!(initial.is_on_initial_empty_document());
@@ -2461,10 +2463,17 @@ async fn opener_window_handle_projects_the_renderer_owned_auxiliary_realm() {
         "<main>popup WindowProxy opener</main>",
     )
     .await;
+    let opener_session_id = "SID-opener-window-proxy-root";
+    ctx.conn
+        .browser_context
+        .as_mut()
+        .expect("popup opener browser context")
+        .attach_active_session(opener_session_id);
 
     ctx.process_async(json!({
         "id": 1250,
         "method": "Runtime.evaluate",
+        "sessionId": opener_session_id,
         "params": {
             "expression": "(() => { const popup = window.open('about:blank', '_blank'); globalThis.__lmPopupWindow = popup; globalThis.__lmPopupDocument = popup.document; popup.__lmSynchronousRealmMarker = 'before-target-activation'; popup.document.body.textContent = 'synchronous-document'; return `${popup !== null}|${__lmPopupDocument === popup.document}|${popup.__lmSynchronousRealmMarker}|${popup.document.body.textContent}|${popup.name === ''}|${popup.location.origin === location.origin}|${popup.document.referrer === location.href}|${popup.document.baseURI === document.baseURI}`; })()",
             "returnByValue": true
@@ -2518,6 +2527,7 @@ async fn opener_window_handle_projects_the_renderer_owned_auxiliary_realm() {
     ctx.process_async(json!({
         "id": 1253,
         "method": "Runtime.evaluate",
+        "sessionId": opener_session_id,
         "params": {
             "expression": "`${__lmPopupDocument === __lmPopupWindow.document}|${__lmPopupWindow.__lmAuxiliaryRealmMarker}|${__lmPopupDocument.body.textContent}|${__lmPopupWindow === __lmPopupWindow.window}`",
             "returnByValue": true
@@ -2535,6 +2545,7 @@ async fn opener_window_handle_projects_the_renderer_owned_auxiliary_realm() {
     ctx.process_async(json!({
         "id": 1254,
         "method": "Runtime.evaluate",
+        "sessionId": opener_session_id,
         "params": {
             "expression": "__lmPopupWindow.__lmProjectedFromOpener = 'same-proxy'; true",
             "returnByValue": true
@@ -2572,14 +2583,15 @@ async fn opener_window_handle_projects_the_renderer_owned_auxiliary_realm() {
     .await;
     assert_eq!(
         take_response_by_id(&mut ctx, 1256)["result"]["result"]["value"],
-        json!(false),
-        "a renderer-owned auxiliary Page must remain unfocused while its target is parked"
+        json!(true),
+        "a foreground renderer-owned auxiliary Page must receive document focus"
     );
     ctx.sent.clear();
 
     ctx.process_async(json!({
         "id": 1257,
         "method": "Runtime.evaluate",
+        "sessionId": opener_session_id,
         "params": {
             "expression": "__lmPopupWindow.focus(); 'focus-requested'",
             "returnByValue": true
@@ -2960,11 +2972,18 @@ async fn related_popup_location_history_seed_survives_protocol_replacement() {
                 "<main>popup history opener</main>",
             )
             .await;
+            let opener_session_id = "SID-popup-history-opener";
+            ctx.conn
+                .browser_context
+                .as_mut()
+                .expect("popup history opener browser context")
+                .attach_active_session(opener_session_id);
             ctx.sent.clear();
 
             ctx.process_async(json!({
                 "id": 15301,
                 "method": "Runtime.evaluate",
+                "sessionId": opener_session_id,
                 "params": {
                     "expression": "globalThis.__historySeedPopup = window.open(); __historySeedPopup !== null",
                     "returnByValue": true
@@ -3012,6 +3031,7 @@ async fn related_popup_location_history_seed_survives_protocol_replacement() {
                 ctx.process_async(json!({
                     "id": command_id,
                     "method": "Runtime.evaluate",
+                    "sessionId": opener_session_id,
                     "params": {
                         "expression": format!(
                             "__historySeedPopup.location.href = {destination:?}; 'queued'"
@@ -3030,9 +3050,9 @@ async fn related_popup_location_history_seed_survives_protocol_replacement() {
                         conn.browser_context
                             .as_ref()
                             .and_then(|browser_context| {
-                                browser_context.background_target(&popup_target_id)
+                                browser_context.target_url_for_target(&popup_target_id)
                             })
-                            .is_some_and(|target| target.target_url() == destination)
+                            .is_some_and(|url| url == destination)
                     },
                 )
                 .await;
@@ -3118,9 +3138,8 @@ async fn related_popup_same_turn_retarget_admits_only_winning_initial_navigation
                 conn.browser_context
                     .as_ref()
                     .and_then(|browser_context| {
-                        browser_context.background_target(&popup_target_id)
+                        loaded_page_for_target(browser_context, &popup_target_id)
                     })
-                    .and_then(|target| target.loaded_page())
                     .is_some_and(|page| page.final_url().as_str() == winning_destination)
             })
             .await;
@@ -3242,9 +3261,8 @@ async fn related_popup_without_url_same_turn_location_admits_initial_navigation(
                 conn.browser_context
                     .as_ref()
                     .and_then(|browser_context| {
-                        browser_context.background_target(&popup_target_id)
+                        loaded_page_for_target(browser_context, &popup_target_id)
                     })
-                    .and_then(|target| target.loaded_page())
                     .is_some_and(|page| page.final_url().as_str() == destination)
             })
             .await;
@@ -3429,8 +3447,8 @@ async fn window_open_named_target_reuse_is_owned_by_the_renderer_page_group() {
             );
             ctx.wait_until_scheduler_state("renderer-group named target reuse", |conn| {
                 conn.browser_context_by_id("BID-popup-group-name")
-                    .and_then(|browser_context| browser_context.background_target(&target_id))
-                    .is_some_and(|target| target.target_url() == "about:blank#renderer-group-reuse")
+                    .and_then(|browser_context| browser_context.target_url_for_target(&target_id))
+                    .is_some_and(|url| url == "about:blank#renderer-group-reuse")
             })
             .await;
 
@@ -3582,15 +3600,19 @@ async fn named_suppress_opener_window_open_creates_distinct_fresh_groups_with_li
             );
             ctx.wait_until_scheduler_state("fresh-group source-name self reuse", |conn| {
                 conn.browser_context_by_id("BID-popup-fresh-group-name")
-                    .and_then(|browser_context| browser_context.background_target(&target_ids[0]))
-                    .is_some_and(|target| target.target_url() == "about:blank#fresh-self")
+                    .and_then(|browser_context| {
+                        browser_context.target_url_for_target(&target_ids[0])
+                    })
+                    .is_some_and(|url| url == "about:blank#fresh-self")
             })
             .await;
             assert!(
                 ctx.conn
                     .browser_context_by_id("BID-popup-fresh-group-name")
-                    .and_then(|browser_context| browser_context.background_target(&target_ids[1]))
-                    .is_some_and(|target| target.target_url() == "about:blank#fresh-two"),
+                    .and_then(|browser_context| {
+                        browser_context.target_url_for_target(&target_ids[1])
+                    })
+                    .is_some_and(|url| url == "about:blank#fresh-two"),
                 "the same-named Page in another fresh group must remain independent"
             );
         })
@@ -3646,8 +3668,10 @@ async fn named_opener_hyperlink_creation_and_reuse_are_owned_by_renderer_group()
             let target_id = target_ids[0].clone();
             ctx.wait_until_scheduler_state("related hyperlink second navigation", |conn| {
                 conn.browser_context_by_id("BID-popup-related-hyperlink-name")
-                    .and_then(|browser_context| browser_context.background_target(&target_id))
-                    .is_some_and(|target| target.target_url() == "about:blank#related-two")
+                    .and_then(|browser_context| {
+                        browser_context.target_url_for_target(&target_id)
+                    })
+                    .is_some_and(|url| url == "about:blank#related-two")
             })
             .await;
 
@@ -3716,8 +3740,10 @@ async fn named_opener_hyperlink_creation_and_reuse_are_owned_by_renderer_group()
             );
             ctx.wait_until_scheduler_state("related noreferrer hyperlink reuse", |conn| {
                 conn.browser_context_by_id("BID-popup-related-hyperlink-name")
-                    .and_then(|browser_context| browser_context.background_target(&target_id))
-                    .is_some_and(|target| target.target_url() == "about:blank#related-noreferrer")
+                    .and_then(|browser_context| {
+                        browser_context.target_url_for_target(&target_id)
+                    })
+                    .is_some_and(|url| url == "about:blank#related-noreferrer")
             })
             .await;
             ctx.process_async(json!({
@@ -3831,8 +3857,9 @@ async fn named_form_post_reuses_renderer_group_target_and_preserves_exact_reques
             assert_eq!(
                 ctx.conn
                     .browser_context_by_id("BID-popup-related-form-name")
-                    .and_then(|browser_context| browser_context.background_target(&target_id))
-                    .map(|target| target.target_url()),
+                    .and_then(|browser_context| {
+                        browser_context.target_url_for_target(&target_id)
+                    }),
                 Some("about:blank?#related-form-first"),
                 "an allowed form must attach its destination request to the newly created target"
             );
@@ -3851,8 +3878,9 @@ async fn named_form_post_reuses_renderer_group_target_and_preserves_exact_reques
             }
             ctx.wait_until_scheduler_state("related form initial navigation", |conn| {
                 conn.browser_context_by_id("BID-popup-related-form-name")
-                    .and_then(|browser_context| browser_context.background_target(&target_id))
-                    .and_then(|target| target.loaded_page())
+                    .and_then(|browser_context| {
+                        loaded_page_for_target(browser_context, &target_id)
+                    })
                     .is_some_and(|page| {
                         page.final_url().as_str() == "about:blank?#related-form-first"
                     })
@@ -3958,8 +3986,9 @@ async fn named_form_post_reuses_renderer_group_target_and_preserves_exact_reques
 
             ctx.wait_until_scheduler_state("related form POST commit", |conn| {
                 conn.browser_context_by_id("BID-popup-related-form-name")
-                    .and_then(|browser_context| browser_context.background_target(&target_id))
-                    .and_then(|target| target.loaded_page())
+                    .and_then(|browser_context| {
+                        loaded_page_for_target(browser_context, &target_id)
+                    })
                     .is_some_and(|page| page.final_url().as_str() == submit_url)
             })
             .await;
@@ -4119,7 +4148,7 @@ async fn base_target_blank_form_post_creates_fresh_target_with_exact_request() {
                 ctx.conn
                     .browser_context_by_id("BID-popup-base-form-target")
                     .and_then(|browser_context| {
-                        browser_context.active_target.runtime_slot.loaded_page()
+                        loaded_page_for_target(browser_context, "TID-opener-base-form-target")
                     })
                     .is_some_and(|page| page.final_url().as_str() == opener_url),
                 "POST target=_blank must not replace the opener Page"
@@ -4127,8 +4156,9 @@ async fn base_target_blank_form_post_creates_fresh_target_with_exact_request() {
 
             ctx.wait_until_scheduler_state("base-targeted form POST commit", |conn| {
                 conn.browser_context_by_id("BID-popup-base-form-target")
-                    .and_then(|browser_context| browser_context.background_target(&target_id))
-                    .and_then(|target| target.loaded_page())
+                    .and_then(|browser_context| {
+                        loaded_page_for_target(browser_context, &target_id)
+                    })
                     .is_some_and(|page| page.final_url().as_str() == submit_url)
             })
             .await;
@@ -4315,11 +4345,16 @@ async fn window_open_named_target_reused_in_same_command_emits_one_page_event() 
         1,
         "same-command named reuse must create one target: {sent:?}"
     );
+    let popup_target_id = sent
+        .iter()
+        .find(|message| message["method"] == json!("Target.targetCreated"))
+        .and_then(|message| message["params"]["targetInfo"]["targetId"].as_str())
+        .expect("same-command popup target id");
     let browser_context = ctx.conn.browser_context.as_ref().unwrap();
     assert_eq!(browser_context.background_targets.len(), 1);
     assert_eq!(
-        browser_context.background_targets[0].target_url(),
-        "https://example.com/second-popup"
+        browser_context.target_url_for_target(popup_target_id),
+        Some("https://example.com/second-popup")
     );
 }
 

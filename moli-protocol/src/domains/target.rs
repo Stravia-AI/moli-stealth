@@ -664,8 +664,7 @@ pub(crate) async fn execute_devtools_create_target_command_async_with_protocol_e
     let creation_commit = execution.commit;
     let focus_handoff = execution.focus_handoff;
     if let Some(focus_handoff) = focus_handoff {
-        creation::finish_created_target_focus_handoff_async(conn, focus_handoff.wait().await)
-            .await;
+        creation::finish_created_target_focus_handoff_async(conn, focus_handoff.wait().await).await;
     }
     let mut protocol_events = Vec::new();
     let (initial_document_events, renderer_output_predecessor) = conn

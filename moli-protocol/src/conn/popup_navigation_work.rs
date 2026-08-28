@@ -1,4 +1,4 @@
-use super::{CdpConnection, CommandOwnerScope, TargetPageResidenceIdentity};
+use super::{CdpConnection, CdpSessionRoute, CommandOwnerScope, TargetPageResidenceIdentity};
 
 /// Immutable authority for one popup destination navigation.
 ///
@@ -139,8 +139,19 @@ impl PopupTargetNavigationOwnerAction {
         if route.browser_context_id() != Some(browser_context_id) {
             return None;
         }
-        let owner_scope =
-            CommandOwnerScope::from_session_and_owner_route(None, Some(route.clone()));
+        // The Page identity below is the authorization boundary. Use the
+        // auxiliary target capability as the residence route so a foreground
+        // activation may move the same Page from the background slot to the
+        // active slot while its navigation is in flight. A concrete
+        // `BackgroundTarget` route would become stale at that move and strand
+        // the already-accepted destination work.
+        let owner_scope = CommandOwnerScope::from_session_and_owner_route(
+            None,
+            Some(CdpSessionRoute::AuxiliaryTarget {
+                browser_context_id: browser_context_id.to_owned(),
+                target_id: target_id.to_owned(),
+            }),
+        );
         let page_owner = {
             let mut route_scope = conn.scoped_none_session_owner_route_override(route);
             route_scope
