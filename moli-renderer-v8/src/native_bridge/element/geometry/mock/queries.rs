@@ -70,6 +70,7 @@ pub(crate) fn answer_queries(
                 LayoutQueryAnswer::ElementMetrics(mock_element_metrics(runtime, *source))
             }
             LayoutQuery::UsedBoxSize { .. } => LayoutQueryAnswer::UsedBoxSize(None),
+            LayoutQuery::UsedMargin { .. } => LayoutQueryAnswer::UsedMargin(None),
             LayoutQuery::ScrollIntoViewGeometry { source } => {
                 LayoutQueryAnswer::ScrollIntoViewGeometry(mock_scroll_into_view_geometry(
                     runtime, document, *source,

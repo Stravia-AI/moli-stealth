@@ -9,10 +9,10 @@ use crate::{
     FrozenCoordinateSpace, FrozenLayoutBox, FrozenLayoutTree, LayoutAnonymousReason,
     LayoutBoxGeometry, LayoutBoxId, LayoutClipChainId, LayoutClipNode, LayoutCoordinateSpaceId,
     LayoutError, LayoutFlushReason, LayoutFragment, LayoutFragmentBoxModel, LayoutFragmentId,
-    LayoutFragmentKind, LayoutOutputBoxId, LayoutPassMetrics, LayoutPassResult, LayoutPoint,
-    LayoutRect, LayoutScrollExtent, LayoutScrollbarAxis, LayoutScrollbarGeometry, LayoutSize,
-    LayoutTransform2D, LayoutViewport, LayoutWorld, PaintCaptureRequest, PaintDiagnostic,
-    PaintDiagnosticSeverity,
+    LayoutFragmentKind, LayoutOutputBoxId, LayoutPassMetrics, LayoutPassResult,
+    LayoutPhysicalBoxStrut, LayoutPoint, LayoutRect, LayoutScrollExtent, LayoutScrollbarAxis,
+    LayoutScrollbarGeometry, LayoutSize, LayoutTransform2D, LayoutUsedBoxValues, LayoutViewport,
+    LayoutWorld, PaintCaptureRequest, PaintDiagnostic, PaintDiagnosticSeverity,
 };
 
 pub(crate) struct LayoutPassPhaseMetrics {
@@ -571,12 +571,21 @@ where
             let (layout_x, layout_y) = self
                 .world
                 .global_layout_origin(LayoutBoxId::from_index(index));
-            let used_box_size = layout_box.is_css_box().then(|| {
+            let used_values = layout_box.is_css_box().then(|| {
+                let margin = LayoutPhysicalBoxStrut::new(
+                    layout.margin.top,
+                    layout.margin.right,
+                    layout.margin.bottom,
+                    layout.margin.left,
+                );
                 let box_rect = match layout_box.style.taffy.box_sizing {
                     taffy::BoxSizing::ContentBox => content_box,
                     taffy::BoxSizing::BorderBox => border_box,
                 };
-                LayoutSize::new(box_rect.width, box_rect.height)
+                LayoutUsedBoxValues {
+                    size: LayoutSize::new(box_rect.width, box_rect.height),
+                    margin,
+                }
             });
             self.boxes.push(LayoutBoxGeometry {
                 id,
@@ -597,7 +606,7 @@ where
                 padding_box,
                 border_box,
                 margin_box,
-                used_box_size,
+                used_values,
                 fragments: Vec::new(),
                 layout_origin_in_document: LayoutPoint::new(layout_x, layout_y),
                 is_body_element: semantics.is_some_and(|element| element.is_html_element("body")),
