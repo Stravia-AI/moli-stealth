@@ -1330,12 +1330,13 @@ fn build_replaced_context(
         return Some(ReplacedContext::for_element(
             crate::LayoutReplacedKind::Image,
             metrics,
+            style.effective_zoom(),
         ));
     }
     form_control_context(semantics, style.font_size(), style.line_height()).or_else(|| {
         semantics
             .replaced
-            .map(|kind| ReplacedContext::for_element(kind, metrics))
+            .map(|kind| ReplacedContext::for_element(kind, metrics, style.effective_zoom()))
     })
 }
 

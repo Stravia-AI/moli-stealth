@@ -21,7 +21,11 @@ pub(crate) struct ReplacedContext {
 }
 
 impl ReplacedContext {
-    pub(crate) fn for_element(kind: LayoutReplacedKind, metrics: Option<ReplacedMetrics>) -> Self {
+    pub(crate) fn for_element(
+        kind: LayoutReplacedKind,
+        metrics: Option<ReplacedMetrics>,
+        effective_zoom: f32,
+    ) -> Self {
         let mut metrics = metrics.unwrap_or_default();
         metrics.intrinsic_width = valid_dimension(metrics.intrinsic_width);
         metrics.intrinsic_height = valid_dimension(metrics.intrinsic_height);
@@ -61,6 +65,7 @@ impl ReplacedContext {
             metrics.attribute_width = None;
             metrics.attribute_height = None;
         }
+        let natural_size_scale = ReplacedNaturalSizeScale::new(kind, effective_zoom);
         let inherent_ratio = metrics
             .intrinsic_ratio
             .or_else(|| {
@@ -83,6 +88,9 @@ impl ReplacedContext {
                     })
                     .flatten()
             });
+        metrics.intrinsic_width = natural_size_scale.optional_dimension(metrics.intrinsic_width);
+        metrics.intrinsic_height = natural_size_scale.optional_dimension(metrics.intrinsic_height);
+        let default_size = natural_size_scale.size(default_size);
         let inherent_size = concrete_object_size(
             metrics.intrinsic_width,
             metrics.intrinsic_height,
@@ -163,6 +171,50 @@ fn concrete_object_size(
 
 fn valid_dimension(value: Option<f32>) -> Option<f32> {
     value.filter(|value| value.is_finite() && *value >= 0.0)
+}
+
+/// Converts resource-owned natural dimensions into effective-zoom layout
+/// space at the replaced-content boundary.
+///
+/// Blink performs the same conversion while importing image and canvas
+/// natural sizes. Raster image axes use its one-CSS-pixel floor whenever zoom
+/// changes an otherwise non-zero intrinsic dimension.
+#[derive(Clone, Copy, Debug)]
+struct ReplacedNaturalSizeScale {
+    kind: LayoutReplacedKind,
+    factor: f32,
+}
+
+impl ReplacedNaturalSizeScale {
+    fn new(kind: LayoutReplacedKind, factor: f32) -> Self {
+        debug_assert!(factor.is_finite() && factor > 0.0);
+        Self {
+            kind,
+            factor: if factor.is_finite() && factor > 0.0 {
+                factor
+            } else {
+                1.0
+            },
+        }
+    }
+
+    fn size(self, size: Size<f32>) -> Size<f32> {
+        size.map(|dimension| self.dimension(dimension))
+    }
+
+    fn optional_dimension(self, dimension: Option<f32>) -> Option<f32> {
+        dimension.map(|dimension| self.dimension(dimension))
+    }
+
+    fn dimension(self, dimension: f32) -> f32 {
+        let scaled =
+            (f64::from(dimension) * f64::from(self.factor)).min(f64::from(f32::MAX)) as f32;
+        if self.kind == LayoutReplacedKind::Image && self.factor != 1.0 && dimension > 0.0 {
+            scaled.max(1.0)
+        } else {
+            scaled
+        }
+    }
 }
 
 enum Violation {
@@ -517,7 +569,60 @@ mod tests {
                 intrinsic_ratio: Some(1.0),
                 ..ReplacedMetrics::default()
             }),
+            1.0,
         )
+    }
+
+    #[test]
+    fn effective_zoom_moves_natural_and_default_sizes_into_layout_space() {
+        let canvas = ReplacedContext::for_element(
+            LayoutReplacedKind::Canvas,
+            Some(ReplacedMetrics {
+                attribute_width: Some(12.0),
+                attribute_height: Some(8.0),
+                intrinsic_ratio: Some(1.5),
+                ..ReplacedMetrics::default()
+            }),
+            2.5,
+        );
+        assert_eq!(
+            canvas.inherent_size,
+            Size {
+                width: 30.0,
+                height: 20.0,
+            }
+        );
+        assert_eq!(canvas.inherent_ratio, Some(1.5));
+
+        let embedded = ReplacedContext::for_element(LayoutReplacedKind::Embedded, None, 2.5);
+        assert_eq!(
+            embedded.inherent_size,
+            Size {
+                width: 750.0,
+                height: 375.0,
+            }
+        );
+    }
+
+    #[test]
+    fn zoomed_image_axes_preserve_chromiums_one_pixel_floor() {
+        let image = ReplacedContext::for_element(
+            LayoutReplacedKind::Image,
+            Some(ReplacedMetrics {
+                intrinsic_width: Some(2.0),
+                intrinsic_height: Some(0.5),
+                ..ReplacedMetrics::default()
+            }),
+            0.25,
+        );
+        assert_eq!(
+            image.inherent_size,
+            Size {
+                width: 1.0,
+                height: 1.0,
+            }
+        );
+        assert_eq!(image.inherent_ratio, Some(4.0));
     }
 
     fn measure(style: &taffy::Style<Atom>) -> Size<f32> {
