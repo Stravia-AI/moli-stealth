@@ -117,6 +117,10 @@ pub enum LayoutQuery<N> {
     UsedGridTracks {
         source: N,
     },
+    /// CSSOM resolved `width`/`height` for a principal CSS box.
+    UsedBoxSize {
+        source: N,
+    },
     ScrollIntoViewGeometry {
         source: N,
     },
@@ -167,6 +171,7 @@ pub enum LayoutQueryAnswer<N> {
     TextRangeRects(Vec<LayoutQuad>),
     ElementMetrics(Option<LayoutElementMetrics<N>>),
     UsedGridTracks(Option<LayoutResolvedGridTracks>),
+    UsedBoxSize(Option<LayoutSize>),
     ScrollIntoViewGeometry(Option<LayoutScrollIntoViewGeometry<N>>),
     IntersectionGeometry(Option<LayoutIntersectionGeometry>),
     HitTest(Option<LayoutHit<N>>),
@@ -239,6 +244,9 @@ where
                 }
                 LayoutQuery::UsedGridTracks { source } => {
                     LayoutQueryAnswer::UsedGridTracks(self.used_grid_tracks_for_source(*source))
+                }
+                LayoutQuery::UsedBoxSize { source } => {
+                    LayoutQueryAnswer::UsedBoxSize(self.used_box_size_for_source(*source))
                 }
                 LayoutQuery::ScrollIntoViewGeometry { source } => {
                     LayoutQueryAnswer::ScrollIntoViewGeometry(
