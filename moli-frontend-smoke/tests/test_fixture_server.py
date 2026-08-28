@@ -6,9 +6,14 @@ import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import urljoin, urlsplit
 
-from moli_frontend_smoke.fixture_server import FixtureServer
+from moli_frontend_smoke.fixture_server import (
+    FixtureServer,
+    _handle_websocket_connection,
+    _RealtimeState,
+)
 from websockets.sync.client import connect
 
 
@@ -321,6 +326,39 @@ def test_script_and_websocket_fixture_routes(tmp_path: Path) -> None:
         }
     finally:
         server.stop()
+
+
+def test_websocket_fixture_waits_across_runner_checkpoints() -> None:
+    class CheckpointDelayedConnection:
+        def __init__(self) -> None:
+            self.request = SimpleNamespace(
+                path="/support/realtime/socket?scenario=text-order&token=delayed-case"
+            )
+            self.sent: list[str] = []
+            self._received = iter(["alpha", "beta", "client-close"])
+
+        def send(self, message: str) -> None:
+            self.sent.append(message)
+
+        def recv(
+            self,
+            timeout: float | None = None,
+            *,
+            decode: bool | None = None,
+        ) -> str:
+            del decode
+            if timeout is not None:
+                raise TimeoutError("runner checkpoint exceeded fixture-local deadline")
+            return next(self._received)
+
+    connection = CheckpointDelayedConnection()
+    _handle_websocket_connection(connection, _RealtimeState())  # type: ignore[arg-type]
+
+    assert connection.sent == [
+        "server-open:delayed-case",
+        "echo:1:alpha",
+        "echo:2:beta",
+    ]
 
 
 def test_event_source_stream_gate_and_status_are_consumable(tmp_path: Path) -> None:

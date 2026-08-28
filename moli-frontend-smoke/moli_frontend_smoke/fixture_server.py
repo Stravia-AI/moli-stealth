@@ -115,26 +115,28 @@ def _handle_websocket_connection(
 ) -> None:
     scenario, token = _websocket_query(connection)
     state.websocket_opened(token)
+    # Client actions may follow a runner-controlled DOM checkpoint. Keep receives tied
+    # to the connection lifetime; page and runner deadlines own fixture liveness.
     try:
         if scenario == "text-order":
             connection.send(f"server-open:{token}")
             for index in range(1, 3):
-                message = connection.recv(timeout=20)
+                message = connection.recv()
                 connection.send(f"echo:{index}:{message}")
-            connection.recv(timeout=20)
+            connection.recv()
             return
         if scenario == "binary-arraybuffer":
             for _index in range(2):
-                message = connection.recv(timeout=20, decode=False)
+                message = connection.recv(decode=False)
                 assert isinstance(message, bytes)
                 connection.send(bytes(reversed(message)))
-            connection.recv(timeout=20)
+            connection.recv()
             return
         if scenario == "binary-fragmented":
             connection.send([b"\x00\x01", b"\xfe\xff"], text=False)
-            connection.recv(timeout=20)
+            connection.recv()
             connection.send([b"\x10", b"\x20\x30"], text=False)
-            connection.recv(timeout=20)
+            connection.recv()
             return
         if scenario == "subprotocol":
             origin = ""
@@ -152,11 +154,11 @@ def _handle_websocket_connection(
                     sort_keys=True,
                 )
             )
-            connection.recv(timeout=20)
+            connection.recv()
             return
         if scenario == "client-close":
             connection.send(f"client-close-ready:{token}")
-            connection.recv(timeout=20)
+            connection.recv()
             return
         if scenario == "server-close":
             connection.send(f"server-close-ready:{token}")
@@ -164,16 +166,16 @@ def _handle_websocket_connection(
             return
         if scenario == "realm-teardown":
             connection.send(f"realm-ready:{token}")
-            connection.recv(timeout=20)
+            connection.recv()
             return
         if scenario == "coordinated":
             connection.send(f"websocket-ready:{token}")
-            message = connection.recv(timeout=20)
+            message = connection.recv()
             connection.send(f"coordinated:{message}")
-            connection.recv(timeout=20)
+            connection.recv()
             return
         connection.close(1008, "unknown scenario")
-    except (ConnectionClosed, TimeoutError):
+    except ConnectionClosed:
         pass
     finally:
         state.websocket_closed(token)
