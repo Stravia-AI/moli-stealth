@@ -222,7 +222,7 @@ jobs:
         working-directory: moli-benchmark/browser-spider-local
         run: npm test
       - name: Test trusted report helpers
-        run: node --test .github/scripts/wait-for-workflow-artifact.test.cjs
+        run: node --test .github/scripts/*.test.cjs
 
   build-release-head:
     name: Build release · HEAD

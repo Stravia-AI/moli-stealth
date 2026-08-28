@@ -1,0 +1,184 @@
+name: CI Regression Report
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [in_progress]
+
+concurrency:
+  group: ci-regression-report-${{ github.event.workflow_run.pull_requests[0].number || github.event.workflow_run.id }}
+  cancel-in-progress: true
+
+# This trusted default-branch workflow never executes code from the PR. It waits
+# for immutable v4 artifacts, parses only bounded fields, and upserts one report.
+permissions:
+  actions: read
+  contents: read
+  pull-requests: write
+
+jobs:
+  comment:
+    name: Publish aggregate regression report
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.pull_requests[0].head.repo.id == github.event.repository.id &&
+      github.event.workflow_run.actor.login != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout trusted report renderer
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Wait for aggregate evidence
+        id: wait
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          ARTIFACT_NAMES: >-
+            ["release-regression-results","frontend-differential-results","agent-episode-results","runtime-contract-results","cdp-smoke-diagnostics"]
+        with:
+          retries: 3
+          script: |
+            const helper = require('./.github/scripts/wait-for-workflow-artifact.cjs');
+            await helper.waitForWorkflowArtifacts({
+              github,
+              context,
+              core,
+              artifactNames: JSON.parse(process.env.ARTIFACT_NAMES),
+            });
+
+      - name: Download release regression evidence
+        if: contains(fromJSON(steps.wait.outputs.available_artifacts), 'release-regression-results')
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-regression-results
+          path: ci-regression-artifacts/release
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Download frontend differential evidence
+        if: contains(fromJSON(steps.wait.outputs.available_artifacts), 'frontend-differential-results')
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: frontend-differential-results
+          path: ci-regression-artifacts/frontend
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Download agent episode evidence
+        if: contains(fromJSON(steps.wait.outputs.available_artifacts), 'agent-episode-results')
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: agent-episode-results
+          path: ci-regression-artifacts/agent
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Download runtime contract evidence
+        if: contains(fromJSON(steps.wait.outputs.available_artifacts), 'runtime-contract-results')
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: runtime-contract-results
+          path: ci-regression-artifacts/runtime
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Download CDP smoke evidence
+        if: contains(fromJSON(steps.wait.outputs.available_artifacts), 'cdp-smoke-diagnostics')
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: cdp-smoke-diagnostics
+          path: ci-regression-artifacts/cdp
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
+
+      - name: Install Node.js
+        if: steps.wait.outputs.conclusion != 'cancelled'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24.15.0
+
+      - name: Render trusted aggregate report
+        if: steps.wait.outputs.conclusion != 'cancelled'
+        env:
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }}
+          CONCLUSION: ${{ steps.wait.outputs.conclusion || 'in_progress' }}
+        run: >-
+          node .github/scripts/render-ci-regression-comment.cjs
+          --release ci-regression-artifacts/release
+          --frontend ci-regression-artifacts/frontend
+          --agent ci-regression-artifacts/agent
+          --runtime ci-regression-artifacts/runtime
+          --cdp ci-regression-artifacts/cdp
+          --run-url "$RUN_URL"
+          --conclusion "$CONCLUSION"
+          --output ci-regression-comment.md
+
+      - name: Publish Actions report
+        if: steps.wait.outputs.conclusion != 'cancelled'
+        run: cat ci-regression-comment.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Post PR regression comment
+        if: steps.wait.outputs.conclusion != 'cancelled'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          COMMENT_PATH: ci-regression-comment.md
+        with:
+          script: |
+            const fs = require('fs');
+            const run = context.payload.workflow_run;
+            const association = run.pull_requests?.[0];
+            if (!association) {
+              core.notice('No pull request is associated with this workflow run.');
+              return;
+            }
+
+            const pull = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: association.number,
+            });
+            if (pull.data.head.sha !== association.head.sha) {
+              core.notice('Skipping a stale CI regression report for an older PR head.');
+              return;
+            }
+
+            const body = fs.readFileSync(process.env.COMMENT_PATH, 'utf8');
+            const marker = '<!-- moli-ci-regression-report -->';
+            if (!body.includes(marker) || Buffer.byteLength(body, 'utf8') > 32 * 1024) {
+              core.setFailed('Rendered CI regression report is missing its marker or exceeds 32 KiB.');
+              return;
+            }
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: association.number,
+              per_page: 100,
+            });
+            const existing = comments.find(
+              (comment) =>
+                comment.user?.login === 'github-actions[bot]' &&
+                comment.body?.includes(marker)
+            );
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: association.number,
+                body,
+              });
+            }

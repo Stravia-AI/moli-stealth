@@ -5,6 +5,8 @@ const test = require('node:test');
 
 const {
   pollWorkflowArtifact,
+  pollWorkflowArtifacts,
+  waitForWorkflowArtifacts,
 } = require('./wait-for-workflow-artifact.cjs');
 
 test('returns as soon as the requested artifact is available', async () => {
@@ -72,4 +74,85 @@ test('ignores expired artifacts and eventually times out', async () => {
   });
 
   assert.deepEqual(result, { artifactAvailable: false, conclusion: 'timed_out' });
+});
+
+test('waits until every requested artifact is available', async () => {
+  let artifactLookups = 0;
+  let sleeps = 0;
+  const result = await pollWorkflowArtifacts({
+    artifactNames: ['release-results', 'frontend-results'],
+    listArtifacts: async () => {
+      artifactLookups += 1;
+      return artifactLookups === 1
+        ? [{ name: 'release-results', expired: false }]
+        : [
+            { name: 'release-results', expired: false },
+            { name: 'frontend-results', expired: false },
+          ];
+    },
+    getWorkflowRun: async () => ({ status: 'in_progress', conclusion: null }),
+    now: () => 0,
+    sleep: async () => {
+      sleeps += 1;
+    },
+  });
+
+  assert.deepEqual(result, {
+    availableArtifacts: ['release-results', 'frontend-results'],
+    missingArtifacts: [],
+    conclusion: '',
+  });
+  assert.equal(sleeps, 1);
+});
+
+test('retains partial artifact availability when the workflow completes', async () => {
+  const result = await pollWorkflowArtifacts({
+    artifactNames: ['release-results', 'frontend-results', 'cdp-results'],
+    listArtifacts: async () => [
+      { name: 'release-results', expired: false },
+      { name: 'frontend-results', expired: true },
+    ],
+    getWorkflowRun: async () => ({ status: 'completed', conclusion: 'failure' }),
+  });
+
+  assert.deepEqual(result, {
+    availableArtifacts: ['release-results'],
+    missingArtifacts: ['frontend-results', 'cdp-results'],
+    conclusion: 'failure',
+  });
+});
+
+test('publishes bounded aggregate artifact outputs', async () => {
+  const outputs = new Map();
+  const notices = [];
+  await waitForWorkflowArtifacts({
+    github: {
+      rest: {
+        actions: {
+          listWorkflowRunArtifacts: async () => ({
+            data: { artifacts: [{ name: 'release-results', expired: false }] },
+          }),
+          getWorkflowRun: async () => ({
+            data: { status: 'completed', conclusion: 'success' },
+          }),
+        },
+      },
+    },
+    context: {
+      payload: { workflow_run: { id: 123 } },
+      repo: { owner: 'lexmount', repo: 'moli' },
+    },
+    core: {
+      setOutput: (name, value) => outputs.set(name, value),
+      notice: (message) => notices.push(message),
+    },
+    artifactNames: ['release-results', 'frontend-results'],
+  });
+
+  assert.equal(outputs.get('available_artifacts'), '["release-results"]');
+  assert.equal(outputs.get('missing_artifacts'), '["frontend-results"]');
+  assert.equal(outputs.get('all_available'), 'false');
+  assert.equal(outputs.get('conclusion'), 'success');
+  assert.equal(notices.length, 1);
+  assert.match(notices[0], /frontend-results/);
 });
