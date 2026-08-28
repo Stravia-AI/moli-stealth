@@ -47,6 +47,7 @@ mod query;
 mod registered_properties;
 mod request;
 mod retained;
+mod root_device;
 pub(crate) use stylesheet::{
     NativeStylesheetFontFaceProjection, NativeStylesheetFontFaceRuleProjection,
     StylesheetFontFaceProjection, StylesheetFontFaceRuleProjection,

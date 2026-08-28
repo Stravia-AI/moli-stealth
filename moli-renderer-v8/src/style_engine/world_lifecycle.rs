@@ -129,6 +129,8 @@ pub(super) fn ensure_retained_style_system(
             update_retained_style_system(
                 retained,
                 host,
+                dom_adapter,
+                retained_document,
                 key.clone(),
                 inputs,
                 &shared_lock,
@@ -247,6 +249,7 @@ pub(super) fn ensure_retained_style_system_incrementally(
         update_retained_style_system_incrementally(
             retained,
             host,
+            dom_adapter,
             retained_document,
             next_key,
             update,

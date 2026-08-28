@@ -1,3 +1,4 @@
+use moli_selector::StyloDomStyleAdapter;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use style::{
@@ -14,6 +15,7 @@ use crate::{document_runtime::DomHandle, dom::native::DomHost};
 use super::{
     CssCustomPropertyRegistrationRecord, FullStyleWorldSnapshot,
     active_stylesheets::{notify_document_stylesheet_rule_changes, update_document_stylesheet_set},
+    root_device::initialize_from_retained_document_root,
     shadow_scopes::{ShadowScopeStyles, reconcile_dirty_shadow_scopes, reconcile_shadow_scopes},
     source::store::StyloStylesheetSource,
     source_cascade::{build_source_cascade_data, update_source_cascade_data_for_scopes},
@@ -189,6 +191,8 @@ pub(super) fn build_retained_style_system(
 pub(super) fn update_retained_style_system(
     retained: &mut RetainedStyleSystem,
     host: &DomHost,
+    dom_adapter: &StyloDomStyleAdapter,
+    document: DomHandle,
     key: StyleWorldKey,
     inputs: &FullStyleWorldSnapshot,
     shared_lock: &SharedRwLock,
@@ -198,6 +202,8 @@ pub(super) fn update_retained_style_system(
     let document_update = update_document_scope(
         retained,
         host,
+        dom_adapter,
+        document,
         &key,
         shared_lock,
         Some(&inputs.document_stylesheet_sources),
@@ -247,6 +253,7 @@ pub(super) fn update_retained_style_system(
 pub(super) fn update_retained_style_system_incrementally(
     retained: &mut RetainedStyleSystem,
     host: &DomHost,
+    dom_adapter: &StyloDomStyleAdapter,
     document: DomHandle,
     key: StyleWorldKey,
     update: &IncrementalStyleWorldUpdate,
@@ -259,6 +266,8 @@ pub(super) fn update_retained_style_system_incrementally(
     let document_update = update_document_scope(
         retained,
         host,
+        dom_adapter,
+        document,
         &key,
         shared_lock,
         update.document_stylesheet_sources.as_deref(),
@@ -333,6 +342,8 @@ struct DocumentScopeUpdate {
 fn update_document_scope(
     retained: &mut RetainedStyleSystem,
     host: &DomHost,
+    dom_adapter: &StyloDomStyleAdapter,
+    document: DomHandle,
     key: &StyleWorldKey,
     shared_lock: &SharedRwLock,
     stylesheet_sources: Option<&[StyloStylesheetSource]>,
@@ -389,6 +400,7 @@ fn update_document_scope(
             key.environment,
             key.quirks_mode,
         );
+        initialize_from_retained_document_root(&device, host, dom_adapter, document);
         let guard = shared_lock.read();
         let guards = StylesheetGuards::same(&guard);
         device_affected_origins = retained.stylist.set_device(device, &guards);

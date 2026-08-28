@@ -46,6 +46,7 @@ use super::{
     StyleWorldUpdate, StyleWorldUpdatePlan,
     cache::ComputedElementStyleCacheKey,
     document_world::DocumentStyleWorld,
+    root_device::publish_resolved_root_style,
     source_lifecycle::StyleSourceDocumentContext,
     world_key::StyleWorldKey,
     world_lifecycle::{
@@ -879,6 +880,7 @@ fn resolve_element_styles(
             pseudo_element,
             None,
         );
+        publish_resolved_root_style(context.shared.stylist.device(), styles.primary());
         std::mem::swap(
             &mut context.thread_local.selector_caches,
             &mut retained_selector_caches,
@@ -917,6 +919,7 @@ where
             ancestor.ensure_data().styles = ElementStyles::default();
         }
         let styles = resolve_style(context, ancestor, RuleInclusion::All, None, None);
+        publish_resolved_root_style(context.shared.stylist.device(), styles.primary());
         resolution_count = resolution_count.saturating_add(1);
         unsafe {
             let mut data = ancestor.ensure_data();

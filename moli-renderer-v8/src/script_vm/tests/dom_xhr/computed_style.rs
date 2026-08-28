@@ -4516,6 +4516,166 @@ fn computed_width_resolves_percent_against_parent_and_child_frame_viewport() {
 }
 
 #[test]
+fn layout_resolves_root_font_relative_units_from_the_document_root_style() {
+    let mut vm = new_parsed_test_vm(
+        "https://layout-root-font-relative.test/",
+        r#"<html style="font-size:30px;line-height:1.5"><head></head><body style="width:520px;margin:0"><div id="target" style="width:calc(5% + 4rem);height:1rlh"></div></body></html>"#,
+    );
+
+    refresh_layout_for_test(&mut vm);
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const target = document.getElementById('target');
+  const rect = target.getBoundingClientRect();
+  return [getComputedStyle(document.documentElement).fontSize,
+          getComputedStyle(target).width,
+          getComputedStyle(target).height,
+          rect.width,
+          rect.height].join('|');
+})()
+"#,
+        )
+        .expect("root font-relative layout probe should evaluate");
+
+    assert_eq!(result, "30px|146px|45px|146|45");
+
+    let updated_result = vm
+        .eval(
+            r#"
+(() => {
+  document.documentElement.style.fontSize = '20px';
+  const target = document.getElementById('target');
+  target.style.width = '10rem';
+  return [document.documentElement.style.fontSize,
+          getComputedStyle(document.documentElement).fontSize,
+          getComputedStyle(target).width].join('|');
+})()
+"#,
+        )
+        .expect("updated root font-relative computed-style probe should evaluate");
+
+    assert_eq!(
+        updated_result, "20px|20px|200px",
+        "a fresh root style must publish its rem basis before resolving descendants"
+    );
+
+    refresh_layout_for_test(&mut vm);
+    assert_eq!(
+        vm.eval("getComputedStyle(document.getElementById('target')).width")
+            .expect("refreshed root font-relative computed style should evaluate"),
+        "200px"
+    );
+}
+
+#[test]
+fn root_non_font_properties_use_the_computed_root_font_bases() {
+    let mut vm = new_parsed_test_vm(
+        "https://root-font-relative-style.test/",
+        r#"<html style="font-size:50px;line-height:73px;margin-left:2rem;padding-left:2rlh"><head></head><body></body></html>"#,
+    );
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const style = getComputedStyle(document.documentElement);
+  return [style.marginLeft, style.paddingLeft, style.fontSize, style.lineHeight].join('|');
+})()
+"#,
+        )
+        .expect("root font-relative computed-style probe should evaluate");
+
+    assert_eq!(result, "100px|146px|50px|73px");
+}
+
+#[test]
+fn root_font_metric_units_refresh_after_root_style_changes() {
+    let mut vm = new_parsed_test_vm(
+        "https://root-font-metrics.test/",
+        r#"<html style="font-family:Ahem;font-size:20px"><head></head><body><div id="target" style="width:1rch"></div></body></html>"#,
+    );
+
+    let updated_result = vm
+        .eval(
+            r#"
+(() => {
+  const target = document.getElementById('target');
+  const before = getComputedStyle(target).width;
+  document.documentElement.style.fontSize = '30px';
+  const after = getComputedStyle(target).width;
+  return [before, after].join('|');
+})()
+"#,
+        )
+        .expect("root font-metric unit restyle probe should evaluate");
+
+    assert_eq!(
+        updated_result, "20px|30px",
+        "a fresh root style must refresh root font metrics before resolving descendants"
+    );
+
+    refresh_layout_for_test(&mut vm);
+    assert_eq!(
+        vm.eval("getComputedStyle(document.getElementById('target')).width")
+            .expect("refreshed root font-metric unit style should evaluate"),
+        "30px"
+    );
+}
+
+#[test]
+fn replacement_device_inherits_retained_root_font_bases() {
+    let mut vm = new_parsed_test_vm(
+        "https://replacement-device-root-font.test/",
+        r#"<html style="font-size:30px"><head></head><body><div id="warm" style="margin-left:4rem"></div></body></html>"#,
+    );
+    let surface = |inner_width, inner_height| crate::protocol_types::ViewportSurface {
+        inner_width,
+        inner_height,
+        outer_width: inner_width,
+        outer_height: inner_height,
+        device_pixel_ratio: 1.0,
+        screen_width: 1920,
+        screen_height: 1080,
+        screen_avail_width: 1920,
+        screen_avail_height: 1040,
+    };
+    vm.set_viewport_surface(Some(surface(800, 600)))
+        .expect("initial viewport surface should update");
+
+    assert_eq!(
+        vm.eval("getComputedStyle(document.getElementById('warm')).marginLeft")
+            .expect("initial root font-relative style should evaluate"),
+        "120px"
+    );
+    let document = vm.document_handle_for_test();
+    let stylist = vm.retained_stylist_identity_for_document_for_test(document);
+
+    vm.set_viewport_surface(Some(surface(1000, 700)))
+        .expect("replacement viewport surface should update");
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const target = document.createElement('div');
+  target.style.marginLeft = '4rem';
+  document.body.appendChild(target);
+  return getComputedStyle(target).marginLeft;
+})()
+"#,
+        )
+        .expect("new descendant should use the retained root font basis");
+
+    assert_eq!(result, "120px");
+    assert_eq!(
+        vm.retained_stylist_identity_for_document_for_test(document),
+        stylist,
+        "a Device update should preserve the retained Stylist"
+    );
+}
+
+#[test]
 fn transformed_oversized_inline_iframe_uses_its_containing_block_percentage_basis() {
     let mut vm = new_storage_test_vm("https://inline-iframe-percentage-size.test/");
 
