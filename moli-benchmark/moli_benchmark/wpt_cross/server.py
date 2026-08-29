@@ -880,10 +880,10 @@ def _pipe_trickle_delay_seconds(query: str) -> float:
     return min(delay, _MAX_TRICKLE_DELAY_SECONDS)
 
 
-def _pipe_response_headers(query: str) -> list[tuple[str, str]]:
-    """Return simple WPT ``pipe=header(Name,Value)`` response headers."""
+def _pipe_response_header_operations(query: str) -> list[tuple[str, str, bool]]:
+    """Parse WPT ``pipe=header(Name,Value[,Append])`` operations."""
 
-    headers: list[tuple[str, str]] = []
+    operations: list[tuple[str, str, bool]] = []
     for name, value in parse_qsl(query, keep_blank_values=True):
         if name != "pipe":
             continue
@@ -892,10 +892,52 @@ def _pipe_response_headers(query: str) -> list[tuple[str, str]]:
             if match is None:
                 continue
             header_name = match.group(1).strip()
-            header_value = match.group(2).strip()
+            raw_header_value = match.group(2)
+            header_value_without_append, separator, raw_append = (
+                raw_header_value.rpartition(",")
+            )
+            normalized_append = raw_append.strip().lower()
+            has_append_argument = separator != "" and normalized_append in {
+                "true",
+                "false",
+                "1",
+                "0",
+            }
+            append = has_append_argument and normalized_append in {"true", "1"}
+            if has_append_argument:
+                raw_header_value = header_value_without_append
+            # wptserve writes pipe values byte-for-byte, including encoded
+            # CR/LF used by parser tests. Python's static HTTP server cannot
+            # safely do that, so preserve their whitespace semantics without
+            # allowing a query string to inject another response header.
+            header_value = (
+                raw_header_value.strip().replace("\r", " ").replace("\n", " ")
+            )
             if _valid_static_response_header(header_name, header_value):
-                headers.append((header_name, header_value))
+                operations.append((header_name, header_value, append))
+    return operations
+
+
+def _apply_header_operations(
+    headers: list[tuple[str, str]],
+    operations: list[tuple[str, str, bool]],
+) -> list[tuple[str, str]]:
+    for header_name, header_value, append in operations:
+        if not append:
+            normalized_name = header_name.lower()
+            headers = [
+                (name, value)
+                for name, value in headers
+                if name.lower() != normalized_name
+            ]
+        headers.append((header_name, header_value))
     return headers
+
+
+def _pipe_response_headers(query: str) -> list[tuple[str, str]]:
+    """Return WPT ``pipe=header(Name,Value[,Append])`` response headers."""
+
+    return _apply_header_operations([], _pipe_response_header_operations(query))
 
 
 def _pipe_response_status(query: str) -> int | None:
@@ -1108,10 +1150,10 @@ def _static_response_headers(
     request_hostname: str = "localhost",
     primary_hostname: str | None = None,
 ) -> list[tuple[str, str]]:
-    headers = [
-        *_sidecar_response_headers(file_path),
-        *_pipe_response_headers(query),
-    ]
+    headers = _apply_header_operations(
+        _sidecar_response_headers(file_path),
+        _pipe_response_header_operations(query),
+    )
     if port is None:
         return headers
     template_ids: dict[bytes, bytes] = {}

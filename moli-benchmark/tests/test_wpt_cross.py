@@ -4182,10 +4182,27 @@ test(() => {}, "ok");
             ),
             [("Access-Control-Allow-Origin", "*"), ("X-Test", "ok")],
         )
+        self.assertEqual(
+            _pipe_response_headers(
+                "pipe=header(Content-Security-Policy,first)"
+                "|header(Content-Security-Policy,second,True)"
+            ),
+            [
+                ("Content-Security-Policy", "first"),
+                ("Content-Security-Policy", "second"),
+            ],
+        )
+        self.assertEqual(
+            _pipe_response_headers(
+                "pipe=header(Content-Security-Policy,first)"
+                "|header(Content-Security-Policy,second,False)"
+            ),
+            [("Content-Security-Policy", "second")],
+        )
         self.assertEqual(_pipe_response_headers("pipe=header(Bad Header,ok)"), [])
         self.assertEqual(
             _pipe_response_headers("pipe=header(X-Test,bad%0D%0AInjected:%20x)"),
-            [],
+            [("X-Test", "bad  Injected: x")],
         )
         self.assertEqual(_pipe_response_headers("notpipe=header(X,Y)"), [])
 
@@ -4327,6 +4344,26 @@ test(() => {}, "ok");
                 [
                     ("Content-Security-Policy", "script-src 'self'"),
                     ("X-Test", "ok"),
+                ],
+            )
+            self.assertEqual(
+                _static_response_headers(
+                    fixture,
+                    "pipe=header(Content-Security-Policy,script-src 'none',False)",
+                ),
+                [("Content-Security-Policy", "script-src 'none'")],
+            )
+            self.assertEqual(
+                _static_response_headers(
+                    fixture,
+                    "pipe=header(Content-Security-Policy,require-trusted-types-for 'script',True)",
+                ),
+                [
+                    ("Content-Security-Policy", "script-src 'self'"),
+                    (
+                        "Content-Security-Policy",
+                        "require-trusted-types-for 'script'",
+                    ),
                 ],
             )
 
