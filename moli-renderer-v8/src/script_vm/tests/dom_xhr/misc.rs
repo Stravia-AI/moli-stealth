@@ -1719,6 +1719,26 @@ fn dom_rect_readonly_is_constructible_and_to_json_uses_the_function_realm() {
 }
 
 #[test]
+fn dom_rect_bounds_propagate_nan_components() {
+    let mut vm = new_storage_test_vm("https://domrect-nan-bounds.test/");
+
+    let result = vm
+        .eval(
+            r#"
+(() => [DOMRect, DOMRectReadOnly].every(Rect => {
+  const width = new Rect(0, 0, NaN, 0).toJSON();
+  const height = new Rect(0, 0, 0, NaN).toJSON();
+  return Number.isNaN(width.left) && Number.isNaN(width.right) &&
+    Number.isNaN(height.top) && Number.isNaN(height.bottom);
+}))()
+"#,
+        )
+        .expect("DOMRect NaN bounds should evaluate");
+
+    assert_eq!(result, "true");
+}
+
+#[test]
 fn geometry_domrect_private_slots_ignore_reflection_and_spoofing() {
     let mut vm = new_storage_test_vm("https://geometry-domrect-private-slots.test/");
 

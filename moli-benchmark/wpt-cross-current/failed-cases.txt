@@ -2642,7 +2642,6 @@ css/geometry/DOMQuad-001.html
 css/geometry/DOMQuad-002.html
 css/geometry/DOMQuad-nan.html
 css/geometry/DOMRect-002.html
-css/geometry/DOMRect-nan.html
 css/geometry/DOMRectList.html
 css/geometry/WebKitCSSMatrix.html
 css/geometry/historical.html

@@ -421,23 +421,39 @@ fn dom_rect_readonly_attribute_value<'s>(
         DomRectReadonlyAttribute::Top => {
             let y = dom_rect_slot(object, scope, DOM_RECT_Y_SLOT);
             let height = dom_rect_slot(object, scope, DOM_RECT_HEIGHT_SLOT);
-            y.min(y + height)
+            dom_rect_min(y, y + height)
         }
         DomRectReadonlyAttribute::Right => {
             let x = dom_rect_slot(object, scope, DOM_RECT_X_SLOT);
             let width = dom_rect_slot(object, scope, DOM_RECT_WIDTH_SLOT);
-            x.max(x + width)
+            dom_rect_max(x, x + width)
         }
         DomRectReadonlyAttribute::Bottom => {
             let y = dom_rect_slot(object, scope, DOM_RECT_Y_SLOT);
             let height = dom_rect_slot(object, scope, DOM_RECT_HEIGHT_SLOT);
-            y.max(y + height)
+            dom_rect_max(y, y + height)
         }
         DomRectReadonlyAttribute::Left => {
             let x = dom_rect_slot(object, scope, DOM_RECT_X_SLOT);
             let width = dom_rect_slot(object, scope, DOM_RECT_WIDTH_SLOT);
-            x.min(x + width)
+            dom_rect_min(x, x + width)
         }
+    }
+}
+
+fn dom_rect_min(lhs: f64, rhs: f64) -> f64 {
+    if lhs.is_nan() || rhs.is_nan() {
+        f64::NAN
+    } else {
+        lhs.min(rhs)
+    }
+}
+
+fn dom_rect_max(lhs: f64, rhs: f64) -> f64 {
+    if lhs.is_nan() || rhs.is_nan() {
+        f64::NAN
+    } else {
+        lhs.max(rhs)
     }
 }
 
