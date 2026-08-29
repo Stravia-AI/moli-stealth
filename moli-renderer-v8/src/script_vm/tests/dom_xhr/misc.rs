@@ -1666,6 +1666,59 @@ fn geometry_rect_objects_expose_domrect_to_json() {
 }
 
 #[test]
+fn dom_rect_readonly_is_constructible_and_to_json_uses_the_function_realm() {
+    let mut vm = new_storage_test_vm("https://domrect-readonly-constructor.test/");
+
+    vm.eval(
+        r#"
+(() => {
+  const root = document.documentElement ||
+    document.appendChild(document.createElement("html"));
+  const body = document.body || root.appendChild(document.createElement("body"));
+  const frame = document.createElement("iframe");
+  frame.id = "domrect-readonly-realm";
+  body.appendChild(frame);
+})()
+"#,
+    )
+    .expect("DOMRectReadOnly child frame should be created");
+    materialize_single_child_default_realm_for_test(&mut vm, "DOMRectReadOnly toJSON child Realm");
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const other = document.getElementById("domrect-readonly-realm").contentWindow;
+  const rect = new DOMRectReadOnly(1, 2, 3, 4);
+  const json = other.DOMRectReadOnly.prototype.toJSON.call(rect);
+  let callError;
+  try {
+    other.DOMRectReadOnly();
+  } catch (error) {
+    callError = [error.name, error instanceof other.TypeError].join(":");
+  }
+  return [
+    rect instanceof DOMRectReadOnly,
+    rect instanceof DOMRect,
+    [rect.x, rect.y, rect.width, rect.height, rect.top, rect.right,
+      rect.bottom, rect.left].join(","),
+    Object.getPrototypeOf(json) === other.Object.prototype,
+    Object.getPrototypeOf(json) === Object.prototype,
+    JSON.stringify(json),
+    callError
+  ].join("|");
+})()
+"#,
+        )
+        .expect("DOMRectReadOnly constructor and cross-Realm toJSON should evaluate");
+
+    assert_eq!(
+        result,
+        "true|false|1,2,3,4,2,4,6,1|true|false|{\"x\":1,\"y\":2,\"width\":3,\"height\":4,\"top\":2,\"right\":4,\"bottom\":6,\"left\":1}|TypeError:true"
+    );
+}
+
+#[test]
 fn geometry_domrect_private_slots_ignore_reflection_and_spoofing() {
     let mut vm = new_storage_test_vm("https://geometry-domrect-private-slots.test/");
 

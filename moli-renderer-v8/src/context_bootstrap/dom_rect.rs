@@ -25,6 +25,22 @@ struct DomRectObjectDeclaration {
     height: f64,
 }
 
+#[derive(WebApiObject)]
+#[webapi(interface = "DOMRectReadOnly")]
+struct DomRectReadOnlyObjectDeclaration {
+    #[webapi(slot = DOM_RECT_BRAND_SLOT, init = true)]
+    brand: (),
+
+    #[webapi(slot = DOM_RECT_X_SLOT)]
+    x: f64,
+    #[webapi(slot = DOM_RECT_Y_SLOT)]
+    y: f64,
+    #[webapi(slot = DOM_RECT_WIDTH_SLOT)]
+    width: f64,
+    #[webapi(slot = DOM_RECT_HEIGHT_SLOT)]
+    height: f64,
+}
+
 #[derive(WebApiFunctionTemplate)]
 #[webapi(name = "DOMRectReadOnly")]
 struct DomRectReadOnlyPrototypeDeclaration {
@@ -167,6 +183,45 @@ struct DomRectConstructorArgs {
     height: f64,
 }
 
+#[derive(webidl::WebIdlArgs)]
+#[webidl(prefix = "DOMRectReadOnly")]
+struct DomRectReadOnlyConstructorArgs {
+    #[webidl(default = 0.0)]
+    x: f64,
+    #[webidl(default = 0.0)]
+    y: f64,
+    #[webidl(default = 0.0)]
+    width: f64,
+    #[webidl(default = 0.0)]
+    height: f64,
+}
+
+pub(super) fn dom_rect_readonly_constructor_callback<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'_, v8::Value>,
+) {
+    if !args.is_construct_call() {
+        throw_type_error(
+            scope,
+            "Failed to construct 'DOMRectReadOnly': Please use the 'new' operator.",
+        );
+        return;
+    }
+    let Some(parsed) = webidl::parse_args::<DomRectReadOnlyConstructorArgs>(scope, &args) else {
+        return;
+    };
+    initialize_dom_rect_readonly_object(
+        scope,
+        args.this(),
+        parsed.x,
+        parsed.y,
+        parsed.width,
+        parsed.height,
+    );
+    rv.set(args.this().into());
+}
+
 pub(super) fn dom_rect_constructor_callback<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     args: v8::FunctionCallbackArguments<'s>,
@@ -216,6 +271,19 @@ fn initialize_dom_rect_object<'s>(
     DomRectObjectDeclaration::new(x, y, width, height)
         .bind_into(scope, object)
         .expect("DOMRect declaration should initialize object");
+}
+
+fn initialize_dom_rect_readonly_object<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    object: v8::Local<'s, v8::Object>,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) {
+    DomRectReadOnlyObjectDeclaration::new(x, y, width, height)
+        .bind_into(scope, object)
+        .expect("DOMRectReadOnly declaration should initialize object");
 }
 
 pub(in crate::context_bootstrap) fn install_dom_rect_template_bindings<'s>(
