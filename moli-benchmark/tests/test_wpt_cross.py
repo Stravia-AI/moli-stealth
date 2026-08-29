@@ -113,6 +113,7 @@ from moli_benchmark.wpt_cross.server import (
     BENCH_TIMEOUT_MULTIPLIER_QUERY,
     WptFixtureServer,
     ResultsStore,
+    _apply_header_operations,
     _asis_response_parts,
     _any_js_window_wrapper,
     _bench_report_bridge,
@@ -124,7 +125,7 @@ from moli_benchmark.wpt_cross.server import (
     _normalize_harness_case_key,
     _needs_wpt_template_substitution,
     _legacy_wpt_resource_alias,
-    _pipe_response_headers,
+    _pipe_response_header_operations,
     _pipe_response_status,
     _pipe_trickle_delay_seconds,
     _redirect_fixture_response,
@@ -4176,14 +4177,19 @@ test(() => {}, "ok");
                     connection.close()
 
     def test_fixture_server_parses_wpt_header_pipe(self) -> None:
+        def applied_pipe_headers(query: str) -> list[tuple[str, str]]:
+            return _apply_header_operations(
+                [], _pipe_response_header_operations(query)
+            )
+
         self.assertEqual(
-            _pipe_response_headers(
+            applied_pipe_headers(
                 "pipe=header(Access-Control-Allow-Origin,*)|header(X-Test,ok)"
             ),
             [("Access-Control-Allow-Origin", "*"), ("X-Test", "ok")],
         )
         self.assertEqual(
-            _pipe_response_headers(
+            applied_pipe_headers(
                 "pipe=header(Content-Security-Policy,first)"
                 "|header(Content-Security-Policy,second,True)"
             ),
@@ -4193,18 +4199,18 @@ test(() => {}, "ok");
             ],
         )
         self.assertEqual(
-            _pipe_response_headers(
+            applied_pipe_headers(
                 "pipe=header(Content-Security-Policy,first)"
                 "|header(Content-Security-Policy,second,False)"
             ),
             [("Content-Security-Policy", "second")],
         )
-        self.assertEqual(_pipe_response_headers("pipe=header(Bad Header,ok)"), [])
+        self.assertEqual(applied_pipe_headers("pipe=header(Bad Header,ok)"), [])
         self.assertEqual(
-            _pipe_response_headers("pipe=header(X-Test,bad%0D%0AInjected:%20x)"),
+            applied_pipe_headers("pipe=header(X-Test,bad%0D%0AInjected:%20x)"),
             [("X-Test", "bad  Injected: x")],
         )
-        self.assertEqual(_pipe_response_headers("notpipe=header(X,Y)"), [])
+        self.assertEqual(applied_pipe_headers("notpipe=header(X,Y)"), [])
 
     def test_fixture_server_parses_wpt_status_pipe(self) -> None:
         self.assertEqual(_pipe_response_status("pipe=status(204)&cachebust=1"), 204)

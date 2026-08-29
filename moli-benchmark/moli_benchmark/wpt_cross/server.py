@@ -934,12 +934,6 @@ def _apply_header_operations(
     return headers
 
 
-def _pipe_response_headers(query: str) -> list[tuple[str, str]]:
-    """Return WPT ``pipe=header(Name,Value[,Append])`` response headers."""
-
-    return _apply_header_operations([], _pipe_response_header_operations(query))
-
-
 def _pipe_response_status(query: str) -> int | None:
     """Return a valid WPT ``pipe=status(NNN)`` response status, if present."""
 
