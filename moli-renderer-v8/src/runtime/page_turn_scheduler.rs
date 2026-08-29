@@ -12,6 +12,8 @@
 //! identifies or authorizes work for the current document. Typed queued work
 //! must carry and validate its exact execution-context/document identity.
 
+#[cfg(test)]
+use crate::page_task_queue::RendererPageTimerSelection;
 use crate::page_task_queue::{
     RendererOwnerWakeSource, RendererPageReadyDescriptor, RendererPageTaskSourceKind,
 };
@@ -1008,6 +1010,7 @@ mod tests {
             },
             RendererPageTaskSourceKind::Timer => RendererPageReadyDescriptor::Timer {
                 deadline: runnable_since,
+                selection: RendererPageTimerSelection::AnyReady,
             },
             RendererPageTaskSourceKind::DomManipulation => {
                 broadcast_channel_descriptor(runnable_since, order)
@@ -1436,7 +1439,10 @@ mod tests {
         let selected = scheduler
             .select_ready_descriptor([
                 dynamic_import_descriptor(base + std::time::Duration::from_millis(2), 1),
-                RendererPageReadyDescriptor::Timer { deadline: base },
+                RendererPageReadyDescriptor::Timer {
+                    deadline: base,
+                    selection: RendererPageTimerSelection::AnyReady,
+                },
             ])
             .expect("one ready descriptor should be selected");
 
@@ -1469,6 +1475,7 @@ mod tests {
                 dynamic_import_descriptor(runnable_at, 1),
                 RendererPageReadyDescriptor::Timer {
                     deadline: runnable_at,
+                    selection: RendererPageTimerSelection::AnyReady,
                 },
             ])
             .expect("one tied descriptor should be selected");
@@ -1514,6 +1521,7 @@ mod tests {
                 resource_descriptor(base + std::time::Duration::from_millis(2), 3),
                 RendererPageReadyDescriptor::Timer {
                     deadline: base + std::time::Duration::from_millis(3),
+                    selection: RendererPageTimerSelection::AnyReady,
                 },
                 broadcast_channel_descriptor(base + std::time::Duration::from_millis(4), 4),
                 window_message_descriptor(base + std::time::Duration::from_millis(5), 5),

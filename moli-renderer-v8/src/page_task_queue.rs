@@ -361,7 +361,7 @@ pub(crate) use self::owner_sources::{
 };
 pub(crate) use self::owner_sources::{
     RendererPageOwnedTaskSources, RendererPageReadyDescriptor, RendererPageSchedulerTask,
-    RendererPageTaskProducerRoutes, RendererPageTaskSourceKind,
+    RendererPageTaskProducerRoutes, RendererPageTaskSourceKind, RendererPageTimerSelection,
 };
 pub(crate) use self::parser_async_module_admission::{
     PageParserAsyncModuleAdmissionTargetEffect, PageParserAsyncModuleAdmissionTurnAction,

@@ -167,34 +167,12 @@ impl<T> TimerScheduler<T> {
         &mut self,
         now: Instant,
         allowance: TimerReadyAllowance,
-        mut predicate: F,
+        predicate: F,
     ) -> Option<ReadyTimer<T>>
     where
         F: FnMut(&T) -> bool,
     {
-        let mut first_non_ready = None;
-        let mut selected = None;
-        for timer in &self.pending {
-            if !self.active.contains(&timer.id) {
-                continue;
-            }
-            if !timer_ready(timer.run_at, timer.delay_ms, now, allowance) {
-                if first_non_ready.is_none_or(|current| timer_precedes(timer, current)) {
-                    first_non_ready = Some(timer);
-                }
-                continue;
-            }
-            if predicate(&timer.payload)
-                && selected.is_none_or(|current| timer_precedes(timer, current))
-            {
-                selected = Some(timer);
-            }
-        }
-
-        let selected = selected?;
-        if first_non_ready.is_some_and(|barrier| timer_precedes(barrier, selected)) {
-            return None;
-        }
+        let selected = self.next_ready_matching_timer(now, allowance, predicate)?;
         let selected_id = selected.id;
         let selected_sequence = selected.sequence;
 
@@ -266,6 +244,19 @@ impl<T> TimerScheduler<T> {
         })
     }
 
+    pub fn next_ready_deadline_matching<F>(
+        &self,
+        now: Instant,
+        allowance: TimerReadyAllowance,
+        predicate: F,
+    ) -> Option<Instant>
+    where
+        F: FnMut(&T) -> bool,
+    {
+        self.next_ready_matching_timer(now, allowance, predicate)
+            .map(|timer| timer.run_at)
+    }
+
     pub fn next_deadline(&self) -> Option<Instant> {
         self.pending
             .iter()
@@ -311,6 +302,41 @@ impl<T> TimerScheduler<T> {
                 return id;
             }
         }
+    }
+
+    fn next_ready_matching_timer<F>(
+        &self,
+        now: Instant,
+        allowance: TimerReadyAllowance,
+        mut predicate: F,
+    ) -> Option<&ScheduledTimer<T>>
+    where
+        F: FnMut(&T) -> bool,
+    {
+        let mut first_non_ready = None;
+        let mut selected = None;
+        for timer in &self.pending {
+            if !self.active.contains(&timer.id) {
+                continue;
+            }
+            if !timer_ready(timer.run_at, timer.delay_ms, now, allowance) {
+                if first_non_ready.is_none_or(|current| timer_precedes(timer, current)) {
+                    first_non_ready = Some(timer);
+                }
+                continue;
+            }
+            if predicate(&timer.payload)
+                && selected.is_none_or(|current| timer_precedes(timer, current))
+            {
+                selected = Some(timer);
+            }
+        }
+
+        let selected = selected?;
+        if first_non_ready.is_some_and(|barrier| timer_precedes(barrier, selected)) {
+            return None;
+        }
+        Some(selected)
     }
 }
 
@@ -438,6 +464,53 @@ mod tests {
             .expect("kept timer should become ready");
         assert_eq!(ready.id, kept);
         scheduler.finish_running(ready.id);
+    }
+
+    #[test]
+    fn matching_ready_deadline_observes_selection_and_cancelled_timers() {
+        let now = Instant::now();
+        let mut scheduler = TimerScheduler::default();
+        let cancelled = scheduler.schedule_after("cancelled", 0, now);
+        scheduler.schedule_after("skipped", 0, now);
+        scheduler.schedule_after("selected", 1, now);
+        scheduler.cancel(cancelled);
+
+        assert_eq!(
+            scheduler
+                .next_ready_deadline_matching(now, TimerReadyAllowance::NONE, |payload| *payload
+                    == "selected",),
+            None
+        );
+        assert_eq!(
+            scheduler.next_ready_deadline_matching(
+                now + Duration::from_millis(1),
+                TimerReadyAllowance::NONE,
+                |payload| *payload == "selected",
+            ),
+            Some(now + Duration::from_millis(1))
+        );
+    }
+
+    #[test]
+    fn matching_ready_deadline_respects_an_earlier_non_ready_barrier() {
+        let now = Instant::now();
+        let mut scheduler = TimerScheduler::default();
+        scheduler.schedule_after("barrier", 2, now);
+        scheduler.schedule_after("selected", 1, now + Duration::from_micros(1_500));
+        let allowance = TimerReadyAllowance {
+            max_delay_ms: 1,
+            allowance: Duration::from_millis(1),
+        };
+
+        assert_eq!(
+            scheduler.next_ready_deadline_matching(
+                now + Duration::from_micros(1_500),
+                allowance,
+                |payload| *payload == "selected",
+            ),
+            None,
+            "a later timer admitted by early allowance must not overtake the heap head"
+        );
     }
 
     #[test]

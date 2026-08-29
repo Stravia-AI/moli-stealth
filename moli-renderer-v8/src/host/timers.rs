@@ -15,6 +15,7 @@ use crate::{
         active_lightweight_popup_id, current_runtime_observable_context_token,
         lightweight_popup_id_from_window,
     },
+    page_task_queue::RendererPageTimerSelection,
     script_provenance::CompiledStringProvenance,
     util::{
         context_host_ptr_from_global_bridge, create_script_origin_with_base_url, get_private_value,
@@ -187,6 +188,24 @@ struct ScheduledTimerTask {
     owner: ScheduledTimerOwner,
     is_interval: bool,
     extra_args: Vec<v8::Global<v8::Value>>,
+}
+
+impl ScheduledTimerTask {
+    fn is_unexpired_idle_callback_at(&self, now_ms: f64) -> bool {
+        let ScheduledTimerCallback::WindowWebIdl(callback) = &self.callback else {
+            return false;
+        };
+        callback.is_unexpired_idle_callback_at(now_ms)
+    }
+
+    fn matches_selection(&self, selection: RendererPageTimerSelection, now_ms: f64) -> bool {
+        match selection {
+            RendererPageTimerSelection::AnyReady => true,
+            RendererPageTimerSelection::ExcludeUnexpiredIdleCallbacks => {
+                !self.is_unexpired_idle_callback_at(now_ms)
+            }
+        }
+    }
 }
 
 const MIN_DELAY_TIMER_READY_EARLY_ALLOWANCE: Duration = Duration::from_millis(1);
@@ -707,19 +726,35 @@ impl HostTimeoutScheduler {
     pub(crate) fn run_next_body(
         &mut self,
         scope: &mut v8::PinScope<'_, '_>,
+        selection: RendererPageTimerSelection,
     ) -> HostTimeoutRunResult {
-        let Some(timer) = self
-            .scheduler
-            .take_next_ready(Instant::now(), min_delay_ready_allowance())
-        else {
+        let now_ms = crate::window_host::current_time_ms();
+        let Some(timer) = self.scheduler.take_next_ready_matching(
+            Instant::now(),
+            min_delay_ready_allowance(),
+            |task| task.matches_selection(selection, now_ms),
+        ) else {
             return HostTimeoutRunResult::Idle;
         };
         self.run_timer(scope, timer)
     }
 
+    #[cfg(test)]
     pub(crate) fn has_ready_timer(&self) -> bool {
         self.scheduler
             .has_ready_timer(Instant::now(), min_delay_ready_allowance())
+    }
+
+    pub(crate) fn next_ready_timer_deadline(
+        &self,
+        selection: RendererPageTimerSelection,
+    ) -> Option<Instant> {
+        let now_ms = crate::window_host::current_time_ms();
+        self.scheduler.next_ready_deadline_matching(
+            Instant::now(),
+            min_delay_ready_allowance(),
+            |task| task.matches_selection(selection, now_ms),
+        )
     }
 
     fn run_timer(

@@ -239,6 +239,12 @@ pub(crate) struct RendererPageTaskProducerRoutes {
 /// part of each task payload and is interpreted only after dequeue by the lane
 /// executor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RendererPageTimerSelection {
+    AnyReady,
+    ExcludeUnexpiredIdleCallbacks,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RendererPageReadyDescriptor {
     ActionWindow {
         deadline: Instant,
@@ -358,6 +364,7 @@ pub(crate) enum RendererPageReadyDescriptor {
     },
     Timer {
         deadline: Instant,
+        selection: RendererPageTimerSelection,
     },
 }
 
@@ -478,7 +485,7 @@ impl RendererPageReadyDescriptor {
             | Self::ModulepreloadStart { ready }
             | Self::Networking { ready, .. }
             | Self::WebSocket { ready, .. } => ready.ready_at,
-            Self::ActionWindow { deadline } | Self::Timer { deadline } => deadline,
+            Self::ActionWindow { deadline } | Self::Timer { deadline, .. } => deadline,
         }
     }
 
@@ -599,6 +606,7 @@ pub(crate) enum RendererPageSchedulerTask {
     WebSocket(RendererPageWebSocketTask),
     Timer {
         deadline: Instant,
+        selection: RendererPageTimerSelection,
     },
 }
 
@@ -1487,9 +1495,13 @@ impl RendererPageOwnedTaskSources {
                 );
                 RendererPageSchedulerTask::WebSocket(task)
             }
-            RendererPageReadyDescriptor::Timer { deadline } => {
-                RendererPageSchedulerTask::Timer { deadline }
-            }
+            RendererPageReadyDescriptor::Timer {
+                deadline,
+                selection,
+            } => RendererPageSchedulerTask::Timer {
+                deadline,
+                selection,
+            },
         }
     }
 

@@ -5815,8 +5815,11 @@ impl ScriptVm {
     /// This method deliberately does not checkpoint, synchronize child
     /// records, or run runtime follow-up. The selected Page-task dispatcher
     /// commits that completion exactly once after the body returns.
-    pub(crate) fn run_next_due_timer_callback_body(&mut self) -> Result<HostTimeoutRunResult> {
-        let result = self.run_next_timeout_body()?;
+    pub(crate) fn run_next_due_timer_callback_body(
+        &mut self,
+        selection: crate::page_task_queue::RendererPageTimerSelection,
+    ) -> Result<HostTimeoutRunResult> {
+        let result = self.run_next_timeout_body(selection)?;
         if let HostTimeoutRunResult::CallbackError(error) = &result {
             self.record_runtime_warning(format_args!("timer callback dispatch failed: {error}"));
         }
@@ -5833,7 +5836,9 @@ impl ScriptVm {
         &mut self,
         loader: &ResourceRequestClient,
     ) -> Result<bool> {
-        let result = self.run_next_due_timer_callback_body()?;
+        let result = self.run_next_due_timer_callback_body(
+            crate::page_task_queue::RendererPageTimerSelection::AnyReady,
+        )?;
         if !result.consumed_heap_head() {
             return Ok(false);
         }

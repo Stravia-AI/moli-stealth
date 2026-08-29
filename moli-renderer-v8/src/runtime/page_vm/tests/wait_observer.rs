@@ -65,15 +65,20 @@ setTimeout(() => {
         )?;
 
         let deadline = match page_vm
-            .due_page_timer_ready_descriptor()
+            .due_page_timer_ready_descriptor(
+                crate::page_task_queue::RendererPageTimerSelection::AnyReady,
+            )
             .expect("the zero-delay timer should be scheduler-visible")
         {
-            RendererPageReadyDescriptor::Timer { deadline } => deadline,
+            RendererPageReadyDescriptor::Timer { deadline, .. } => deadline,
             other => panic!("expected a timer descriptor, got {other:?}"),
         };
         page_vm
             .apply_selected_page_scheduler_task_on_owner_lane_for_test(
-                RendererPageSchedulerTask::Timer { deadline },
+                RendererPageSchedulerTask::Timer {
+                    deadline,
+                    selection: crate::page_task_queue::RendererPageTimerSelection::AnyReady,
+                },
                 loader,
             )
             .await?;

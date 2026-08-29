@@ -449,7 +449,9 @@ async fn resume_standalone_document_write_page(
             let mut descriptors = vec![
                 crate::page_task_queue::RendererPageReadyDescriptor::Networking { ready, owner },
             ];
-            if let Some(timer) = runtime.page_vm.due_page_timer_ready_descriptor() {
+            if let Some(timer) = runtime.page_vm.due_page_timer_ready_descriptor(
+                crate::page_task_queue::RendererPageTimerSelection::AnyReady,
+            ) {
                 descriptors.push(timer);
             }
             let selected = crate::runtime::page_turn_scheduler::PageTurnScheduler::new(())
@@ -464,11 +466,17 @@ async fn resume_standalone_document_write_page(
                         )?
                         .expect("selected standalone resource head must be executable");
                 }
-                crate::page_task_queue::RendererPageReadyDescriptor::Timer { deadline } => {
+                crate::page_task_queue::RendererPageReadyDescriptor::Timer {
+                    deadline,
+                    selection,
+                } => {
                     runtime
                         .page_vm
                         .apply_selected_page_scheduler_task(
-                            crate::page_task_queue::RendererPageSchedulerTask::Timer { deadline },
+                            crate::page_task_queue::RendererPageSchedulerTask::Timer {
+                                deadline,
+                                selection,
+                            },
                             &loader,
                         )
                         .await?;

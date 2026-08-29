@@ -1,14 +1,18 @@
 use super::*;
 
 use super::super::page_timer::PageTimerTurnAction;
-use crate::page_task_queue::{RendererPageReadyDescriptor, RendererPageSchedulerTask};
+use crate::page_task_queue::{
+    RendererPageReadyDescriptor, RendererPageSchedulerTask, RendererPageTimerSelection,
+};
+
+const ANY_READY_TIMER: RendererPageTimerSelection = RendererPageTimerSelection::AnyReady;
 
 fn due_timer_deadline(page_vm: &PageVm) -> Instant {
     match page_vm
-        .due_page_timer_ready_descriptor()
+        .due_page_timer_ready_descriptor(ANY_READY_TIMER)
         .expect("a due timer descriptor should be ready")
     {
-        RendererPageReadyDescriptor::Timer { deadline } => deadline,
+        RendererPageReadyDescriptor::Timer { deadline, .. } => deadline,
         other => panic!("expected timer descriptor, got {other:?}"),
     }
 }
@@ -20,7 +24,10 @@ async fn run_timer_through_selected_dispatcher(
 ) -> anyhow::Result<()> {
     page_vm
         .apply_selected_page_scheduler_task_on_owner_lane_for_test(
-            RendererPageSchedulerTask::Timer { deadline },
+            RendererPageSchedulerTask::Timer {
+                deadline,
+                selection: ANY_READY_TIMER,
+            },
             loader.clone(),
         )
         .await?;
@@ -67,7 +74,9 @@ setTimeout(() => {
             r#"["first","microtask:first","second","microtask:second"]"#
         );
         assert!(
-            page_vm.due_page_timer_ready_descriptor().is_none(),
+            page_vm
+                .due_page_timer_ready_descriptor(ANY_READY_TIMER)
+                .is_none(),
             "two timer tasks must consume exactly two selected turns"
         );
         Ok::<_, anyhow::Error>(())
@@ -94,7 +103,7 @@ setTimeout(() => {
         )?;
 
         let deadline = due_timer_deadline(&page_vm);
-        let body = page_vm.apply_selected_page_timer_turn(deadline)?;
+        let body = page_vm.apply_selected_page_timer_turn(deadline, ANY_READY_TIMER)?;
         assert_eq!(body.action, PageTimerTurnAction::Consumed { deadline });
         assert_eq!(
             page_vm.vm_mut().eval("__timerBodyBoundary.join('|')")?,
@@ -260,7 +269,7 @@ setTimeout(() => {
             .checked_add(Duration::from_nanos(1))
             .expect("test deadline should be representable");
 
-        let stale = page_vm.apply_selected_page_timer_turn(stale_deadline)?;
+        let stale = page_vm.apply_selected_page_timer_turn(stale_deadline, ANY_READY_TIMER)?;
         assert_eq!(
             stale.action,
             PageTimerTurnAction::NoLongerRunnable {
@@ -309,7 +318,11 @@ async fn timer_deadline_observation_cannot_consume_a_due_timer() {
                     "false",
                     "reading the timer deadline must not steal the scheduler-owned timer"
                 );
-                assert!(page_vm.due_page_timer_ready_descriptor().is_some());
+                assert!(
+                    page_vm
+                        .due_page_timer_ready_descriptor(ANY_READY_TIMER)
+                        .is_some()
+                );
                 Ok(())
             },
         )
@@ -331,7 +344,9 @@ async fn timer_is_not_runnable_before_its_deadline() {
 
         assert!(page_vm.vm().next_timeout_deadline().is_some());
         assert!(
-            page_vm.due_page_timer_ready_descriptor().is_none(),
+            page_vm
+                .due_page_timer_ready_descriptor(ANY_READY_TIMER)
+                .is_none(),
             "a future heap entry is a deadline, not a runnable Page task"
         );
         assert_eq!(page_vm.vm_mut().eval("String(__futureTimerRan)")?, "false");

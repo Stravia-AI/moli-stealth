@@ -1,5 +1,7 @@
 use super::PageVm;
-use crate::page_task_queue::{RendererPageReadyDescriptor, RendererPageWindowDocumentTaskOwner};
+use crate::page_task_queue::{
+    RendererPageReadyDescriptor, RendererPageTimerSelection, RendererPageWindowDocumentTaskOwner,
+};
 
 /// Proof that the Page arbiter matched a scheduler task against its exact
 /// PageVm namespace and Window/Document ledger slot.
@@ -120,11 +122,13 @@ impl PageVm {
 
     pub(in crate::runtime) fn due_page_timer_ready_descriptor(
         &self,
+        selection: RendererPageTimerSelection,
     ) -> Option<RendererPageReadyDescriptor> {
         self.vm()
-            .has_ready_timeout()
-            .then(|| self.vm().next_timeout_deadline())
-            .flatten()
-            .map(|deadline| RendererPageReadyDescriptor::Timer { deadline })
+            .next_ready_timeout_deadline(selection)
+            .map(|deadline| RendererPageReadyDescriptor::Timer {
+                deadline,
+                selection,
+            })
     }
 }

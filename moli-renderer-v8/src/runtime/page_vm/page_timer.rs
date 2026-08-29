@@ -2,6 +2,7 @@ use std::time::Instant;
 
 use anyhow::{Result, ensure};
 
+use crate::page_task_queue::RendererPageTimerSelection;
 use crate::runtime::PageOwnerTurnOutcome;
 
 use super::PageVm;
@@ -33,11 +34,11 @@ impl PageVm {
     pub(in crate::runtime) fn apply_selected_page_timer_turn(
         &mut self,
         expected_deadline: Instant,
+        selection: RendererPageTimerSelection,
     ) -> Result<PageOwnerTurnOutcome<PageTimerTurnAction>> {
-        let actual_deadline = self.vm().next_timeout_deadline();
-        let action = if actual_deadline == Some(expected_deadline) && self.vm().has_ready_timeout()
-        {
-            let body = self.vm_mut().run_next_due_timer_callback_body()?;
+        let actual_deadline = self.vm().next_ready_timeout_deadline(selection);
+        let action = if actual_deadline == Some(expected_deadline) {
+            let body = self.vm_mut().run_next_due_timer_callback_body(selection)?;
             ensure!(
                 body.consumed_heap_head(),
                 "a validated due timer descriptor must consume its selected heap head"

@@ -42,6 +42,40 @@ async fn idle_callback_timeout_is_a_deadline_not_a_dispatch_delay() {
 }
 
 #[tokio::test]
+async fn idle_callback_does_not_overtake_queued_javascript_url_navigation() {
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    let mut vm = new_storage_page_task_executor_test_vm_with_loader(
+        "https://idle-after-javascript-url.test/",
+        &loader,
+    );
+    vm.eval(
+        r#"
+globalThis.__javascriptUrlIdleOrder = [];
+const frame = document.createElement("iframe");
+(document.body || document.documentElement || document).appendChild(frame);
+const child = frame.contentWindow;
+child.location.href =
+  "javascript:parent.__javascriptUrlIdleOrder.push('javascript-url')";
+child.requestIdleCallback(() => __javascriptUrlIdleOrder.push("idle"));
+"#,
+    )
+    .expect("javascript URL and idle callback should queue");
+    advance_page_task_executor_until_eval_equals(
+        &mut vm,
+        &loader,
+        "String(__javascriptUrlIdleOrder.length)",
+        "2",
+        "javascript URL must run before the page becomes idle",
+    )
+    .await;
+    assert_eq!(
+        vm.eval("__javascriptUrlIdleOrder.join('|')")
+            .expect("javascript URL idle order should evaluate"),
+        "javascript-url|idle"
+    );
+}
+
+#[tokio::test]
 async fn idle_deadline_declared_shape_keeps_state_private() {
     let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let mut vm = new_storage_test_vm("https://idle-deadline-shape.test/");

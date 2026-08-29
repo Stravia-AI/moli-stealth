@@ -2917,13 +2917,20 @@ impl PageVm {
         &mut self,
         loader: &ResourceRequestClient,
     ) -> Result<bool> {
-        let Some(crate::page_task_queue::RendererPageReadyDescriptor::Timer { deadline }) =
-            self.due_page_timer_ready_descriptor()
+        let Some(crate::page_task_queue::RendererPageReadyDescriptor::Timer {
+            deadline,
+            selection,
+        }) = self.due_page_timer_ready_descriptor(
+            crate::page_task_queue::RendererPageTimerSelection::AnyReady,
+        )
         else {
             return Ok(false);
         };
         Box::pin(self.apply_selected_page_scheduler_task(
-            crate::page_task_queue::RendererPageSchedulerTask::Timer { deadline },
+            crate::page_task_queue::RendererPageSchedulerTask::Timer {
+                deadline,
+                selection,
+            },
             loader,
         ))
         .await?;

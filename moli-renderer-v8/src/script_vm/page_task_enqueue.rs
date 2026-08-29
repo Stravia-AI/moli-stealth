@@ -782,7 +782,10 @@ impl ScriptVm {
     ///
     /// Production callers must enter through the selected Page timer task,
     /// which commits the single task-end callback completion.
-    pub(super) fn run_next_timeout_body(&mut self) -> Result<HostTimeoutRunResult> {
+    pub(super) fn run_next_timeout_body(
+        &mut self,
+        selection: crate::page_task_queue::RendererPageTimerSelection,
+    ) -> Result<HostTimeoutRunResult> {
         #[cfg(test)]
         if let Some(message) = self.test_next_timeout_failure.take() {
             return Err(anyhow!("{message}"));
@@ -796,7 +799,7 @@ impl ScriptVm {
             // creates the V8 context scope and does not access or move
             // `document_runtime`; the render owner lane runs this
             // synchronously on one thread.
-            Ok(unsafe { &mut *document_runtime }.run_next_timeout_body(scope))
+            Ok(unsafe { &mut *document_runtime }.run_next_timeout_body(scope, selection))
         })
     }
 
@@ -809,7 +812,8 @@ impl ScriptVm {
     /// bypassed.
     #[cfg(test)]
     pub(crate) fn run_next_timeout_for_test(&mut self) -> Result<HostTimeoutRunResult> {
-        let result = self.run_next_timeout_body()?;
+        let result = self
+            .run_next_timeout_body(crate::page_task_queue::RendererPageTimerSelection::AnyReady)?;
         if result.consumed_heap_head() {
             self.perform_owner_lane_task_microtask_checkpoints()?;
             self.sync_child_browsing_context_records();
@@ -826,8 +830,16 @@ impl ScriptVm {
         self.document_runtime.ms_to_next_timeout()
     }
 
+    #[cfg(test)]
     pub(crate) fn has_ready_timeout(&self) -> bool {
         self.document_runtime.has_ready_timeout()
+    }
+
+    pub(crate) fn next_ready_timeout_deadline(
+        &self,
+        selection: crate::page_task_queue::RendererPageTimerSelection,
+    ) -> Option<Instant> {
+        self.document_runtime.next_ready_timeout_deadline(selection)
     }
 
     pub(crate) fn next_timeout_deadline(&self) -> Option<Instant> {

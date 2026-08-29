@@ -360,8 +360,11 @@ impl PageVm {
                 .await?;
                 Ok(())
             }
-            RendererPageSchedulerTask::Timer { deadline } => {
-                let outcome = self.apply_selected_page_timer_turn(deadline)?;
+            RendererPageSchedulerTask::Timer {
+                deadline,
+                selection,
+            } => {
+                let outcome = self.apply_selected_page_timer_turn(deadline, selection)?;
                 if matches!(outcome.action, PageTimerTurnAction::Consumed { .. }) {
                     self.finish_selected_page_callback_task(loader).await?;
                 }

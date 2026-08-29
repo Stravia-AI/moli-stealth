@@ -62,9 +62,14 @@ impl PageVm {
             task
         } else if let Some(crate::page_task_queue::RendererPageReadyDescriptor::Timer {
             deadline,
-        }) = self.due_page_timer_ready_descriptor()
-        {
-            crate::page_task_queue::RendererPageSchedulerTask::Timer { deadline }
+            selection,
+        }) = self.due_page_timer_ready_descriptor(
+            crate::page_task_queue::RendererPageTimerSelection::AnyReady,
+        ) {
+            crate::page_task_queue::RendererPageSchedulerTask::Timer {
+                deadline,
+                selection,
+            }
         } else {
             return Ok(false);
         };
@@ -226,15 +231,19 @@ impl PageVmTaskExecutorTestHarness {
             .checked_add(std::time::Duration::from_millis(3_200))
             .unwrap_or_else(std::time::Instant::now);
         for _ in 0..10_000 {
-            if let Some(crate::page_task_queue::RendererPageReadyDescriptor::Timer { deadline }) =
-                self.page_vm.due_page_timer_ready_descriptor()
-            {
+            if let Some(crate::page_task_queue::RendererPageReadyDescriptor::Timer {
+                deadline,
+                selection,
+            }) = self.page_vm.due_page_timer_ready_descriptor(
+                crate::page_task_queue::RendererPageTimerSelection::AnyReady,
+            ) {
                 self.selected_task_local_set
                     .run_until(
                         self.page_vm
                             .apply_selected_page_scheduler_task_on_owner_lane_for_test(
                                 crate::page_task_queue::RendererPageSchedulerTask::Timer {
                                     deadline,
+                                    selection,
                                 },
                                 loader.clone(),
                             ),

@@ -712,11 +712,12 @@ pub(super) fn page_ready_descriptor_snapshot(
 ) -> PageReadyDescriptorSnapshot {
     let mut descriptors = task_sources.ready_descriptors();
     let stable_source_was_ready = !descriptors.is_empty();
+    descriptors.retain(|descriptor| {
+        entry
+            .page_vm_mut()
+            .page_ready_descriptor_is_eligible(*descriptor)
+    });
     let mut due_deadline_was_ready = false;
-    if let Some(timer) = entry.page_vm().due_page_timer_ready_descriptor() {
-        descriptors.push(timer);
-        due_deadline_was_ready = true;
-    }
     if let Some(action_window) = entry
         .page_vm()
         .due_page_action_window_ready_descriptor(std::time::Instant::now())
@@ -724,11 +725,18 @@ pub(super) fn page_ready_descriptor_snapshot(
         descriptors.push(action_window);
         due_deadline_was_ready = true;
     }
-    descriptors.retain(|descriptor| {
-        entry
-            .page_vm_mut()
-            .page_ready_descriptor_is_eligible(*descriptor)
-    });
+    let timer_selection = if descriptors.is_empty() {
+        crate::page_task_queue::RendererPageTimerSelection::AnyReady
+    } else {
+        crate::page_task_queue::RendererPageTimerSelection::ExcludeUnexpiredIdleCallbacks
+    };
+    if let Some(timer) = entry
+        .page_vm()
+        .due_page_timer_ready_descriptor(timer_selection)
+    {
+        descriptors.push(timer);
+        due_deadline_was_ready = true;
+    }
     PageReadyDescriptorSnapshot {
         eligible: descriptors,
         stable_source_was_ready,

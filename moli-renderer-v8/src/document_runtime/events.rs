@@ -271,12 +271,21 @@ impl DocumentRuntime {
     pub(crate) fn run_next_timeout_body(
         &mut self,
         scope: &mut v8::PinScope<'_, '_>,
+        selection: crate::page_task_queue::RendererPageTimerSelection,
     ) -> HostTimeoutRunResult {
-        self.timeouts.run_next_body(scope)
+        self.timeouts.run_next_body(scope, selection)
     }
 
+    #[cfg(test)]
     pub(crate) fn has_ready_timeout(&self) -> bool {
         self.timeouts.has_ready_timer()
+    }
+
+    pub(crate) fn next_ready_timeout_deadline(
+        &self,
+        selection: crate::page_task_queue::RendererPageTimerSelection,
+    ) -> Option<std::time::Instant> {
+        self.timeouts.next_ready_timer_deadline(selection)
     }
 
     pub(crate) fn ms_to_next_timeout(&self) -> Option<u64> {

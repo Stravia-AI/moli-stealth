@@ -71,6 +71,17 @@ impl ScheduledWindowWebIdlCallback {
             .map(WindowExecutionContextIdentity::realm_token)
     }
 
+    pub(super) fn is_unexpired_idle_callback_at(&self, now_ms: f64) -> bool {
+        match self.kind {
+            WindowWebIdlCallbackTaskKind::Idle {
+                timeout_deadline_ms,
+            } => timeout_deadline_ms < 0.0 || now_ms < timeout_deadline_ms,
+            WindowWebIdlCallbackTaskKind::Timer
+            | WindowWebIdlCallbackTaskKind::AnimationFrame { .. }
+            | WindowWebIdlCallbackTaskKind::GeolocationError { .. } => false,
+        }
+    }
+
     pub(super) fn is_geolocation_watch<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,
