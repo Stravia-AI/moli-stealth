@@ -3,7 +3,7 @@ import { performance } from 'node:perf_hooks';
 import { Worker } from 'node:worker_threads';
 
 const MINIMUM_INTERVAL_MS = 100;
-const STOP_TIMEOUT_MS = 5000;
+const WORKER_RESPONSE_TIMEOUT_MS = 5000;
 
 function finiteValues(samples, getter) {
   return samples
@@ -189,7 +189,25 @@ export class ProcessTreeResourceSampler {
     this.workerError = null;
     this.resultResolver = null;
     this.resultPromise = null;
+    this.nextRootRegistrationId = 1;
+    this.pendingRootRegistrations = new Map();
     this.stoppedArtifact = null;
+  }
+
+  #finishRootRegistration(registrationId, registered) {
+    const pending = this.pendingRootRegistrations.get(registrationId);
+    if (!pending) {
+      return;
+    }
+    clearTimeout(pending.timeout);
+    this.pendingRootRegistrations.delete(registrationId);
+    pending.resolve(registered);
+  }
+
+  #resolveRootRegistrations(registered) {
+    for (const registrationId of this.pendingRootRegistrations.keys()) {
+      this.#finishRootRegistration(registrationId, registered);
+    }
   }
 
   start() {
@@ -212,13 +230,19 @@ export class ProcessTreeResourceSampler {
         this.resultResolver = resolve;
       });
       this.worker.on('message', (message) => {
+        if (message?.type === 'root-registered') {
+          this.#finishRootRegistration(message.registrationId, true);
+          return;
+        }
         if (message?.type === 'result' && !this.workerResult) {
           this.workerResult = message.collector;
+          this.#resolveRootRegistrations(false);
           this.resultResolver?.(message.collector);
         }
       });
       this.worker.on('error', (error) => {
         this.workerError = error;
+        this.#resolveRootRegistrations(false);
         this.resultResolver?.(null);
       });
       this.worker.on('exit', (code) => {
@@ -227,6 +251,7 @@ export class ProcessTreeResourceSampler {
             `resource sampler worker exited before returning data (code ${code})`
           );
         }
+        this.#resolveRootRegistrations(false);
         this.resultResolver?.(this.workerResult);
       });
     } catch (error) {
@@ -244,14 +269,39 @@ export class ProcessTreeResourceSampler {
   }
 
   addRoot(label, pid) {
-    if (!Number.isInteger(pid) || pid <= 0) {
-      return;
+    if (
+      !Number.isInteger(pid)
+      || pid <= 0
+      || !this.worker
+      || this.workerError
+      || this.workerResult
+    ) {
+      return Promise.resolve(false);
     }
-    this.worker?.postMessage({
-      type: 'add-root',
-      label,
-      pid
+
+    // Resolve only after the worker has installed the root and captured its
+    // forced baseline sample. Callers can then align phase markers to sampler
+    // readiness instead of guessing at worker startup time.
+    const registrationId = this.nextRootRegistrationId;
+    this.nextRootRegistrationId += 1;
+    const registration = new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        this.#finishRootRegistration(registrationId, false);
+      }, WORKER_RESPONSE_TIMEOUT_MS);
+      this.pendingRootRegistrations.set(registrationId, { resolve, timeout });
     });
+    try {
+      this.worker.postMessage({
+        type: 'add-root',
+        registrationId,
+        label,
+        pid
+      });
+    } catch (error) {
+      this.workerError = error;
+      this.#finishRootRegistration(registrationId, false);
+    }
+    return registration;
   }
 
   async stop() {
@@ -302,7 +352,7 @@ export class ProcessTreeResourceSampler {
     const collector = await Promise.race([
       this.resultPromise,
       new Promise((resolve) => {
-        timeout = setTimeout(() => resolve(null), STOP_TIMEOUT_MS);
+        timeout = setTimeout(() => resolve(null), WORKER_RESPONSE_TIMEOUT_MS);
       })
     ]);
     clearTimeout(timeout);

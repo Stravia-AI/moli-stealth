@@ -1338,7 +1338,7 @@ async function startTargetProcess(target, args, serviceObserver, workerLabel) {
     detached: true,
     stdio: ['ignore', 'pipe', 'pipe']
   });
-  serviceObserver.registerWorker(workerLabel, child.pid);
+  const rootRegistration = serviceObserver.registerWorker(workerLabel, child.pid);
   child.once('error', (error) => {
     spawnState.error = error;
     pushLog(logs, `spawn error: ${error.message}`);
@@ -1349,6 +1349,8 @@ async function startTargetProcess(target, args, serviceObserver, workerLabel) {
   child.stderr.on('data', (chunk) => {
     pushLog(logs, `stderr: ${chunk.toString('utf8').trim()}`);
   });
+  // Do not start benchmark phases before the process tree has a baseline.
+  await rootRegistration;
 
   try {
     const { endpoint, websocketUrl } = target === 'moli'

@@ -43,6 +43,10 @@ parentPort.on('message', (message) => {
   if (message?.type === 'add-root') {
     collector.addRoot(message.label, message.pid);
     capture(true, 'root-registered');
+    parentPort.postMessage({
+      type: 'root-registered',
+      registrationId: message.registrationId
+    });
     return;
   }
   if (message?.type !== 'stop' || stopped) {

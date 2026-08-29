@@ -33,19 +33,22 @@ test('worker-thread sampler captures the current Linux process tree', {
 }, async () => {
   const sampler = new ProcessTreeResourceSampler({ intervalMs: 100 });
   sampler.start();
-  sampler.addRoot('self', process.pid);
   sampler.mark({ type: 'case-start', caseName: 'fixture' });
-  await new Promise((resolve) => setTimeout(resolve, 240));
+  const rootRegistered = await sampler.addRoot('self', process.pid);
   sampler.mark({ type: 'case-done', caseName: 'fixture' });
   const artifact = await sampler.stop();
   const failureDetails = samplerFailureDetails(artifact);
   const caseDone = artifact.markers.find((marker) => marker.type === 'case-done');
 
   assert.equal(artifact.status, 'available', failureDetails);
-  assert.ok(artifact.samples.length >= 3, failureDetails);
+  assert.equal(rootRegistered, true, failureDetails);
+  assert.ok(artifact.samples.length >= 2, failureDetails);
+  assert.equal(artifact.samples[0]?.kind, 'root-registered', failureDetails);
+  assert.equal(artifact.samples.at(-1)?.kind, 'final', failureDetails);
   assert.ok(artifact.summary.peak_rss_bytes > 0, failureDetails);
   assert.ok(artifact.summary.peak_process_count >= 1, failureDetails);
   assert.equal(artifact.summary.cases[0]?.case_name, 'fixture', failureDetails);
+  assert.ok(artifact.summary.cases[0]?.sample_count >= 1, failureDetails);
   assert.ok(caseDone, failureDetails);
   assert.ok(
     artifact.samples.at(-1)?.elapsed_ms >= caseDone?.elapsed_ms,

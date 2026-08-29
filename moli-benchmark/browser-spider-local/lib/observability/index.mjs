@@ -52,7 +52,7 @@ class SpiderServiceObserver {
   registerWorker(label, pid) {
     this.#assertOpen();
     this.mark('worker-spawn', { worker: label, pid });
-    this.#sampler.addRoot(label, pid);
+    return this.#sampler.addRoot(label, pid);
   }
 
   finish() {
