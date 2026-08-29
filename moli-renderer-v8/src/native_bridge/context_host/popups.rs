@@ -200,6 +200,21 @@ enum LightweightPopupClassicScriptAdvance {
     Pending(PopupDocumentLoadBodyActivity),
 }
 
+struct LightweightPopupDocumentProjectionSource<'a> {
+    task: LightweightPopupNavigationTaskToken,
+    document_url: &'a Url,
+    markup: &'a str,
+    content_type: Option<&'a str>,
+    character_set: Option<&'a str>,
+    policy_container: &'a DocumentPolicyContainer,
+}
+
+struct LightweightPopupDocumentProjectionApplication {
+    document_handle: Option<DomHandle>,
+    body_activity: PopupDocumentLoadBodyActivity,
+    classic_script_load_pending: bool,
+}
+
 pub(super) struct PendingLightweightPopupClassicScriptLoad {
     target: LightweightPopupClassicScriptFetchTarget,
     script_handle: DomHandle,
@@ -2408,81 +2423,25 @@ impl JsContextHost {
                     &base_url,
                     &document_referrer,
                 );
-                if let Some(document) =
-                    crate::dom_parser::parse_child_document_projection_from_source(
-                        scope,
-                        final_url.clone(),
-                        &loaded.markup,
-                        loaded.content_type.as_deref(),
-                        Some(&loaded.character_set),
-                        crate::parser::HtmlParser::with_scripting_enabled(
-                            self.lightweight_popup_scripting_enabled(popup_id),
-                        ),
-                    )
-                {
-                    let host_ptr = self as *mut JsContextHost;
-                    let document_base_url = lightweight_popup_parsed_document_base_url(
-                        host_ptr, scope, document, &final_url,
-                    );
-                    if let Some(document_record) =
-                        self.lightweight_popup_document_record_mut(popup_id)
-                    {
-                        document_record.state.base_url = document_base_url.clone();
-                    }
-                    let document_referrer = self
-                        .lightweight_popup_document_record(popup_id)
-                        .map(|document| document.state.policy_container.document_referrer.clone())
-                        .unwrap_or_default();
-                    sync_lightweight_popup_document_window_slots(
-                        scope,
-                        document,
-                        window,
-                        &document_base_url,
-                        &document_referrer,
-                    );
-                    set_object_slot(scope, window, "document", document.into());
-                    self.forget_lightweight_popup_document_handle(popup_id);
-                    let popup_document_handle =
-                        self.remember_lightweight_popup_document_handle(scope, popup_id, document);
-                    if let Some(document_handle) = popup_document_handle {
-                        let _ = crate::context_bootstrap::install_css_runtime_state_for_document(
-                            scope,
-                            window,
-                            Some(document_handle),
-                        );
-                        install_lightweight_popup_get_computed_style(
-                            scope,
-                            window,
-                            document_handle,
-                        );
-                    }
-                    let _ = self.set_lightweight_popup_document_wrapper(
-                        popup_id,
-                        v8::Global::new(scope, document),
-                    );
-                    let script_advance = self.execute_lightweight_popup_document_scripts(
-                        scope,
+                if let Some(application) = self.install_lightweight_popup_document_projection(
+                    scope,
+                    window,
+                    LightweightPopupDocumentProjectionSource {
                         task,
-                        popup_document_handle,
-                        loaded.policy_container.sandbox.allows_scripts,
-                        &loaded.policy_container.response_content_security_policies,
-                        &loaded
-                            .policy_container
-                            .response_content_security_report_only_policies,
-                        &loaded.policy_container.content_security_reporting_endpoints,
-                    );
-                    body_activity = match script_advance {
-                        LightweightPopupClassicScriptAdvance::Completed(activity) => activity,
-                        LightweightPopupClassicScriptAdvance::Pending(activity) => {
-                            classic_script_load_pending = true;
-                            activity
-                        }
-                    };
+                        document_url: &final_url,
+                        markup: &loaded.markup,
+                        content_type: loaded.content_type.as_deref(),
+                        character_set: Some(&loaded.character_set),
+                        policy_container: &loaded.policy_container,
+                    },
+                ) {
+                    body_activity = application.body_activity;
+                    classic_script_load_pending = application.classic_script_load_pending;
                     if !self.lightweight_popup_committed_navigation_task_is_current(task) {
                         return PopupDocumentLoadApplication::Applied { body_activity };
                     }
                     if !classic_script_load_pending
-                        && let Some(document_handle) = popup_document_handle
+                        && let Some(document_handle) = application.document_handle
                     {
                         self.sync_child_browsing_context_subtree(scope, document_handle);
                     }
@@ -2799,6 +2758,83 @@ impl JsContextHost {
         let event = lightweight_popup_event(scope, window, "load")
             .expect("authorized popup load event must materialize its Event");
         self.dispatch_lightweight_popup_window_event(scope, popup_id, "load", event);
+    }
+
+    fn install_lightweight_popup_document_projection<'s>(
+        &mut self,
+        scope: &mut v8::PinScope<'s, '_>,
+        window: v8::Local<'s, v8::Object>,
+        source: LightweightPopupDocumentProjectionSource<'_>,
+    ) -> Option<LightweightPopupDocumentProjectionApplication> {
+        let popup_id = source.task.popup_id();
+        let document = crate::dom_parser::parse_child_document_projection_from_source(
+            scope,
+            source.document_url.clone(),
+            source.markup,
+            source.content_type,
+            source.character_set,
+            crate::parser::HtmlParser::with_scripting_enabled(
+                self.lightweight_popup_scripting_enabled(popup_id),
+            ),
+        )?;
+        let host_ptr = self as *mut JsContextHost;
+        let document_base_url = lightweight_popup_parsed_document_base_url(
+            host_ptr,
+            scope,
+            document,
+            source.document_url,
+        );
+        if let Some(document_record) = self.lightweight_popup_document_record_mut(popup_id) {
+            document_record.state.base_url = document_base_url.clone();
+        }
+        // The committed record owns the navigation-derived referrer. The
+        // response policy container only carries response-derived policy and
+        // can still have an empty referrer here.
+        let document_referrer = self
+            .lightweight_popup_document_record(popup_id)
+            .map(|document| document.state.policy_container.document_referrer.clone())
+            .unwrap_or_default();
+        sync_lightweight_popup_document_window_slots(
+            scope,
+            document,
+            window,
+            &document_base_url,
+            &document_referrer,
+        );
+        set_object_slot(scope, window, "document", document.into());
+        self.forget_lightweight_popup_document_handle(popup_id);
+        let document_handle =
+            self.remember_lightweight_popup_document_handle(scope, popup_id, document);
+        if let Some(document_handle) = document_handle {
+            let _ = crate::context_bootstrap::install_css_runtime_state_for_document(
+                scope,
+                window,
+                Some(document_handle),
+            );
+            install_lightweight_popup_get_computed_style(scope, window, document_handle);
+        }
+        let _ =
+            self.set_lightweight_popup_document_wrapper(popup_id, v8::Global::new(scope, document));
+        let script_advance = self.execute_lightweight_popup_document_scripts(
+            scope,
+            source.task,
+            document_handle,
+            source.policy_container.sandbox.allows_scripts,
+            &source.policy_container.response_content_security_policies,
+            &source
+                .policy_container
+                .response_content_security_report_only_policies,
+            &source.policy_container.content_security_reporting_endpoints,
+        );
+        let (body_activity, classic_script_load_pending) = match script_advance {
+            LightweightPopupClassicScriptAdvance::Completed(activity) => (activity, false),
+            LightweightPopupClassicScriptAdvance::Pending(activity) => (activity, true),
+        };
+        Some(LightweightPopupDocumentProjectionApplication {
+            document_handle,
+            body_activity,
+            classic_script_load_pending,
+        })
     }
 
     fn execute_lightweight_popup_document_scripts(
@@ -3543,9 +3579,10 @@ impl JsContextHost {
     fn execute_lightweight_popup_window_javascript_url_source(
         &mut self,
         scope: &mut v8::PinScope<'_, '_>,
-        popup_id: u64,
+        task: LightweightPopupNavigationTaskToken,
         source: &str,
     ) -> Result<()> {
+        let popup_id = task.popup_id();
         let Some(window) = self.lightweight_popup_window(scope, popup_id) else {
             anyhow::bail!("popup javascript URL has no window");
         };
@@ -3562,7 +3599,7 @@ impl JsContextHost {
         }
         self.execute_lightweight_popup_window_javascript_url_source_in_context(
             popup_scope,
-            popup_id,
+            task,
             window,
             source,
         )
@@ -3571,35 +3608,131 @@ impl JsContextHost {
     fn execute_lightweight_popup_window_javascript_url_source_in_context<'s>(
         &mut self,
         scope: &mut v8::PinScope<'s, '_>,
-        popup_id: u64,
+        task: LightweightPopupNavigationTaskToken,
         window: v8::Local<'s, v8::Object>,
         source: &str,
     ) -> Result<()> {
-        let Some(source_value) = v8_string(scope, source) else {
+        let popup_id = task.popup_id();
+        let owner = OwnerDispatchScope::LightweightPopup(popup_id);
+        let Some(source) = self.prepare_javascript_url_source_for_execution(scope, owner, source)
+        else {
+            return Ok(());
+        };
+        let Some(source_value) = v8_string(scope, &source) else {
             anyhow::bail!("failed to allocate popup javascript URL source");
         };
-        let mut script_source = v8::script_compiler::Source::new(source_value, None);
-        let Some(function) = v8::script_compiler::compile_function(
+        let Some(wrapper_source) = v8_string(
             scope,
-            &mut script_source,
-            &[],
-            &[window],
-            v8::script_compiler::CompileOptions::NoCompileOptions,
-            v8::script_compiler::NoCacheReason::BecauseInlineScript,
+            "(function(window, __moliSource) { with (window) { return eval(__moliSource); } })",
         ) else {
-            anyhow::bail!("v8 failed to compile popup javascript URL");
+            anyhow::bail!("failed to allocate popup javascript URL wrapper");
+        };
+        let Some(function) = v8::Script::compile(scope, wrapper_source, None)
+            .and_then(|script| script.run(scope))
+            .and_then(|value| v8::Local::<v8::Function>::try_from(value).ok())
+        else {
+            anyhow::bail!("v8 failed to compile popup javascript URL wrapper");
         };
         let previous_popup = enter_active_lightweight_popup_scope(scope, popup_id);
         let previous_message_source = self.enter_window_message_source_scope(
             super::PendingWindowMessageEndpoint::LightweightPopup(popup_id),
         );
-        let run_succeeded = function.call(scope, window.into(), &[]).is_some();
+        let eval_permit = crate::context_bootstrap::arm_internal_javascript_url_eval(scope);
+        let completion = function.call(scope, window.into(), &[window.into(), source_value.into()]);
+        crate::context_bootstrap::restore_internal_javascript_url_eval(scope, eval_permit);
         self.restore_window_message_source_scope(previous_message_source);
         restore_active_lightweight_popup_scope(scope, previous_popup);
-        if !run_succeeded {
+        let Some(completion) = completion else {
             anyhow::bail!("v8 failed to execute popup javascript URL");
+        };
+        if completion.is_string()
+            && self.lightweight_popup_committed_navigation_task_is_current(task)
+        {
+            let markup = completion
+                .to_string(scope)
+                .map(|value| value.to_rust_string_lossy(scope))
+                .unwrap_or_default();
+            self.commit_lightweight_popup_javascript_url_string_completion(
+                scope, task, window, markup,
+            );
         }
         Ok(())
+    }
+
+    fn commit_lightweight_popup_javascript_url_string_completion<'s>(
+        &mut self,
+        scope: &mut v8::PinScope<'s, '_>,
+        task: LightweightPopupNavigationTaskToken,
+        window: v8::Local<'s, v8::Object>,
+        markup: String,
+    ) -> bool {
+        if !self.lightweight_popup_committed_navigation_task_is_current(task) {
+            return false;
+        }
+        let popup_id = task.popup_id();
+        let Some(document_url) = self
+            .lightweight_popup_document_record(popup_id)
+            .map(|document| document.url.clone())
+        else {
+            return false;
+        };
+        let Some((document_state, storage_scope)) =
+            self.lightweight_popup_document_commit_seed(popup_id)
+        else {
+            return false;
+        };
+        let policy_container = document_state.policy_container.clone();
+        if !self.commit_lightweight_popup_document(
+            scope,
+            window,
+            LightweightPopupDocumentCommit {
+                owner: task.document_owner(),
+                location_url: document_url.clone(),
+                origin: LightweightPopupDocumentCommitOrigin::RetainCurrent,
+                state: document_state,
+                storage_scope,
+                navigation_loader: None,
+            },
+        ) || !self.lightweight_popup_committed_navigation_task_is_current(task)
+        {
+            return false;
+        }
+        let base_url = self
+            .lightweight_popup_base_url(scope, popup_id)
+            .unwrap_or_else(|| document_url.clone());
+        sync_lightweight_popup_window_location(
+            scope,
+            window,
+            document_url.as_str(),
+            &base_url,
+            &policy_container.document_referrer,
+        );
+        let Some(application) = self.install_lightweight_popup_document_projection(
+            scope,
+            window,
+            LightweightPopupDocumentProjectionSource {
+                task,
+                document_url: &document_url,
+                markup: &markup,
+                content_type: Some("text/html"),
+                character_set: Some("UTF-8"),
+                policy_container: &policy_container,
+            },
+        ) else {
+            return false;
+        };
+        if !self.lightweight_popup_committed_navigation_task_is_current(task) {
+            return true;
+        }
+        if !application.classic_script_load_pending {
+            if let Some(document_handle) = application.document_handle {
+                self.sync_child_browsing_context_subtree(scope, document_handle);
+            }
+            if self.lightweight_popup_committed_navigation_task_is_current(task) {
+                self.queue_lightweight_popup_load_event(task);
+            }
+        }
+        true
     }
 
     fn queue_lightweight_popup_load_event(&mut self, task: LightweightPopupNavigationTaskToken) {
@@ -4658,7 +4791,7 @@ fn lightweight_popup_javascript_url_callback<'s>(
         return;
     }
     if let Err(error) =
-        host.execute_lightweight_popup_window_javascript_url_source(scope, popup_id, &source)
+        host.execute_lightweight_popup_window_javascript_url_source(scope, task, &source)
     {
         tracing::debug!(
             popup_id,

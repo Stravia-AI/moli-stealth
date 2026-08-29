@@ -1144,7 +1144,18 @@ impl PageVm {
         );
         self.vm_mut()
             .restore_top_level_location_runtime_state(&initiator_url);
-        let replacement_html = self.vm_mut().eval_javascript_url_runtime_turn(&source)?;
+        if self.vm().script_execution_disabled() {
+            return Ok(PageVmFollowNavigationTurnOutcome::Completed);
+        }
+        let replacement_html = self
+            .vm_mut()
+            .eval_javascript_url_runtime_turn(&source, &initiator_url)?;
+        // Chromium suppresses a string completion when the script synchronously
+        // starts a normal navigation or submits a form. That newer navigation
+        // owns the target Document and must win over javascript: replacement.
+        if self.vm().has_pending_location_navigation() {
+            return Ok(PageVmFollowNavigationTurnOutcome::TriggeredNavigation { stage });
+        }
         if let Some(replacement_html) = replacement_html {
             self.document_lifecycle.set_next_document_open_start_reason(
                 RendererLifecycleStartReason::JavascriptDocumentReplacement,

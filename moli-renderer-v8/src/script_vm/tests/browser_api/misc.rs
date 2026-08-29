@@ -25036,6 +25036,162 @@ async fn lightweight_popup_javascript_url_navigation_runs_async_with_opener() {
 }
 
 #[tokio::test]
+async fn lightweight_popup_javascript_url_string_completion_replaces_document() {
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    let mut vm = new_storage_test_vm_with_loader("https://example.com/base/page.html", &loader);
+
+    let setup = vm
+        .eval(
+            r#"
+(() => {
+  globalThis.__stringCompletionPopup = open();
+  __stringCompletionPopup.location.href =
+    "javascript:'<!doctype html><main id=javascript-url-result>replaced</main>'";
+  return `${__stringCompletionPopup.location.href}|${__stringCompletionPopup.document.body.textContent}`;
+})()
+"#,
+        )
+        .expect("popup javascript string completion setup should evaluate");
+
+    assert_eq!(setup, "about:blank|");
+    vm.drain_pending_child_frame_work_for_test();
+    assert!(
+        vm.run_next_due_timer_callback_for_test(&loader)
+            .await
+            .expect("popup javascript URL timer should run")
+    );
+    vm.drain_pending_child_frame_work_for_test();
+    assert_eq!(
+        vm.eval(
+            r##"JSON.stringify([
+  __stringCompletionPopup.location.href,
+  __stringCompletionPopup.document.querySelector("#javascript-url-result").textContent,
+  __stringCompletionPopup.document.defaultView === __stringCompletionPopup,
+  __stringCompletionPopup.opener === window
+])"##,
+        )
+        .expect("popup javascript string completion should replace the document"),
+        r#"["about:blank","replaced",true,true]"#
+    );
+}
+
+#[tokio::test]
+async fn loaded_lightweight_popup_can_replace_itself_from_javascript_url_string_completion() {
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    let mut vm =
+        new_page_task_executor_test_vm_with_loader("https://example.com/base/page.html", &loader);
+
+    assert_eq!(
+        vm.eval(
+            r#"
+(() => {
+  const html = `<!doctype html><script>
+    open("javascript:'<main id=javascript-url-self-result>self replaced</main>'", "_self");
+  <\/script>`;
+  globalThis.__selfReplacingPopup =
+    open(URL.createObjectURL(new Blob([html], { type: "text/html" })));
+  return __selfReplacingPopup.document.body.textContent;
+})()
+"#,
+        )
+        .expect("self-replacing popup setup should evaluate"),
+        ""
+    );
+    advance_page_task_executor_until_eval_equals(
+        &mut vm,
+        &loader,
+        "String(Boolean(__selfReplacingPopup.document.querySelector('#javascript-url-self-result')))",
+        "true",
+        "loaded popup javascript URL string completion",
+    )
+    .await;
+    assert_eq!(
+        vm.eval(
+            "__selfReplacingPopup.document.querySelector('#javascript-url-self-result').textContent",
+        )
+        .expect("self-replaced popup document should remain observable"),
+        "self replaced"
+    );
+}
+
+#[tokio::test]
+async fn popup_javascript_url_string_document_keeps_inherited_frame_src_policy() {
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    let mut vm = new_storage_page_task_executor_test_vm_with_loader(
+        "https://popup-javascript-url-frame-csp.test/",
+        &loader,
+    );
+    vm.set_response_content_security_policies(&["frame-src 'none'".to_owned()]);
+
+    assert_eq!(
+        vm.eval(
+            r#"
+(() => {
+  globalThis.__popupJavascriptUrlFrameCspEvents = [];
+  addEventListener("message", event => {
+    __popupJavascriptUrlFrameCspEvents.push(String(event.data));
+  });
+  globalThis.__javascriptUrlCspPopup = open();
+  __javascriptUrlCspPopup.addEventListener("securitypolicyviolation", event => {
+    __javascriptUrlCspPopup.opener.postMessage(
+      `${event.violatedDirective}:${event.blockedURI}`, "*");
+  });
+  const markup = '<iframe src="https://blocked-frame.test/fail.html"></iframe>';
+  __javascriptUrlCspPopup.location.href = "javascript:" + JSON.stringify(markup);
+  return __popupJavascriptUrlFrameCspEvents.length;
+})()
+"#,
+        )
+        .expect("popup javascript URL inherited CSP setup should evaluate"),
+        "0"
+    );
+    assert_eq!(
+        vm._context_host
+            .borrow()
+            .lightweight_popup_policy_container(1)
+            .expect("popup policy container")
+            .response_content_security_policies,
+        ["frame-src 'none'".to_owned()]
+    );
+    advance_page_task_executor_until_eval_equals(
+        &mut vm,
+        &loader,
+        "String(Boolean(__javascriptUrlCspPopup.document.querySelector('iframe')))",
+        "true",
+        "popup javascript URL replacement iframe",
+    )
+    .await;
+    assert_eq!(
+        vm.eval(
+            r#"(() => {
+  const frame = __javascriptUrlCspPopup.document.querySelector('iframe');
+  return `${frame.contentWindow !== null}|${frame.contentDocument !== null}`;
+})()"#,
+        )
+        .expect("popup javascript URL nested frame projection should be observable"),
+        "true|true"
+    );
+    advance_page_task_executor_until_eval_equals(
+        &mut vm,
+        &loader,
+        "String(__popupJavascriptUrlFrameCspEvents.length)",
+        "1",
+        "popup javascript URL inherited frame-src violation",
+    )
+    .await;
+    assert_eq!(
+        vm.eval("__popupJavascriptUrlFrameCspEvents.join('|')")
+            .expect("popup javascript URL inherited CSP result should evaluate"),
+        "frame-src:https://blocked-frame.test/fail.html"
+    );
+    assert_eq!(
+        vm.eval("__javascriptUrlCspPopup.location.href")
+            .expect("popup javascript URL replacement should retain its prior URL"),
+        "about:blank"
+    );
+}
+
+#[tokio::test]
 async fn lightweight_popup_javascript_url_uses_inline_navigation_csp_not_eval_csp() {
     let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let mut allowed = new_storage_page_task_executor_test_vm_with_loader(
@@ -25117,6 +25273,47 @@ async fn lightweight_popup_javascript_url_uses_inline_navigation_csp_not_eval_cs
             .eval("globalThis.__blockedJavascriptUrlViolations.join(',')")
             .expect("queued javascript URL CSP violation should be observable"),
         "script-src-elem:inline"
+    );
+}
+
+#[tokio::test]
+async fn lightweight_popup_javascript_url_eval_permit_is_one_shot() {
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    let mut vm = new_storage_page_task_executor_test_vm_with_loader(
+        "https://popup-javascript-url-eval.test/",
+        &loader,
+    );
+    vm.set_response_content_security_policies(&["script-src 'unsafe-inline'".to_owned()]);
+
+    vm.eval(
+        r#"
+globalThis.__popupJavascriptUrlEvalResults = [];
+onmessage = event => __popupJavascriptUrlEvalResults.push(String(event.data));
+const popup = open();
+popup.location.href = `javascript:
+  try {
+    eval("globalThis.__nestedEvalRan = true");
+    opener.postMessage("nested:allowed", "*");
+  } catch (error) {
+    opener.postMessage("nested:" + error.name, "*");
+  }
+`;
+"queued"
+"#,
+    )
+    .expect("popup javascript URL nested eval should queue");
+    advance_page_task_executor_until_eval_equals(
+        &mut vm,
+        &loader,
+        "String(__popupJavascriptUrlEvalResults.length)",
+        "1",
+        "popup javascript URL nested eval policy result",
+    )
+    .await;
+    assert_eq!(
+        vm.eval("__popupJavascriptUrlEvalResults.sort().join('|')")
+            .expect("popup javascript URL nested eval result should evaluate"),
+        "nested:EvalError"
     );
 }
 

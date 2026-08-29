@@ -867,6 +867,18 @@ fn page_diagnostics_snapshot_observes_but_does_not_drain_lifecycle_state() {
     );
 }
 
+async fn follow_pending_javascript_url_for_test(
+    page_vm: &mut PageVm,
+) -> anyhow::Result<crate::runtime::PageVmFollowNavigationTurnOutcome> {
+    let mut pending_document_lifecycle_turn = None;
+    page_vm
+        .follow_pending_location_navigation_one_turn_async(
+            &mut pending_document_lifecycle_turn,
+            PageVmInitStage::Load,
+        )
+        .await
+}
+
 #[tokio::test]
 async fn javascript_location_navigation_executes_when_pending_navigation_is_followed() {
     run_page_vm_async_test(async move {
@@ -878,7 +890,6 @@ async fn javascript_location_navigation_executes_when_pending_navigation_is_foll
         let (outcome_is_completed, log, href, network_records) = local_executor
             .run(async move {
                 let mut page_vm = page_vm;
-                let mut pending_document_lifecycle_turn = None;
                 page_vm.vm_mut().eval(
                     r#"
 globalThis.__events = [];
@@ -892,12 +903,7 @@ globalThis.__events.push('after setter');
                     "javascript: location should remain pending until the owner follows it"
                 );
 
-                let outcome = page_vm
-                    .follow_pending_location_navigation_one_turn_async(
-                        &mut pending_document_lifecycle_turn,
-                        PageVmInitStage::Load,
-                    )
-                    .await?;
+                let outcome = follow_pending_javascript_url_for_test(&mut page_vm).await?;
                 let log = page_vm
                     .vm_mut()
                     .eval("JSON.stringify(globalThis.__events)")?;
@@ -929,7 +935,240 @@ globalThis.__events.push('after setter');
 }
 
 #[tokio::test]
-async fn javascript_location_assignment_keeps_href_and_drops_pending_when_not_followed() {
+async fn javascript_location_navigation_exception_is_reported_without_failing_navigation() {
+    run_page_vm_async_test(async move {
+        let page_vm = test_page_vm_with_document_url(
+            Url::parse("https://javascript-location-exception.test/start.html").unwrap(),
+        );
+        let local_executor = page_vm.local_executor.clone();
+
+        let (completed, error_count, href) = local_executor
+            .run(async move {
+                let mut page_vm = page_vm;
+                page_vm.vm_mut().eval(
+                    r#"
+globalThis.__javascriptUrlErrorCount = 0;
+window.addEventListener("error", event => {
+  globalThis.__javascriptUrlErrorCount += 1;
+  event.preventDefault();
+});
+location.href = "javascript:throw new Error('expected javascript URL failure')";
+"queued"
+"#,
+                )?;
+
+                let outcome = follow_pending_javascript_url_for_test(&mut page_vm).await?;
+                let error_count = page_vm
+                    .vm_mut()
+                    .eval("String(globalThis.__javascriptUrlErrorCount)")?;
+                let href = page_vm.vm_mut().eval("location.href")?;
+                Ok::<_, anyhow::Error>((
+                    matches!(
+                        outcome,
+                        crate::runtime::PageVmFollowNavigationTurnOutcome::Completed
+                    ),
+                    error_count,
+                    href,
+                ))
+            })
+            .await
+            .expect("javascript: exception should not fail the navigation task");
+
+        assert!(completed);
+        assert_eq!(error_count, "1");
+        assert_eq!(
+            href,
+            "https://javascript-location-exception.test/start.html"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn javascript_location_navigation_obeys_trusted_types_pre_navigation_check() {
+    run_page_vm_async_test(async move {
+        let page_vm = test_page_vm_with_document_url(
+            Url::parse("https://javascript-location-trusted-types.test/start.html").unwrap(),
+        );
+        let local_executor = page_vm.local_executor.clone();
+
+        let ran = local_executor
+            .run(async move {
+                let mut page_vm = page_vm;
+                page_vm.vm_mut().set_response_content_security_policies(&[
+                    "require-trusted-types-for 'script'".to_owned(),
+                ]);
+                page_vm.vm_mut().eval(
+                    r#"
+globalThis.__blockedJavascriptUrlRan = false;
+location.href = "javascript:globalThis.__blockedJavascriptUrlRan = true";
+"queued"
+"#,
+                )?;
+
+                let outcome = follow_pending_javascript_url_for_test(&mut page_vm).await?;
+                assert!(matches!(
+                    outcome,
+                    crate::runtime::PageVmFollowNavigationTurnOutcome::Completed
+                ));
+                page_vm
+                    .vm_mut()
+                    .eval("String(globalThis.__blockedJavascriptUrlRan)")
+            })
+            .await
+            .expect("Trusted Types should block the javascript: task without failing it");
+
+        assert_eq!(ran, "false");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn javascript_location_navigation_executes_default_policy_modified_source() {
+    run_page_vm_async_test(async move {
+        let page_vm = test_page_vm_with_document_url(
+            Url::parse("https://javascript-location-default-policy.test/start.html").unwrap(),
+        );
+        let local_executor = page_vm.local_executor.clone();
+
+        let observed = local_executor
+            .run(async move {
+                let mut page_vm = page_vm;
+                page_vm
+                    .vm_mut()
+                    .set_response_content_security_policies(&[
+                        "require-trusted-types-for 'script'".to_owned(),
+                    ]);
+                page_vm.vm_mut().eval(
+                    r#"
+globalThis.__originalJavascriptUrlRan = false;
+globalThis.__modifiedJavascriptUrlRan = false;
+globalThis.__javascriptUrlPolicyCalls = [];
+trustedTypes.createPolicy("default", {
+  createScript(value, type, sink) {
+    globalThis.__javascriptUrlPolicyCalls.push([value, type, sink]);
+    return value.replace("__originalJavascriptUrlRan", "__modifiedJavascriptUrlRan");
+  }
+});
+location.href = "javascript:globalThis.__originalJavascriptUrlRan = true";
+"queued"
+"#,
+                )?;
+
+                let outcome = follow_pending_javascript_url_for_test(&mut page_vm).await?;
+                assert!(matches!(
+                    outcome,
+                    crate::runtime::PageVmFollowNavigationTurnOutcome::Completed
+                ));
+                page_vm.vm_mut().eval(
+                    r#"JSON.stringify({
+  original: globalThis.__originalJavascriptUrlRan,
+  modified: globalThis.__modifiedJavascriptUrlRan,
+  calls: globalThis.__javascriptUrlPolicyCalls
+})"#,
+                )
+            })
+            .await
+            .expect("Trusted Types default policy should rewrite javascript: source");
+
+        assert_eq!(
+            observed,
+            r#"{"original":false,"modified":true,"calls":[["globalThis.__originalJavascriptUrlRan = true","TrustedScript","Location href"]]}"#
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn queued_top_level_javascript_url_does_not_execute_after_scripting_is_disabled() {
+    run_page_vm_async_test(async move {
+        let page_vm = test_page_vm_with_document_url(
+            Url::parse("https://javascript-location-disabled.test/start.html").unwrap(),
+        );
+        let local_executor = page_vm.local_executor.clone();
+
+        let (completed, ran) = local_executor
+            .run(async move {
+                let mut page_vm = page_vm;
+                page_vm.vm_mut().eval(
+                    r#"
+globalThis.__disabledJavascriptUrlRan = false;
+location.href = "javascript:globalThis.__disabledJavascriptUrlRan = true";
+"queued"
+"#,
+                )?;
+                page_vm.vm_mut().set_script_execution_disabled(true);
+
+                let outcome = follow_pending_javascript_url_for_test(&mut page_vm).await?;
+                let ran = page_vm
+                    .vm_mut()
+                    .eval("String(globalThis.__disabledJavascriptUrlRan)")?;
+                Ok::<_, anyhow::Error>((
+                    matches!(
+                        outcome,
+                        crate::runtime::PageVmFollowNavigationTurnOutcome::Completed
+                    ),
+                    ran,
+                ))
+            })
+            .await
+            .expect("disabled javascript: task should complete without execution");
+
+        assert!(completed);
+        assert_eq!(ran, "false");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn javascript_string_completion_does_not_replace_after_new_navigation_is_triggered() {
+    run_page_vm_async_test(async move {
+        let page_vm = test_page_vm_with_document_url(
+            Url::parse("https://javascript-location-precedence.test/start.html").unwrap(),
+        );
+        let local_executor = page_vm.local_executor.clone();
+
+        let (triggered, pending_url, body_text) = local_executor
+            .run(async move {
+                let mut page_vm = page_vm;
+                page_vm.vm_mut().eval(
+                    r#"
+document.body.textContent = "original body";
+location.href = "javascript:(location.href = 'https://javascript-location-precedence.test/winner.html', 'replacement body')";
+"queued"
+"#,
+                )?;
+
+                let outcome = follow_pending_javascript_url_for_test(&mut page_vm).await?;
+                let pending = page_vm
+                    .vm_mut()
+                    .take_pending_location_navigation_with_seed()
+                    .expect("javascript: execution should leave the newer navigation pending");
+                let body_text = page_vm.vm_mut().eval("document.body.textContent")?;
+                Ok::<_, anyhow::Error>((
+                    matches!(
+                        outcome,
+                        crate::runtime::PageVmFollowNavigationTurnOutcome::TriggeredNavigation { .. }
+                    ),
+                    pending.url.to_string(),
+                    body_text,
+                ))
+            })
+            .await
+            .expect("newer navigation should suppress javascript: string replacement");
+
+        assert!(triggered);
+        assert_eq!(
+            pending_url,
+            "https://javascript-location-precedence.test/winner.html"
+        );
+        assert_eq!(body_text, "original body");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn javascript_location_assignment_keeps_href_and_pending_when_not_delegated() {
     run_page_vm_async_test(async move {
         let page_vm = test_page_vm_with_document_url(
             Url::parse("https://javascript-location-ghost.test/start.html").unwrap(),
@@ -960,8 +1199,8 @@ location.href
                     "a javascript: pending navigation must never be published to the browser"
                 );
                 assert!(
-                    !page_vm.vm().has_pending_location_navigation(),
-                    "dropping a javascript: pending navigation must clear the pending record"
+                    page_vm.vm().has_pending_location_navigation(),
+                    "browser publication must leave renderer-owned javascript: work pending"
                 );
                 let href = page_vm.vm_mut().eval("location.href")?;
                 assert_eq!(

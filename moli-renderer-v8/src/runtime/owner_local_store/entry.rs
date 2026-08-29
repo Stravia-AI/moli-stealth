@@ -2,7 +2,7 @@ use super::navigation_follow::CommittedNavigationBootstrapCompletion;
 use super::*;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(super) enum StandaloneNavigationFollowState {
+pub(super) enum RendererNavigationFollowState {
     #[default]
     Idle,
     Following {
@@ -21,7 +21,7 @@ pub(in crate::runtime) struct PublishedReplacementDocument {
     pub(in crate::runtime) view_generation: u64,
 }
 
-impl StandaloneNavigationFollowState {
+impl RendererNavigationFollowState {
     pub(super) fn claim(
         &mut self,
         current: Option<crate::page_task_queue::RendererTopLevelNavigationHandoff>,
@@ -65,7 +65,7 @@ impl StandaloneNavigationFollowState {
 pub(in crate::runtime) struct LivePageEntry {
     pub(in crate::runtime) slot: RendererPageSlotHandle,
     pub(super) top_level_navigation_dispatch: RendererTopLevelNavigationDispatch,
-    pub(super) standalone_navigation_follow: StandaloneNavigationFollowState,
+    pub(super) renderer_navigation_follow: RendererNavigationFollowState,
     // Keep executable continuation state before `vm`: Rust drops fields in
     // declaration order, so an exceptional entry drop still releases any
     // ScriptVm-bound task before releasing the PageVm itself.
@@ -180,9 +180,9 @@ impl CommittedNavigationEntry {
         RetiringPageEntry::new(self.entry)
     }
 
-    pub(in crate::runtime) fn settle_standalone_navigation_follow(&mut self, succeeded: bool) {
+    pub(in crate::runtime) fn settle_renderer_navigation_follow(&mut self, succeeded: bool) {
         self.entry
-            .standalone_navigation_follow
+            .renderer_navigation_follow
             .settle(None, succeeded);
     }
 }
@@ -196,8 +196,8 @@ impl RetiringPageEntry {
         Self { entry }
     }
 
-    pub(in crate::runtime) fn settle_standalone_navigation_follow(&mut self, succeeded: bool) {
-        self.entry.settle_standalone_navigation_follow(succeeded);
+    pub(in crate::runtime) fn settle_renderer_navigation_follow(&mut self, succeeded: bool) {
+        self.entry.settle_renderer_navigation_follow(succeeded);
     }
 }
 
@@ -210,8 +210,8 @@ impl std::fmt::Debug for LivePageEntry {
                 &self.top_level_navigation_dispatch,
             )
             .field(
-                "standalone_navigation_follow",
-                &self.standalone_navigation_follow,
+                "renderer_navigation_follow",
+                &self.renderer_navigation_follow,
             )
             .field("vm", &self.vm)
             .field(
@@ -244,7 +244,7 @@ impl LivePageEntry {
             slot,
             top_level_navigation_dispatch:
                 RendererTopLevelNavigationDispatch::FollowInStandaloneAdapter,
-            standalone_navigation_follow: StandaloneNavigationFollowState::Idle,
+            renderer_navigation_follow: RendererNavigationFollowState::Idle,
             pending_document_lifecycle_turn: None,
             post_response_document_lifecycle: None,
             vm: Some(vm),
@@ -264,7 +264,7 @@ impl LivePageEntry {
             slot,
             top_level_navigation_dispatch:
                 RendererTopLevelNavigationDispatch::FollowInStandaloneAdapter,
-            standalone_navigation_follow: StandaloneNavigationFollowState::Idle,
+            renderer_navigation_follow: RendererNavigationFollowState::Idle,
             pending_document_lifecycle_turn: None,
             post_response_document_lifecycle: None,
             vm: None,
@@ -294,45 +294,60 @@ impl LivePageEntry {
         self.top_level_navigation_dispatch
     }
 
-    /// Claim the single standalone owner chain for the current pending
-    /// location navigation. A failed chain remains suppressed while that same
-    /// descriptor is pending, so a duplicate producer handoff cannot restart
-    /// the chain with a fresh limit.
-    pub(in crate::runtime) fn begin_standalone_navigation_follow(&mut self) -> bool {
-        self.begin_standalone_navigation_follow_for_handoff(None)
+    pub(in crate::runtime) fn pending_javascript_navigation_handoff(
+        &self,
+    ) -> Option<crate::page_task_queue::RendererTopLevelNavigationHandoff> {
+        let vm = self.active_page_vm()?.vm();
+        vm.pending_location_navigation_scheme_is("javascript")
+            .then(|| vm.pending_location_navigation_handoff())
+            .flatten()
+    }
+
+    fn renderer_owned_pending_navigation_handoff(
+        &self,
+    ) -> Option<crate::page_task_queue::RendererTopLevelNavigationHandoff> {
+        if matches!(
+            self.top_level_navigation_dispatch,
+            RendererTopLevelNavigationDispatch::FollowInStandaloneAdapter
+        ) {
+            return self
+                .active_page_vm()
+                .and_then(|page_vm| page_vm.vm().pending_location_navigation_handoff());
+        }
+        self.pending_javascript_navigation_handoff()
+    }
+
+    /// Claim the renderer-owned chain for the current pending location
+    /// navigation. Standalone pages keep every navigation in the renderer;
+    /// delegated pages retain schemes such as `javascript:` that must not
+    /// cross the browser navigation boundary.
+    pub(in crate::runtime) fn begin_renderer_navigation_follow(&mut self) -> bool {
+        self.begin_renderer_navigation_follow_for_handoff(None)
     }
 
     /// Claim a producer handoff only while the same request still occupies
     /// the ScriptVm's unique pending navigation slot. A delayed wake for an
     /// overwritten request therefore cannot start the replacement request.
-    pub(in crate::runtime) fn begin_standalone_navigation_follow_from_handoff(
+    pub(in crate::runtime) fn begin_renderer_navigation_follow_from_handoff(
         &mut self,
         handoff: crate::page_task_queue::RendererTopLevelNavigationHandoff,
     ) -> bool {
-        self.begin_standalone_navigation_follow_for_handoff(Some(handoff))
+        self.begin_renderer_navigation_follow_for_handoff(Some(handoff))
     }
 
-    pub(super) fn begin_standalone_navigation_follow_for_handoff(
+    pub(super) fn begin_renderer_navigation_follow_for_handoff(
         &mut self,
         requested: Option<crate::page_task_queue::RendererTopLevelNavigationHandoff>,
     ) -> bool {
-        if !matches!(
-            self.top_level_navigation_dispatch,
-            RendererTopLevelNavigationDispatch::FollowInStandaloneAdapter
-        ) {
-            return false;
-        }
-        let current = self
-            .active_page_vm()
-            .and_then(|page_vm| page_vm.vm().pending_location_navigation_handoff());
-        self.standalone_navigation_follow.claim(current, requested)
+        let current = self.renderer_owned_pending_navigation_handoff();
+        self.renderer_navigation_follow.claim(current, requested)
     }
 
-    pub(in crate::runtime) fn settle_standalone_navigation_follow(&mut self, succeeded: bool) {
+    pub(in crate::runtime) fn settle_renderer_navigation_follow(&mut self, succeeded: bool) {
         let current = self
             .active_page_vm()
             .and_then(|page_vm| page_vm.vm().pending_location_navigation_handoff());
-        self.standalone_navigation_follow.settle(current, succeeded);
+        self.renderer_navigation_follow.settle(current, succeeded);
     }
 
     /// Commit the source Document synchronously. The navigation task guard

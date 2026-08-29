@@ -151,6 +151,9 @@ pub(super) unsafe extern "C" fn string_code_generation_check_callback(
     let Some(host_ptr) = context_host_ptr_from_global_bridge(scope) else {
         return true;
     };
+    if crate::context_bootstrap::consume_internal_javascript_url_eval(scope) {
+        return true;
+    }
     let requires_trusted_types_for_script =
         unsafe { &*host_ptr }.requires_trusted_types_for_script(scope);
     let action = if requires_trusted_types_for_script {

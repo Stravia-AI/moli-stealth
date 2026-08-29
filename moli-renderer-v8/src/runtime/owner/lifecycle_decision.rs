@@ -233,7 +233,7 @@ impl RendererOwnerHandle {
             ));
         }
         if entry.page_vm().vm().has_pending_location_navigation()
-            && entry.begin_standalone_navigation_follow()
+            && entry.begin_renderer_navigation_follow()
         {
             return self.continue_live_page_pending_navigation(
                 token,

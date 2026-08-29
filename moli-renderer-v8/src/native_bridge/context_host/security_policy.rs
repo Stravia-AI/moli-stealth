@@ -8,9 +8,9 @@ use crate::{
     context_bootstrap::CHILD_BROWSING_CONTEXT_HANDLE_SLOT,
     document_runtime::{
         DocumentContentSecurityPolicyCheck, DocumentContentSecurityPolicyViolation,
-        DocumentSubresourceCspKind, DomHandle, create_content_security_policy_violation_event,
+        DocumentPolicyContainer, DocumentSubresourceCspKind, DomHandle,
+        create_content_security_policy_violation_event,
     },
-    dom::native::Node,
     native_bridge::{
         active_child_window_handle, active_lightweight_popup_id,
         child_window_handle_from_marker_data, entered_child_window_handle,
@@ -25,6 +25,15 @@ pub(crate) enum DocumentCspOutcome {
     Blocked(DocumentContentSecurityPolicyViolation),
     SkippedChildContext,
 }
+
+#[derive(Debug, Clone)]
+struct OwnerDocumentPolicySnapshot {
+    document_handle: Option<DomHandle>,
+    document_url: url::Url,
+    policy_container: DocumentPolicyContainer,
+}
+
+const JAVASCRIPT_URL_TRUSTED_TYPES_SINK: &str = "Location href";
 
 fn policy_child_window_handle(scope: &mut v8::PinScope<'_, '_>) -> Option<DomHandle> {
     if let Some(handle) = active_child_window_handle(scope) {
@@ -49,6 +58,43 @@ impl DocumentCspOutcome {
 }
 
 impl JsContextHost {
+    fn owner_document_policy_snapshot(
+        &self,
+        owner: OwnerDispatchScope,
+    ) -> Option<OwnerDocumentPolicySnapshot> {
+        match owner {
+            OwnerDispatchScope::Top => {
+                // SAFETY: JsContextHost is owned by the ScriptVm that owns this DocumentRuntime.
+                let runtime = unsafe { &*self.runtime };
+                Some(OwnerDocumentPolicySnapshot {
+                    document_handle: Some(runtime.document_handle()),
+                    document_url: runtime.document_url().clone(),
+                    policy_container: runtime.document_policy_container().clone(),
+                })
+            }
+            OwnerDispatchScope::Child(handle) => {
+                let mut policy_container =
+                    self.child_browsing_context_policy_container_snapshot(handle)?;
+                policy_container.response_content_security_policies =
+                    self.child_effective_response_content_security_policies(handle);
+                policy_container.response_content_security_report_only_policies =
+                    self.child_effective_response_content_security_report_only_policies(handle);
+                policy_container.content_security_reporting_endpoints =
+                    self.child_effective_content_security_reporting_endpoints(handle);
+                Some(OwnerDocumentPolicySnapshot {
+                    document_handle: self.child_browsing_context_document_handle(handle),
+                    document_url: self.child_browsing_context_current_url(handle)?,
+                    policy_container,
+                })
+            }
+            OwnerDispatchScope::LightweightPopup(popup_id) => Some(OwnerDocumentPolicySnapshot {
+                document_handle: self.lightweight_popup_document_handle(popup_id),
+                document_url: self.lightweight_popup_document_url(popup_id)?,
+                policy_container: self.lightweight_popup_policy_container(popup_id)?.clone(),
+            }),
+        }
+    }
+
     pub(crate) fn document_policy_container(
         &self,
     ) -> &crate::document_runtime::DocumentPolicyContainer {
@@ -60,57 +106,91 @@ impl JsContextHost {
         &self,
         owner: OwnerDispatchScope,
     ) -> Option<crate::document_runtime::DocumentConnectPolicySnapshot> {
-        let policy = match owner {
-            OwnerDispatchScope::Top => self.document_policy_container().clone(),
-            OwnerDispatchScope::Child(handle) => {
-                self.child_browsing_context_policy_container_snapshot(handle)?
-            }
-            OwnerDispatchScope::LightweightPopup(popup_id) => {
-                self.lightweight_popup_policy_container(popup_id)?.clone()
-            }
-        };
-        Some(crate::document_runtime::DocumentConnectPolicySnapshot::from_policy_container(&policy))
+        let snapshot = self.owner_document_policy_snapshot(owner)?;
+        Some(
+            crate::document_runtime::DocumentConnectPolicySnapshot::from_policy_container(
+                &snapshot.policy_container,
+            ),
+        )
     }
 
     pub(crate) fn trusted_types_for_script_requirements_for_owner(
         &self,
         owner: OwnerDispatchScope,
     ) -> Option<TrustedTypesForScriptRequirements> {
-        match owner {
-            OwnerDispatchScope::Top => {
-                // SAFETY: JsContextHost is owned by the ScriptVm that owns this DocumentRuntime.
-                Some(unsafe { &*self.runtime }.trusted_types_for_script_requirements())
-            }
-            OwnerDispatchScope::Child(handle) => {
-                let response_policies =
-                    self.child_effective_response_content_security_policies(handle);
-                let report_only_policies =
-                    self.child_effective_response_content_security_report_only_policies(handle);
-                let reporting_endpoints =
-                    self.child_effective_content_security_reporting_endpoints(handle);
-                // SAFETY: JsContextHost is owned by the ScriptVm that owns this DocumentRuntime.
-                Some(
-                    unsafe { &*self.runtime }.trusted_types_for_script_requirements_for_document(
-                        self.child_browsing_context_document_handle(handle),
-                        &response_policies,
-                        &report_only_policies,
-                        &reporting_endpoints,
-                    ),
-                )
-            }
-            OwnerDispatchScope::LightweightPopup(popup_id) => {
-                let policy = self.lightweight_popup_policy_container(popup_id)?;
-                // SAFETY: JsContextHost is owned by the ScriptVm that owns this DocumentRuntime.
-                Some(
-                    unsafe { &*self.runtime }.trusted_types_for_script_requirements_for_document(
-                        self.lightweight_popup_document_handle(popup_id),
-                        &policy.response_content_security_policies,
-                        &policy.response_content_security_report_only_policies,
-                        &policy.content_security_reporting_endpoints,
-                    ),
-                )
-            }
+        let snapshot = self.owner_document_policy_snapshot(owner)?;
+        // SAFETY: JsContextHost is owned by the ScriptVm that owns this DocumentRuntime.
+        Some(
+            unsafe { &*self.runtime }.trusted_types_for_script_requirements_for_document(
+                snapshot.document_handle,
+                &snapshot.policy_container.response_content_security_policies,
+                &snapshot
+                    .policy_container
+                    .response_content_security_report_only_policies,
+                &snapshot
+                    .policy_container
+                    .content_security_reporting_endpoints,
+            ),
+        )
+    }
+
+    fn trusted_types_sink_csp_violations_for_owner(
+        &self,
+        owner: OwnerDispatchScope,
+        sink: &str,
+        sample: &str,
+    ) -> Vec<DocumentContentSecurityPolicyViolation> {
+        let Some(snapshot) = self.owner_document_policy_snapshot(owner) else {
+            return Vec::new();
+        };
+        // SAFETY: JsContextHost is owned by the ScriptVm that owns this DocumentRuntime.
+        unsafe { &*self.runtime }.trusted_types_sink_csp_violations_for_document(
+            snapshot.document_handle,
+            &snapshot.document_url,
+            &snapshot.policy_container.response_content_security_policies,
+            &snapshot
+                .policy_container
+                .response_content_security_report_only_policies,
+            &snapshot
+                .policy_container
+                .content_security_reporting_endpoints,
+            sink,
+            sample,
+        )
+    }
+
+    /// Run the target Document checks immediately before a `javascript:` URL
+    /// executes. Source-context admission checks may already have happened at
+    /// the navigation API boundary; this is the Chromium-style target check
+    /// shared by top-level, child-frame, and lightweight-popup executors.
+    pub(crate) fn prepare_javascript_url_source_for_execution<'s>(
+        &mut self,
+        scope: &mut v8::PinScope<'s, '_>,
+        owner: OwnerDispatchScope,
+        source: &str,
+    ) -> Option<String> {
+        let csp_source = format!("javascript:{source}");
+        if !self.allows_inline_javascript_navigation_by_csp(scope, owner, &csp_source) {
+            return None;
         }
+
+        let requirements = self.trusted_types_for_script_requirements_for_owner(owner)?;
+        let check = crate::context_bootstrap::check_javascript_url_trusted_types(
+            scope,
+            source,
+            requirements,
+        );
+        if check.violated {
+            let host_ptr: *mut JsContextHost = self;
+            self.dispatch_trusted_types_sink_csp_violation_event_for_owner_without_stack_best_effort(
+                scope,
+                host_ptr,
+                owner,
+                JAVASCRIPT_URL_TRUSTED_TYPES_SINK,
+                source,
+            );
+        }
+        check.source
     }
 
     pub(crate) fn cross_origin_embedder_policy(
@@ -256,7 +336,7 @@ impl JsContextHost {
         kind: ContentSecurityPolicyNonUrlKind,
         source: &str,
     ) -> bool {
-        let Some(check) = self.inline_source_csp_check_for_owner(scope, owner, kind, source) else {
+        let Some(check) = self.inline_source_csp_check_for_owner(owner, kind, source) else {
             // Deliberately fail open only while a child or lightweight popup
             // has no active document URL/policy context (for example during a
             // navigation swap). CSP is document-scoped: applying the top-level
@@ -282,54 +362,27 @@ impl JsContextHost {
 
     fn inline_source_csp_check_for_owner(
         &self,
-        _scope: &mut v8::PinScope<'_, '_>,
         owner: OwnerDispatchScope,
         kind: ContentSecurityPolicyNonUrlKind,
         source: &str,
     ) -> Option<DocumentContentSecurityPolicyCheck> {
-        match owner {
-            OwnerDispatchScope::Top => {
-                // SAFETY: JsContextHost is owned by the ScriptVm that owns this DocumentRuntime.
-                Some(unsafe { &*self.runtime }.inline_source_csp_check(kind, source))
-            }
-            OwnerDispatchScope::Child(handle) => {
-                let document_url = self.child_browsing_context_current_url(handle)?;
-                let response_policies =
-                    self.child_effective_response_content_security_policies(handle);
-                let response_report_only_policies =
-                    self.child_effective_response_content_security_report_only_policies(handle);
-                let response_reporting_endpoints =
-                    self.child_effective_content_security_reporting_endpoints(handle);
-                // SAFETY: JsContextHost is owned by the ScriptVm that owns this DocumentRuntime.
-                Some(
-                    unsafe { &*self.runtime }.inline_source_csp_check_for_child_document(
-                        self.child_browsing_context_document_handle(handle),
-                        &document_url,
-                        &response_policies,
-                        &response_report_only_policies,
-                        &response_reporting_endpoints,
-                        kind,
-                        source,
-                    ),
-                )
-            }
-            OwnerDispatchScope::LightweightPopup(popup_id) => {
-                let document_url = self.lightweight_popup_document_url(popup_id)?;
-                let policy_container = self.lightweight_popup_policy_container(popup_id)?;
-                // SAFETY: JsContextHost is owned by the ScriptVm that owns this DocumentRuntime.
-                Some(
-                    unsafe { &*self.runtime }.inline_source_csp_check_for_child_document(
-                        self.lightweight_popup_document_handle(popup_id),
-                        &document_url,
-                        &policy_container.response_content_security_policies,
-                        &policy_container.response_content_security_report_only_policies,
-                        &policy_container.content_security_reporting_endpoints,
-                        kind,
-                        source,
-                    ),
-                )
-            }
-        }
+        let snapshot = self.owner_document_policy_snapshot(owner)?;
+        // SAFETY: JsContextHost is owned by the ScriptVm that owns this DocumentRuntime.
+        Some(
+            unsafe { &*self.runtime }.inline_source_csp_check_for_document(
+                snapshot.document_handle,
+                &snapshot.document_url,
+                &snapshot.policy_container.response_content_security_policies,
+                &snapshot
+                    .policy_container
+                    .response_content_security_report_only_policies,
+                &snapshot
+                    .policy_container
+                    .content_security_reporting_endpoints,
+                kind,
+                source,
+            ),
+        )
     }
 
     fn inline_script_element_csp_check_for_owner(
@@ -338,47 +391,23 @@ impl JsContextHost {
         source: &str,
         request: ContentSecurityPolicyScriptElementRequest<'_>,
     ) -> Option<DocumentContentSecurityPolicyCheck> {
-        match owner {
-            OwnerDispatchScope::Top => {
-                // SAFETY: JsContextHost is owned by the ScriptVm that owns this DocumentRuntime.
-                Some(unsafe { &*self.runtime }.inline_script_element_csp_check(source, request))
-            }
-            OwnerDispatchScope::Child(handle) => {
-                let document_url = self.child_browsing_context_current_url(handle)?;
-                let response_policies =
-                    self.child_effective_response_content_security_policies(handle);
-                let response_report_only_policies =
-                    self.child_effective_response_content_security_report_only_policies(handle);
-                let response_reporting_endpoints =
-                    self.child_effective_content_security_reporting_endpoints(handle);
-                Some(
-                    unsafe { &*self.runtime }.inline_script_element_csp_check_for_child_document(
-                        self.child_browsing_context_document_handle(handle),
-                        &document_url,
-                        &response_policies,
-                        &response_report_only_policies,
-                        &response_reporting_endpoints,
-                        source,
-                        request,
-                    ),
-                )
-            }
-            OwnerDispatchScope::LightweightPopup(popup_id) => {
-                let document_url = self.lightweight_popup_document_url(popup_id)?;
-                let policy_container = self.lightweight_popup_policy_container(popup_id)?;
-                Some(
-                    unsafe { &*self.runtime }.inline_script_element_csp_check_for_child_document(
-                        self.lightweight_popup_document_handle(popup_id),
-                        &document_url,
-                        &policy_container.response_content_security_policies,
-                        &policy_container.response_content_security_report_only_policies,
-                        &policy_container.content_security_reporting_endpoints,
-                        source,
-                        request,
-                    ),
-                )
-            }
-        }
+        let snapshot = self.owner_document_policy_snapshot(owner)?;
+        // SAFETY: JsContextHost is owned by the ScriptVm that owns this DocumentRuntime.
+        Some(
+            unsafe { &*self.runtime }.inline_script_element_csp_check_for_document(
+                snapshot.document_handle,
+                &snapshot.document_url,
+                &snapshot.policy_container.response_content_security_policies,
+                &snapshot
+                    .policy_container
+                    .response_content_security_report_only_policies,
+                &snapshot
+                    .policy_container
+                    .content_security_reporting_endpoints,
+                source,
+                request,
+            ),
+        )
     }
 
     pub(crate) fn entered_owner_dispatch_scope(
@@ -545,27 +574,18 @@ impl JsContextHost {
         frame_handle: DomHandle,
         request_url: &url::Url,
     ) -> Option<DocumentContentSecurityPolicyViolation> {
-        match self.frame_navigation_source_child_handle(frame_handle)? {
-            Some(source_child) => {
-                let document_url = self.child_browsing_context_current_url(source_child)?;
-                let response_policies =
-                    self.child_effective_response_content_security_policies(source_child);
-                let response_reporting_endpoints =
-                    self.child_effective_content_security_reporting_endpoints(source_child);
-                // SAFETY: JsContextHost is owned by the ScriptVm that owns this DocumentRuntime.
-                unsafe { &*self.runtime }.document_frame_csp_violation_for_child_document(
-                    self.child_browsing_context_document_handle(source_child),
-                    &document_url,
-                    &response_policies,
-                    &response_reporting_endpoints,
-                    request_url,
-                )
-            }
-            None => {
-                // SAFETY: JsContextHost is owned by the ScriptVm that owns this DocumentRuntime.
-                unsafe { &*self.runtime }.document_frame_csp_violation(request_url)
-            }
-        }
+        let owner = self.owner_dispatch_scope_for_node(frame_handle)?;
+        let snapshot = self.owner_document_policy_snapshot(owner)?;
+        // SAFETY: JsContextHost is owned by the ScriptVm that owns this DocumentRuntime.
+        unsafe { &*self.runtime }.document_frame_csp_violation_for_document(
+            snapshot.document_handle,
+            &snapshot.document_url,
+            &snapshot.policy_container.response_content_security_policies,
+            &snapshot
+                .policy_container
+                .content_security_reporting_endpoints,
+            request_url,
+        )
     }
 
     pub(crate) fn frame_navigation_csp_report_only_violation(
@@ -573,42 +593,19 @@ impl JsContextHost {
         frame_handle: DomHandle,
         request_url: &url::Url,
     ) -> Option<DocumentContentSecurityPolicyViolation> {
-        match self.frame_navigation_source_child_handle(frame_handle)? {
-            Some(source_child) => {
-                let document_url = self.child_browsing_context_current_url(source_child)?;
-                let response_report_only_policies = self
-                    .child_effective_response_content_security_report_only_policies(source_child);
-                let response_reporting_endpoints =
-                    self.child_effective_content_security_reporting_endpoints(source_child);
-                // SAFETY: JsContextHost is owned by the ScriptVm that owns this DocumentRuntime.
-                unsafe { &*self.runtime }
-                    .document_frame_csp_report_only_violation_for_child_document(
-                        &document_url,
-                        &response_report_only_policies,
-                        &response_reporting_endpoints,
-                        request_url,
-                    )
-            }
-            None => {
-                // SAFETY: JsContextHost is owned by the ScriptVm that owns this DocumentRuntime.
-                unsafe { &*self.runtime }.document_frame_csp_report_only_violation(request_url)
-            }
-        }
-    }
-
-    fn frame_navigation_source_child_handle(
-        &self,
-        frame_handle: DomHandle,
-    ) -> Option<Option<DomHandle>> {
-        let owner_document = self
-            .dom_host()
-            .node(frame_handle)
-            .and_then(Node::owner_document)?;
-        if owner_document == self.document_handle() {
-            return Some(None);
-        }
-        self.child_browsing_context_host_for_document_handle(owner_document)
-            .map(Some)
+        let owner = self.owner_dispatch_scope_for_node(frame_handle)?;
+        let snapshot = self.owner_document_policy_snapshot(owner)?;
+        // SAFETY: JsContextHost is owned by the ScriptVm that owns this DocumentRuntime.
+        unsafe { &*self.runtime }.document_frame_csp_report_only_violation_for_document(
+            &snapshot.document_url,
+            &snapshot
+                .policy_container
+                .response_content_security_report_only_policies,
+            &snapshot
+                .policy_container
+                .content_security_reporting_endpoints,
+            request_url,
+        )
     }
 
     fn child_effective_response_content_security_policies(
@@ -1072,6 +1069,23 @@ impl JsContextHost {
         );
     }
 
+    pub(crate) fn dispatch_trusted_types_sink_csp_violation_event_for_owner_without_stack_best_effort<
+        's,
+    >(
+        &mut self,
+        scope: &mut v8::PinScope<'s, '_>,
+        host_ptr: *mut JsContextHost,
+        owner: OwnerDispatchScope,
+        sink: &str,
+        sample: &str,
+    ) {
+        for violation in self.trusted_types_sink_csp_violations_for_owner(owner, sink, sample) {
+            self.dispatch_content_security_policy_violation_event_for_owner_best_effort(
+                scope, host_ptr, owner, &violation,
+            );
+        }
+    }
+
     fn dispatch_trusted_types_sink_csp_violation_event_with_location_best_effort<'s>(
         &mut self,
         scope: &mut v8::PinScope<'s, '_>,
@@ -1270,21 +1284,26 @@ impl JsContextHost {
         frame_handle: DomHandle,
         violation: &DocumentContentSecurityPolicyViolation,
     ) {
-        match self.frame_navigation_source_child_handle(frame_handle) {
-            Some(Some(source_child)) => {
+        match self.owner_dispatch_scope_for_node(frame_handle) {
+            Some(OwnerDispatchScope::Child(source_child)) => {
                 self.dispatch_child_content_security_policy_violation_event_best_effort(
                     scope,
                     source_child,
                     violation,
                 );
             }
-            Some(None) => {
+            Some(OwnerDispatchScope::Top) => {
                 let host_ptr: *mut JsContextHost = self;
                 // SAFETY: JsContextHost is owned by the ScriptVm that owns this DocumentRuntime.
                 unsafe { &mut *self.runtime }
                     .queue_content_security_policy_violation_event_best_effort(
                         scope, host_ptr, violation,
                     );
+            }
+            Some(OwnerDispatchScope::LightweightPopup(popup_id)) => {
+                self.dispatch_lightweight_popup_content_security_policy_violation_event_best_effort(
+                    scope, popup_id, violation,
+                );
             }
             None => {
                 tracing::error!(

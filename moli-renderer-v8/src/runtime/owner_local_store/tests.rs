@@ -87,7 +87,7 @@ mod navigation_dispatch_tests {
     }
 
     fn phase_one_entry_shell_without_active_page_vm(
-        standalone_navigation_follow: StandaloneNavigationFollowState,
+        renderer_navigation_follow: RendererNavigationFollowState,
     ) -> LivePageEntry {
         let page_id = PageId::new_for_testing(1);
         let (page_context_cancel_tx, _page_context_cancel_rx) =
@@ -102,7 +102,7 @@ mod navigation_dispatch_tests {
             slot,
             top_level_navigation_dispatch:
                 RendererTopLevelNavigationDispatch::FollowInStandaloneAdapter,
-            standalone_navigation_follow,
+            renderer_navigation_follow,
             pending_document_lifecycle_turn: None,
             post_response_document_lifecycle: None,
             vm: None,
@@ -116,15 +116,15 @@ mod navigation_dispatch_tests {
         let handoff = crate::page_task_queue::RendererTopLevelNavigationHandoff::new(1);
         for succeeded in [false, true] {
             for mut state in [
-                StandaloneNavigationFollowState::Idle,
-                StandaloneNavigationFollowState::Following { handoff },
-                StandaloneNavigationFollowState::FailedWithPendingNavigation { handoff },
+                RendererNavigationFollowState::Idle,
+                RendererNavigationFollowState::Following { handoff },
+                RendererNavigationFollowState::FailedWithPendingNavigation { handoff },
             ] {
                 state.settle(None, succeeded);
 
                 assert_eq!(
                     state,
-                    StandaloneNavigationFollowState::Idle,
+                    RendererNavigationFollowState::Idle,
                     "a committed navigation must settle to Idle after succeeded={succeeded}"
                 );
             }
@@ -134,7 +134,7 @@ mod navigation_dispatch_tests {
     #[test]
     fn failed_phase_one_advance_returns_a_retiring_entry() {
         let advance = phase_one::classify_pending_phase_one_entry_advance(
-            phase_one_entry_shell_without_active_page_vm(StandaloneNavigationFollowState::Idle),
+            phase_one_entry_shell_without_active_page_vm(RendererNavigationFollowState::Idle),
             Err(anyhow!("resume failed")),
         );
 
@@ -152,7 +152,7 @@ mod navigation_dispatch_tests {
     #[test]
     fn successful_phase_one_advance_without_a_vm_is_retired_as_an_invariant_error() {
         let advance = phase_one::classify_pending_phase_one_entry_advance(
-            phase_one_entry_shell_without_active_page_vm(StandaloneNavigationFollowState::Idle),
+            phase_one_entry_shell_without_active_page_vm(RendererNavigationFollowState::Idle),
             Ok(
                 LivePagePendingNavigationPhaseOneAdvance::TriggeredNavigation {
                     stage: PageVmInitStage::DomContentLoaded,
@@ -179,14 +179,14 @@ mod navigation_dispatch_tests {
     fn navigation_handoff_claim_rejects_stale_and_duplicate_requests() {
         let first = crate::page_task_queue::RendererTopLevelNavigationHandoff::new(1);
         let second = crate::page_task_queue::RendererTopLevelNavigationHandoff::new(2);
-        let mut state = StandaloneNavigationFollowState::Idle;
+        let mut state = RendererNavigationFollowState::Idle;
 
         assert!(!state.claim(Some(second), Some(first)));
-        assert_eq!(state, StandaloneNavigationFollowState::Idle);
+        assert_eq!(state, RendererNavigationFollowState::Idle);
         assert!(state.claim(Some(second), Some(second)));
         assert_eq!(
             state,
-            StandaloneNavigationFollowState::Following { handoff: second }
+            RendererNavigationFollowState::Following { handoff: second }
         );
         assert!(!state.claim(Some(second), Some(second)));
     }
@@ -195,18 +195,18 @@ mod navigation_dispatch_tests {
     fn failed_navigation_suppresses_only_the_same_request_identity() {
         let first = crate::page_task_queue::RendererTopLevelNavigationHandoff::new(1);
         let second = crate::page_task_queue::RendererTopLevelNavigationHandoff::new(2);
-        let mut state = StandaloneNavigationFollowState::Following { handoff: first };
+        let mut state = RendererNavigationFollowState::Following { handoff: first };
 
         state.settle(Some(first), false);
         assert_eq!(
             state,
-            StandaloneNavigationFollowState::FailedWithPendingNavigation { handoff: first }
+            RendererNavigationFollowState::FailedWithPendingNavigation { handoff: first }
         );
         assert!(!state.claim(Some(first), Some(first)));
         assert!(state.claim(Some(second), Some(second)));
         assert_eq!(
             state,
-            StandaloneNavigationFollowState::Following { handoff: second }
+            RendererNavigationFollowState::Following { handoff: second }
         );
     }
 

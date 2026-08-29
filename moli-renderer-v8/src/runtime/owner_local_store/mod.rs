@@ -55,7 +55,7 @@ mod tests;
 
 pub(in crate::runtime) use bound::*;
 #[cfg(test)]
-use entry::StandaloneNavigationFollowState;
+use entry::RendererNavigationFollowState;
 pub(in crate::runtime) use entry::{
     CommittedNavigationEntry, LivePageEntry, PublishedReplacementDocument, RetiringPageEntry,
 };

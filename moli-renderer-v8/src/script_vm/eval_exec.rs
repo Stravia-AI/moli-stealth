@@ -652,20 +652,57 @@ impl ScriptVm {
     pub(crate) fn eval_javascript_url_runtime_turn(
         &mut self,
         source: &str,
+        base_url: &Url,
     ) -> Result<Option<String>> {
+        let source = source.to_owned();
+        let base_url = base_url.clone();
         let context_ptr: *const v8::Global<v8::Context> = &self.page_default_context as *const _;
-        let completion = self
-            .execute_source_text_in_context_ptr_runtime_turn_with_base_url_and_current_window_error_report(
-                context_ptr,
-                source,
-                None,
-                None,
-                0,
-                None,
-                true,
-                false,
-                SourceTextScriptCompletionMode::ValueTypeAware,
-            )?;
+        let provenance = CompiledStringProvenance::at_url(base_url.clone());
+        let pending = PendingScriptTurn::new(
+            self.renderer_document_isolate
+                .with_renderer_document_isolate_mut::<
+                    RawScriptExecutionResult<Option<SourceTextScriptCompletion>>,
+                >(|isolate| {
+                    let scope = pin!(v8::HandleScope::new(isolate));
+                    let scope = &mut scope.init();
+                    let context = unsafe { v8::Local::new(scope, &*context_ptr) };
+                    let scope = &mut v8::ContextScope::new(scope, context);
+                    let host_ptr = context_host_ptr_from_global_bridge(scope).ok_or_else(|| {
+                        anyhow!("javascript URL target context has no Window host")
+                    })?;
+                    let Some(source) = unsafe { &mut *host_ptr }
+                        .prepare_javascript_url_source_for_execution(
+                            scope,
+                            crate::native_bridge::OwnerDispatchScope::Top,
+                            &source,
+                        )
+                    else {
+                        Self::perform_microtask_checkpoints(scope, Some(&base_url))?;
+                        return Ok(None);
+                    };
+                    execute_source_text_on_current_stack_with_completion(
+                        scope,
+                        &source,
+                        Some(&provenance),
+                        0,
+                        None,
+                        true,
+                        UncaughtScriptReportTarget::CurrentWindow,
+                        SourceTextScriptCompletionMode::ValueTypeAware,
+                    )
+                    .map(Some)
+                }),
+        );
+        let completion = pending
+            .finish_with_style_drain(self, StyleInvalidationTurnExitBoundary::RuntimeEvaluate);
+        let completion = match completion {
+            Ok(Some(completion)) => completion,
+            Ok(None) => return Ok(None),
+            // A javascript: URL reports script exceptions to its Window, but
+            // the navigation itself completes without replacing the Document.
+            Err(RawScriptExecutionError::Exception { .. }) => return Ok(None),
+            Err(RawScriptExecutionError::Internal(error)) => return Err(error),
+        };
         Ok(match completion {
             SourceTextScriptCompletion::String(value) => Some(value),
             SourceTextScriptCompletion::NonString => None,

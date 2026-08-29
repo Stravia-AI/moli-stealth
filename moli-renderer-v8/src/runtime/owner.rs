@@ -628,6 +628,17 @@ struct RuntimeExpressionAwaitSpec {
     navigation_policy: RuntimeEvaluationNavigationPolicy,
 }
 
+struct RendererPostResponseOwnerWork {
+    document_lifecycle: Option<RendererDocumentLifecycleIdentity>,
+    navigation_handoff: Option<RendererTopLevelNavigationHandoff>,
+}
+
+impl RendererPostResponseOwnerWork {
+    const fn is_empty(&self) -> bool {
+        self.document_lifecycle.is_none() && self.navigation_handoff.is_none()
+    }
+}
+
 fn checked_live_page_wait_deadline(timeout_ms: u64, operation: &str) -> Result<Instant> {
     let timeout = std::time::Duration::from_millis(timeout_ms);
     Instant::now()
@@ -1597,7 +1608,7 @@ impl RendererOwnerHandle {
                 Ok(entry) => entry,
                 Err(error) => return Err(error).into(),
             };
-            entry.begin_standalone_navigation_follow();
+            entry.begin_renderer_navigation_follow();
             self.restore_live_page_entry(token, entry);
         }
         match self
@@ -1957,16 +1968,23 @@ impl RendererOwnerHandle {
         );
     }
 
-    fn post_response_document_lifecycle_continuation(
+    fn post_response_owner_work_continuation(
         &self,
         token: RendererPageToken,
-        document: RendererDocumentLifecycleIdentity,
+        work: RendererPostResponseOwnerWork,
     ) -> RendererPageCommandPostResponseContinuation {
         let page_wake_tx = self.state.page_wake_tx.clone();
         RendererPageCommandPostResponseContinuation::new(move || {
-            let _ = page_wake_tx.send(RendererOwnerWake::post_response_document_lifecycle(
-                token, document,
-            ));
+            if let Some(document) = work.document_lifecycle {
+                let _ = page_wake_tx.send(RendererOwnerWake::post_response_document_lifecycle(
+                    token, document,
+                ));
+            }
+            if let Some(handoff) = work.navigation_handoff {
+                let _ = page_wake_tx.send(RendererOwnerWake::top_level_navigation_handoff(
+                    token, handoff,
+                ));
+            }
         })
     }
 
@@ -3380,7 +3398,7 @@ impl RendererOwnerHandle {
         mut entry: RetiringPageEntry,
         error: anyhow::Error,
     ) -> RenderRuntimeDispatchOutcome {
-        entry.settle_standalone_navigation_follow(false);
+        entry.settle_renderer_navigation_follow(false);
         tracing::warn!(
             page_id = token.page_id.as_u64(),
             failure = %error,
@@ -3407,7 +3425,7 @@ impl RendererOwnerHandle {
             "retiring page after committed navigation failed to bootstrap"
         );
         let cleanup_failure = disposition.to_string();
-        entry.settle_standalone_navigation_follow(false);
+        entry.settle_renderer_navigation_follow(false);
         remove_page_on_bound_owner_local_store(token);
         let entry = entry.reject_and_retire(&cleanup_failure);
         restore_retiring_entry_after_command_on_bound_owner_local_store(token, entry);
@@ -3458,7 +3476,7 @@ impl RendererOwnerHandle {
             );
             remove_page_on_bound_owner_local_store(token);
         }
-        entry.settle_standalone_navigation_follow(false);
+        entry.settle_renderer_navigation_follow(false);
         self.restore_live_page_entry(token, entry);
         disposition.into_dispatch_outcome(token, page_creation_publication)
     }
@@ -3784,7 +3802,7 @@ impl RendererOwnerHandle {
                 return RenderRuntimeDispatchOutcome::BackgroundComplete(Ok(()));
             }
         };
-        let claimed = entry.begin_standalone_navigation_follow_from_handoff(handoff);
+        let claimed = entry.begin_renderer_navigation_follow_from_handoff(handoff);
         self.restore_live_page_entry(token, entry);
         if !claimed {
             tracing::trace!(
@@ -4212,7 +4230,7 @@ impl RendererOwnerHandle {
             action,
             DocumentLifecycleTurnAction::RequestedTopLevelNavigation { .. }
         ) && entry
-            .begin_standalone_navigation_follow();
+            .begin_renderer_navigation_follow();
         let delegated_top_level_navigation = if matches!(
             action,
             DocumentLifecycleTurnAction::RequestedTopLevelNavigation { .. }
@@ -4885,7 +4903,7 @@ impl RendererOwnerHandle {
         mut entry: LivePageEntry,
         completion: LivePagePendingNavigationCompletion,
     ) -> RenderRuntimeDispatchOutcome {
-        entry.settle_standalone_navigation_follow(true);
+        entry.settle_renderer_navigation_follow(true);
         match completion {
             LivePagePendingNavigationCompletion::Background
             | LivePagePendingNavigationCompletion::PublishedPageCreation { .. } => {
@@ -5001,7 +5019,7 @@ impl RendererOwnerHandle {
         completion: LivePagePendingNavigationCompletion,
         download: RendererPendingDownloadActivation,
     ) -> RenderRuntimeDispatchOutcome {
-        entry.settle_standalone_navigation_follow(true);
+        entry.settle_renderer_navigation_follow(true);
         match completion {
             LivePagePendingNavigationCompletion::Background
             | LivePagePendingNavigationCompletion::PublishedPageCreation { .. } => {
@@ -5051,7 +5069,7 @@ impl RendererOwnerHandle {
         completion: LivePagePendingNavigationCompletion,
     ) -> RenderRuntimeDispatchOutcome {
         if follow_count == 0 {
-            entry.begin_standalone_navigation_follow();
+            entry.begin_renderer_navigation_follow();
         }
         self.restore_live_page_entry(token, entry);
         RenderRuntimeDispatchOutcome::ContinueNextTurn(Box::new(
@@ -5450,20 +5468,25 @@ impl RendererOwnerHandle {
                 },
             );
         }
-        let post_response_continuation =
-            match replacement_lifecycle.map(|outcome| outcome.readiness) {
-                Some(
-                    DocumentLifecycleTurnReadiness::Runnable { document }
-                    | DocumentLifecycleTurnReadiness::Blocked { document },
-                ) => {
-                    if let Err(error) = entry.defer_document_lifecycle_until_response(document) {
-                        self.restore_live_page_entry(token, entry);
-                        return Err(error).into();
-                    }
-                    Some(self.post_response_document_lifecycle_continuation(token, document))
+        let deferred_document = match replacement_lifecycle.map(|outcome| outcome.readiness) {
+            Some(
+                DocumentLifecycleTurnReadiness::Runnable { document }
+                | DocumentLifecycleTurnReadiness::Blocked { document },
+            ) => {
+                if let Err(error) = entry.defer_document_lifecycle_until_response(document) {
+                    self.restore_live_page_entry(token, entry);
+                    return Err(error).into();
                 }
-                Some(DocumentLifecycleTurnReadiness::Idle) | None => None,
-            };
+                Some(document)
+            }
+            Some(DocumentLifecycleTurnReadiness::Idle) | None => None,
+        };
+        let post_response_work = RendererPostResponseOwnerWork {
+            document_lifecycle: deferred_document,
+            navigation_handoff: entry.pending_javascript_navigation_handoff(),
+        };
+        let post_response_continuation = (!post_response_work.is_empty())
+            .then(|| self.post_response_owner_work_continuation(token, post_response_work));
         self.finish_live_page_entry_with_page_state_and_continuation(
             token,
             entry,
@@ -6086,7 +6109,7 @@ impl RendererOwnerHandle {
             Err(error) => return Err(error).into(),
         };
         if follow_count == 0 {
-            entry.begin_standalone_navigation_follow();
+            entry.begin_renderer_navigation_follow();
         }
         let retire_page_on_failure = completion.retires_page_on_navigation_failure();
         if follow_count >= MAX_PENDING_LOCATION_NAVIGATION_TURNS {

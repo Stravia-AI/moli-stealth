@@ -1873,7 +1873,7 @@ document.body.appendChild(frame);
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn javascript_location_assignment_does_not_ghost_location_href_on_delegate_pages() {
+async fn javascript_location_assignment_executes_renderer_owned_task_on_delegate_pages() {
     let runtime = JsRuntime::initialize();
     let loader =
         ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
@@ -1889,8 +1889,14 @@ async fn javascript_location_assignment_does_not_ghost_location_href_on_delegate
 
     let (set_reply, _) = page
         .run_async_command(RendererPageCommand::EvaluateExpression {
-            expression: r#"location.href = "javascript:document.title = 'LOC-RAN'"; "set""#
-                .to_owned(),
+            expression: r#"
+globalThis.__javascriptLocationDone = new Promise(resolve => {
+  globalThis.__resolveJavascriptLocation = resolve;
+});
+location.href = "javascript:document.title = 'LOC-RAN'; globalThis.__resolveJavascriptLocation('ran'); void 0";
+"set"
+"#
+            .to_owned(),
             await_promise: false,
         })
         .await
@@ -1915,6 +1921,22 @@ async fn javascript_location_assignment_does_not_ghost_location_href_on_delegate
         "assigning a javascript: URL must not ghost location.href"
     );
 
+    let (task_reply, _) = tokio::time::timeout(
+        Duration::from_secs(2),
+        page.run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "globalThis.__javascriptLocationDone".to_owned(),
+            await_promise: true,
+        }),
+    )
+    .await
+    .expect("renderer-owned javascript: task should settle its promise")
+    .expect("javascript: task promise should evaluate");
+    assert_eq!(
+        renderer_json_value(task_reply),
+        Some(serde_json::json!("ran")),
+        "the javascript: task must run after the assigning command"
+    );
+
     let (title_reply, _) = page
         .run_async_command(RendererPageCommand::EvaluateExpression {
             expression: "document.title".to_owned(),
@@ -1924,8 +1946,7 @@ async fn javascript_location_assignment_does_not_ghost_location_href_on_delegate
         .expect("document.title readback should complete");
     assert_eq!(
         renderer_json_value(title_reply),
-        Some(serde_json::json!("start")),
-        "a javascript: location assignment must not execute its script"
+        Some(serde_json::json!("LOC-RAN"))
     );
 
     page.close_async()

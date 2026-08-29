@@ -87,7 +87,7 @@ impl ScriptVm {
             }
             SourceTextScriptCompletion::NonString => Ok(FrameScriptCompletionValue::NonString),
             SourceTextScriptCompletion::Ignored => Err(anyhow!(
-                "source-text frame script job unexpectedly ignored completion"
+                "value-aware frame script execution unexpectedly ignored its completion"
             )),
         })
     }
@@ -122,7 +122,11 @@ impl ScriptVm {
         let Some(job) = self.prepare_inline_classic_frame_script_job(job)? else {
             return Ok(SourceTextScriptCompletion::Ignored);
         };
+        let mut job = job;
         let realm_id = self.current_realm_id_for_frame_script_job(&job)?;
+        if !self.prepare_javascript_url_frame_script_job(realm_id, &mut job)? {
+            return Ok(SourceTextScriptCompletion::NonString);
+        }
         let is_source_text = matches!(&job.source, FrameScriptSource::SourceText(_));
         let context_ptr = is_source_text
             .then(|| self.frame_realm_context_ptr(realm_id))
@@ -201,6 +205,40 @@ impl ScriptVm {
                 .restore_window_message_source_scope(previous_message_source);
         }
         result
+    }
+
+    fn prepare_javascript_url_frame_script_job(
+        &mut self,
+        realm_id: FrameRealmId,
+        job: &mut FrameScriptJob,
+    ) -> Result<bool> {
+        if job.kind != crate::frame_owner_model::FrameScriptJobKind::JavascriptUrl {
+            return Ok(true);
+        }
+        let child_handle = self
+            ._context_host
+            .borrow()
+            .frame_owner_child_handle_for_script_job(job)
+            .ok_or_else(|| anyhow!("javascript URL frame job has no current child owner"))?;
+        #[cfg(not(test))]
+        let FrameScriptSource::SourceText(source) = &mut job.source;
+        #[cfg(test)]
+        let source = match &mut job.source {
+            FrameScriptSource::SourceText(source) => source,
+            FrameScriptSource::FunctionConstructor(_) => {
+                return Err(anyhow!("javascript URL frame job has no source text"));
+            }
+        };
+        self.with_frame_realm_scope(realm_id, |scope, host_ptr| {
+            let owner = crate::native_bridge::OwnerDispatchScope::Child(child_handle);
+            let Some(checked_source) = unsafe { &mut *host_ptr }
+                .prepare_javascript_url_source_for_execution(scope, owner, source)
+            else {
+                return Ok(false);
+            };
+            *source = checked_source;
+            Ok(true)
+        })
     }
 
     fn prepare_inline_classic_frame_script_job(

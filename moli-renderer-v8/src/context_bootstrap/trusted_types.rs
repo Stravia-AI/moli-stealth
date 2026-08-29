@@ -265,6 +265,59 @@ pub(crate) fn trusted_script_string_for_script_element_execution(
     None
 }
 
+/// Result of applying the Trusted Types pre-navigation conversion to a
+/// decoded `javascript:` source.
+///
+/// Owner-specific CSP event dispatch deliberately remains outside this
+/// module. This layer owns only Trusted Type values and default-policy calls.
+pub(crate) struct JavascriptUrlTrustedTypesCheck {
+    pub(crate) source: Option<String>,
+    pub(crate) violated: bool,
+}
+
+/// Apply the Trusted Types pre-navigation conversion for a decoded
+/// `javascript:` source. Policy exceptions are consumed because this runs in
+/// the later navigation task, not in the API call that queued the navigation.
+pub(crate) fn check_javascript_url_trusted_types(
+    scope: &mut v8::PinScope<'_, '_>,
+    original: &str,
+    requirements: TrustedTypesForScriptRequirements,
+) -> JavascriptUrlTrustedTypesCheck {
+    if !requirements.requires_conversion() {
+        return JavascriptUrlTrustedTypesCheck {
+            source: Some(original.to_owned()),
+            violated: false,
+        };
+    }
+    let outcome = {
+        let try_catch = std::pin::pin!(v8::TryCatch::new(scope));
+        let mut scope = try_catch.init();
+        apply_default_trusted_type_policy_outcome(
+            &mut scope,
+            original,
+            TrustedTypeKind::Script,
+            "Location href",
+        )
+    };
+    match outcome {
+        DefaultTrustedTypePolicyOutcome::Value(value)
+            if url::Url::parse(&format!("javascript:{value}")).is_ok() =>
+        {
+            JavascriptUrlTrustedTypesCheck {
+                source: Some(value),
+                violated: false,
+            }
+        }
+        DefaultTrustedTypePolicyOutcome::Value(_)
+        | DefaultTrustedTypePolicyOutcome::Unavailable
+        | DefaultTrustedTypePolicyOutcome::Rejected
+        | DefaultTrustedTypePolicyOutcome::Exception => JavascriptUrlTrustedTypesCheck {
+            source: (!requirements.is_enforced()).then(|| original.to_owned()),
+            violated: true,
+        },
+    }
+}
+
 pub(crate) enum TrustedTypesCodeGenerationCheck {
     AllowOriginal,
     AllowModified(String),

@@ -22,6 +22,7 @@ mod history_mutation;
 mod history_runtime;
 mod idle_detection;
 mod image_data;
+mod javascript_url;
 pub(crate) use self::idle_detection::apply_idle_override_to_current_context;
 mod indexed_db;
 #[cfg(test)]
@@ -285,6 +286,10 @@ pub(crate) use self::indexed_db::{
 pub(in crate::context_bootstrap) use self::indexed_db::{
     indexed_db_usage_bytes_for_storage_key, scoped_storage_bucket_indexed_db_factory,
 };
+pub(crate) use self::javascript_url::{
+    arm_internal_javascript_url_eval, consume_internal_javascript_url_eval,
+    restore_internal_javascript_url_eval,
+};
 pub(crate) use self::location_runtime::sync_global_location_runtime_state;
 pub(crate) use self::location_runtime::{
     sync_document_location_runtime_state_from_window,
@@ -422,8 +427,9 @@ pub(crate) use self::streams::{
 #[cfg(test)]
 pub(crate) use self::trusted_types::trusted_types_lazy_state_materialized;
 pub(crate) use self::trusted_types::{
-    TrustedTypesCodeGenerationCheck, install_trusted_types_eval_runtime_state,
-    install_trusted_types_runtime_state, trusted_html_string_or_throw, trusted_html_value_string,
+    TrustedTypesCodeGenerationCheck, check_javascript_url_trusted_types,
+    install_trusted_types_eval_runtime_state, install_trusted_types_runtime_state,
+    trusted_html_string_or_throw, trusted_html_value_string,
     trusted_script_string_for_script_element_execution, trusted_script_string_or_type_error,
     trusted_script_url_string_or_throw, trusted_types_code_generation_check,
     trusted_types_code_generation_check_callback,

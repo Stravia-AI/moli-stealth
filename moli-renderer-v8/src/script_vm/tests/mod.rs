@@ -5879,6 +5879,77 @@ async fn child_document_open_nested_frame_uses_inherited_frame_src_policy() {
 }
 
 #[tokio::test]
+async fn child_javascript_url_nested_frame_uses_inherited_frame_src_policy() {
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    let mut vm = new_storage_page_task_executor_test_vm_with_loader(
+        "https://child-javascript-url-frame-csp.test/",
+        &loader,
+    );
+    vm.document_runtime
+        .set_response_content_security_policies(&["frame-src 'none'".to_owned()]);
+
+    assert_eq!(
+        vm.eval(
+            r#"
+(() => {
+  globalThis.__childJavascriptUrlFrameCspEvents = [];
+  addEventListener("message", event => {
+    __childJavascriptUrlFrameCspEvents.push(String(event.data));
+  });
+  const source = `javascript:
+    addEventListener("securitypolicyviolation", event => {
+      parent.postMessage(event.violatedDirective, "*");
+    });
+    const nested = document.createElement("iframe");
+    nested.src = "https://blocked-frame.test/fail.html";
+    document.body.appendChild(nested);
+  `;
+  const frame = document.createElement("iframe");
+  frame.src = encodeURI(source.replaceAll("\n", ""));
+  (document.body || document.documentElement || document).appendChild(frame);
+  return "queued";
+})()
+"#,
+        )
+        .expect("child javascript URL CSP setup should evaluate"),
+        "queued"
+    );
+    assert!(
+        vm.run_one_child_frame_task_executor_turn(
+            ChildFrameSemanticTurnKind::NavigationCommit,
+            &loader,
+        )
+        .await
+        .expect("javascript URL navigation commit should use the selected-task dispatcher")
+    );
+    run_page_realm_prerequisite_then_expected_child_frame_semantic_turn(
+        &mut vm,
+        &loader,
+        ChildFrameSemanticTurnKind::DocumentScriptReady,
+        "javascript URL should execute after its initial child realm materializes",
+    )
+    .await;
+    assert!(
+        vm.run_one_child_frame_task_executor_turn(
+            ChildFrameSemanticTurnKind::NavigationCommit,
+            &loader,
+        )
+        .await
+        .expect("nested frame navigation should reach the inherited CSP gate")
+    );
+    assert!(
+        vm.run_one_window_message_executor_turn(&loader)
+            .await
+            .expect("child CSP report should dispatch to the top Window")
+    );
+    assert_eq!(
+        vm.eval("JSON.stringify(globalThis.__childJavascriptUrlFrameCspEvents)")
+            .expect("child javascript URL CSP events should be observable"),
+        r#"["frame-src"]"#
+    );
+}
+
+#[tokio::test]
 async fn child_document_write_inline_classic_obeys_inherited_response_csp() {
     let mut vm = new_storage_test_vm("https://child-document-write-csp.test/");
     vm.set_response_content_security_policies(&["script-src 'nonce-allowed'".to_owned()]);
