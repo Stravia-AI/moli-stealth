@@ -6,5 +6,5 @@ mod runtime;
 pub use dns_adapter::CurlDnsResolution;
 pub use runtime::{
     CurlMultiCompletion, CurlMultiJob, CurlMultiRuntime, CurlMultiRuntimeConfig, CurlOriginKey,
-    CurlSubmitError,
+    CurlSubmitError, CurlTransferId,
 };

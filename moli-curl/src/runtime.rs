@@ -1,10 +1,10 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     fmt,
     num::NonZeroUsize,
     sync::{
         Arc, OnceLock,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread,
     time::{Duration, Instant},
@@ -24,6 +24,35 @@ use crate::dns_adapter::{
 };
 
 const DEFAULT_RUNTIME_POLL_INTERVAL: Duration = Duration::from_millis(50);
+static NEXT_CURL_TRANSFER_ID: AtomicUsize = AtomicUsize::new(1);
+
+/// Opaque process-wide identity of one curl transfer.
+///
+/// The non-zero value is installed as libcurl's private token once the
+/// transfer becomes active, so the same identity follows the request through
+/// every residence and back in its terminal completion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CurlTransferId(NonZeroUsize);
+
+impl CurlTransferId {
+    fn new(value: NonZeroUsize) -> Self {
+        Self(value)
+    }
+
+    fn from_token(token: usize) -> Option<Self> {
+        Some(Self::new(NonZeroUsize::new(token)?))
+    }
+
+    fn token(self) -> usize {
+        self.0.get()
+    }
+}
+
+impl fmt::Display for CurlTransferId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
 
 /// Origin key used by the curl scheduler for per-origin active transfer caps.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -108,6 +137,7 @@ impl<H: Handler, C> fmt::Debug for CurlMultiJob<H, C> {
 
 /// Completion emitted by `CurlMultiRuntime`.
 pub struct CurlMultiCompletion<H: Handler, C> {
+    pub transfer_id: CurlTransferId,
     pub easy: Option<Easy2<H>>,
     pub context: C,
     pub result: Result<()>,
@@ -116,6 +146,7 @@ pub struct CurlMultiCompletion<H: Handler, C> {
 impl<H: Handler, C> fmt::Debug for CurlMultiCompletion<H, C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CurlMultiCompletion")
+            .field("transfer_id", &self.transfer_id)
             .field("has_easy", &self.easy.is_some())
             .field("result", &self.result.as_ref().map(|_| ()))
             .finish_non_exhaustive()
@@ -163,13 +194,16 @@ struct CurlMultiRuntimeInner<H: Handler + Send + 'static, C: Send + 'static> {
 
 #[derive(Debug)]
 enum CurlRuntimeCommand<H: Handler, C> {
-    Request(CurlMultiJob<H, C>),
+    Request {
+        transfer_id: CurlTransferId,
+        job: CurlMultiJob<H, C>,
+    },
     Shutdown,
 }
 
 enum CurlOwnerEvent<H: Handler, C> {
     Command(std::result::Result<CurlRuntimeCommand<H, C>, crossbeam_channel::RecvError>),
-    Dns(std::result::Result<CurlDnsOwnerCompletion, crossbeam_channel::RecvError>),
+    Dns(std::result::Result<CurlDnsOwnerCompletion<CurlTransferId>, crossbeam_channel::RecvError>),
 }
 
 impl<H: Handler + Send + 'static, C: Send + 'static> CurlMultiRuntime<H, C> {
@@ -216,20 +250,28 @@ impl<H: Handler + Send + 'static, C: Send + 'static> CurlMultiRuntime<H, C> {
     pub fn submit(
         &self,
         job: CurlMultiJob<H, C>,
-    ) -> std::result::Result<(), CurlSubmitError<H, C>> {
+    ) -> std::result::Result<CurlTransferId, CurlSubmitError<H, C>> {
         if self.inner.shutdown_requested.load(Ordering::SeqCst) {
             return Err(CurlSubmitError {
                 job,
                 error: anyhow!("curl multi runtime is shutting down"),
             });
         }
-        match self.inner.command_tx.send(CurlRuntimeCommand::Request(job)) {
+        let transfer_id = match next_transfer_id() {
+            Ok(transfer_id) => transfer_id,
+            Err(error) => return Err(CurlSubmitError { job, error }),
+        };
+        match self
+            .inner
+            .command_tx
+            .send(CurlRuntimeCommand::Request { transfer_id, job })
+        {
             Ok(()) => {
                 let _ = self.inner.owner_waker.wakeup();
-                Ok(())
+                Ok(transfer_id)
             }
             Err(error) => {
-                let CurlRuntimeCommand::Request(job) = error.into_inner() else {
+                let CurlRuntimeCommand::Request { job, .. } = error.into_inner() else {
                     unreachable!("submit only sends request commands");
                 };
                 Err(CurlSubmitError {
@@ -358,14 +400,17 @@ impl<H: Handler + Send + 'static, C: Send + 'static> CurlRuntimeOwner<H, C> {
         command: CurlRuntimeCommand<H, C>,
     ) {
         match command {
-            CurlRuntimeCommand::Request(job) if state.closed => {
+            CurlRuntimeCommand::Request { transfer_id, job } if state.closed => {
                 self.send_completion(CurlMultiCompletion {
+                    transfer_id,
                     easy: Some(job.easy),
                     context: job.context,
                     result: Err(anyhow!("curl multi runtime is shutting down")),
                 });
             }
-            CurlRuntimeCommand::Request(job) => enqueue_pending_job(&mut state.pending, job),
+            CurlRuntimeCommand::Request { transfer_id, job } => {
+                enqueue_pending_job(&mut state.pending, transfer_id, job)
+            }
             CurlRuntimeCommand::Shutdown => self.close(state, multi),
         }
     }
@@ -377,16 +422,22 @@ impl<H: Handler + Send + 'static, C: Send + 'static> CurlRuntimeOwner<H, C> {
         state.closed = true;
         self.shutdown_requested.store(true, Ordering::SeqCst);
         while let Some(pending) = state.pending.pop_front() {
-            let job = pending.job;
+            let CurlPendingJob {
+                transfer_id, job, ..
+            } = pending;
             self.send_completion(CurlMultiCompletion {
+                transfer_id,
                 easy: Some(job.easy),
                 context: job.context,
                 result: Err(anyhow!("curl multi runtime is shutting down")),
             });
         }
         for pending in state.dns.drain() {
-            let job = pending.job;
+            let CurlPendingJob {
+                transfer_id, job, ..
+            } = pending;
             self.send_completion(CurlMultiCompletion {
+                transfer_id,
                 easy: Some(job.easy),
                 context: job.context,
                 result: Err(anyhow!(
@@ -394,9 +445,10 @@ impl<H: Handler + Send + 'static, C: Send + 'static> CurlRuntimeOwner<H, C> {
                 )),
             });
         }
-        while let Some(active) = state.active.pop() {
+        for (transfer_id, active) in state.active.drain() {
             let easy = multi.remove2(active.handle).ok();
             self.send_completion(CurlMultiCompletion {
+                transfer_id,
                 easy,
                 context: active.context,
                 result: Err(anyhow!(
@@ -426,7 +478,11 @@ impl<H: Handler + Send + 'static, C: Send + 'static> CurlRuntimeOwner<H, C> {
                 .expect("pending curl job index should exist");
             let dns_target = pending.job.dns_resolution.target().cloned();
             match dns_target {
-                Some(target) => state.dns.start(pending, target, multi.waker()),
+                Some(target) => {
+                    state
+                        .dns
+                        .start(pending.transfer_id, pending, target, multi.waker())
+                }
                 None => self.start_job(state, multi, pending),
             }
         }
@@ -441,7 +497,7 @@ impl<H: Handler + Send + 'static, C: Send + 'static> CurlRuntimeOwner<H, C> {
     fn claim_dns_completion(
         &self,
         state: &mut CurlOwnerState<H, C>,
-        completion: CurlDnsOwnerCompletion,
+        completion: CurlDnsOwnerCompletion<CurlTransferId>,
     ) {
         let Some(ready) = state.dns.claim(completion) else {
             return;
@@ -456,8 +512,11 @@ impl<H: Handler + Send + 'static, C: Send + 'static> CurlRuntimeOwner<H, C> {
     ) {
         let mut pending = ready.pending;
         if state.closed {
-            let job = pending.job;
+            let CurlPendingJob {
+                transfer_id, job, ..
+            } = pending;
             self.send_completion(CurlMultiCompletion {
+                transfer_id,
                 easy: Some(job.easy),
                 context: job.context,
                 result: Err(anyhow!("curl multi runtime is shutting down")),
@@ -471,8 +530,11 @@ impl<H: Handler + Send + 'static, C: Send + 'static> CurlRuntimeOwner<H, C> {
                     .dns_resolution
                     .install(&mut pending.job.easy, addresses.as_ref())
                 {
-                    let job = pending.job;
+                    let CurlPendingJob {
+                        transfer_id, job, ..
+                    } = pending;
                     self.send_completion(CurlMultiCompletion {
+                        transfer_id,
                         easy: Some(job.easy),
                         context: job.context,
                         result: Err(error),
@@ -482,8 +544,11 @@ impl<H: Handler + Send + 'static, C: Send + 'static> CurlRuntimeOwner<H, C> {
                 enqueue_existing_pending_job(&mut state.pending, pending);
             }
             Err(error) => {
-                let job = pending.job;
+                let CurlPendingJob {
+                    transfer_id, job, ..
+                } = pending;
                 self.send_completion(CurlMultiCompletion {
+                    transfer_id,
                     easy: Some(job.easy),
                     context: job.context,
                     result: Err(anyhow!(error.to_string())),
@@ -498,6 +563,7 @@ impl<H: Handler + Send + 'static, C: Send + 'static> CurlRuntimeOwner<H, C> {
         multi: &mut Multi,
         pending: CurlPendingJob<H, C>,
     ) {
+        let transfer_id = pending.transfer_id;
         let queued_for = pending.enqueued_at.elapsed();
         let job = pending.job;
         let label = job.label.clone();
@@ -505,11 +571,24 @@ impl<H: Handler + Send + 'static, C: Send + 'static> CurlRuntimeOwner<H, C> {
             .add2(job.easy)
             .with_context(|| anyhow!("failed to add curl easy handle for {label}"))
         {
-            Ok(handle) => {
+            Ok(mut handle) => {
+                if let Err(error) = handle.set_token(transfer_id.token()) {
+                    let easy = multi.remove2(handle).ok();
+                    self.send_completion(CurlMultiCompletion {
+                        transfer_id,
+                        easy,
+                        context: job.context,
+                        result: Err(anyhow!(
+                            "failed to install token for curl transfer {transfer_id}: {error}"
+                        )),
+                    });
+                    return;
+                }
                 if curl_runtime_trace_enabled() {
                     let origin = job.origin.as_ref();
                     tracing::info!(
                         target: "moli_cdp_nav_timing",
+                        transfer_id = %transfer_id,
                         label = %label,
                         origin_scheme = origin.map(|origin| origin.scheme.as_str()).unwrap_or(""),
                         origin_host = origin.map(|origin| origin.host.as_str()).unwrap_or(""),
@@ -519,7 +598,7 @@ impl<H: Handler + Send + 'static, C: Send + 'static> CurlRuntimeOwner<H, C> {
                         queued_ms = queued_for.as_millis(),
                         active_before = state.active.len(),
                         active_same_origin_before = origin
-                            .map(|origin| active_origin_count(state.active.as_slice(), origin))
+                            .map(|origin| active_origin_count(&state.active, origin))
                             .unwrap_or(0),
                         pending_after = state.pending.len(),
                         pending_same_origin_after = origin
@@ -534,17 +613,22 @@ impl<H: Handler + Send + 'static, C: Send + 'static> CurlRuntimeOwner<H, C> {
                         stage = "curl_runtime_job_start",
                     );
                 }
-                state.active.push(CurlActiveTransfer {
-                    handle,
-                    context: job.context,
-                    origin: job.origin,
-                    priority: job.priority,
-                    label,
-                    started_at: Instant::now(),
-                    queued_for,
-                });
+                let previous = state.active.insert(
+                    transfer_id,
+                    CurlActiveTransfer {
+                        handle,
+                        context: job.context,
+                        origin: job.origin,
+                        priority: job.priority,
+                        label,
+                        started_at: Instant::now(),
+                        queued_for,
+                    },
+                );
+                assert!(previous.is_none(), "curl transfer identity is unique");
             }
             Err(error) => self.send_completion(CurlMultiCompletion {
+                transfer_id,
                 easy: None,
                 context: job.context,
                 result: Err(error),
@@ -556,88 +640,111 @@ impl<H: Handler + Send + 'static, C: Send + 'static> CurlRuntimeOwner<H, C> {
         if let Err(error) = multi.perform() {
             debug!("curl multi runtime perform failed: {error}");
         }
-        let completed = completed_transfer_indices(multi, &state.active);
-        for (active, result) in take_completed_in_notification_order(&mut state.active, completed) {
-            let easy = match multi.remove2(active.handle) {
-                Ok(easy) => Some(easy),
-                Err(error) => {
-                    self.send_completion(CurlMultiCompletion {
-                        easy: None,
-                        context: active.context,
-                        result: Err(anyhow!(
-                            "failed to remove curl easy handle for {}: {error}",
-                            active.label
-                        )),
-                    });
-                    continue;
+        let completed = completed_transfers(multi, &state.active);
+        for (transfer_id, active, result) in
+            take_transfers_in_notification_order(&mut state.active, completed)
+        {
+            self.finish_active_transfer(
+                state,
+                multi,
+                transfer_id,
+                active,
+                result.map_err(Into::into),
+            );
+        }
+    }
+
+    fn finish_active_transfer(
+        &self,
+        state: &CurlOwnerState<H, C>,
+        multi: &mut Multi,
+        transfer_id: CurlTransferId,
+        active: CurlActiveTransfer<H, C>,
+        result: Result<()>,
+    ) {
+        let easy = match multi.remove2(active.handle) {
+            Ok(easy) => Some(easy),
+            Err(error) => {
+                self.send_completion(CurlMultiCompletion {
+                    transfer_id,
+                    easy: None,
+                    context: active.context,
+                    result: Err(anyhow!(
+                        "failed to remove curl easy handle for {}: {error}",
+                        active.label
+                    )),
+                });
+                return;
+            }
+        };
+        if curl_runtime_trace_enabled() {
+            let origin = active.origin.as_ref();
+            match &result {
+                Ok(()) => {
+                    tracing::info!(
+                        target: "moli_cdp_nav_timing",
+                        transfer_id = %transfer_id,
+                        label = %active.label,
+                        origin_scheme = origin.map(|origin| origin.scheme.as_str()).unwrap_or(""),
+                        origin_host = origin.map(|origin| origin.host.as_str()).unwrap_or(""),
+                        origin_port = ?origin.and_then(|origin| origin.port),
+                        origin = ?active.origin,
+                        priority = active.priority,
+                        ok = true,
+                        active_ms = active.started_at.elapsed().as_millis(),
+                        queued_ms = active.queued_for.as_millis(),
+                        active_remaining = state.active.len(),
+                        active_same_origin_remaining = origin
+                            .map(|origin| active_origin_count(&state.active, origin))
+                            .unwrap_or(0),
+                        pending_after = state.pending.len(),
+                        pending_same_origin_after = origin
+                            .map(|origin| pending_origin_count(&state.pending, origin))
+                            .unwrap_or(0),
+                        stage = "curl_runtime_job_done",
+                    );
                 }
-            };
-            if curl_runtime_trace_enabled() {
-                let origin = active.origin.as_ref();
-                match &result {
-                    Ok(()) => {
-                        tracing::info!(
-                            target: "moli_cdp_nav_timing",
-                            label = %active.label,
-                            origin_scheme = origin.map(|origin| origin.scheme.as_str()).unwrap_or(""),
-                            origin_host = origin.map(|origin| origin.host.as_str()).unwrap_or(""),
-                            origin_port = ?origin.and_then(|origin| origin.port),
-                            origin = ?active.origin,
-                            priority = active.priority,
-                            ok = true,
-                            active_ms = active.started_at.elapsed().as_millis(),
-                            queued_ms = active.queued_for.as_millis(),
-                            active_remaining = state.active.len(),
-                            active_same_origin_remaining = origin
-                                .map(|origin| active_origin_count(state.active.as_slice(), origin))
-                                .unwrap_or(0),
-                            pending_after = state.pending.len(),
-                            pending_same_origin_after = origin
-                                .map(|origin| pending_origin_count(&state.pending, origin))
-                                .unwrap_or(0),
-                            stage = "curl_runtime_job_done",
-                        );
-                    }
-                    Err(error) => {
-                        tracing::info!(
-                            target: "moli_cdp_nav_timing",
-                            label = %active.label,
-                            origin_scheme = origin.map(|origin| origin.scheme.as_str()).unwrap_or(""),
-                            origin_host = origin.map(|origin| origin.host.as_str()).unwrap_or(""),
-                            origin_port = ?origin.and_then(|origin| origin.port),
-                            origin = ?active.origin,
-                            priority = active.priority,
-                            ok = false,
-                            error = %error,
-                            active_ms = active.started_at.elapsed().as_millis(),
-                            queued_ms = active.queued_for.as_millis(),
-                            active_remaining = state.active.len(),
-                            active_same_origin_remaining = origin
-                                .map(|origin| active_origin_count(state.active.as_slice(), origin))
-                                .unwrap_or(0),
-                            pending_after = state.pending.len(),
-                            pending_same_origin_after = origin
-                                .map(|origin| pending_origin_count(&state.pending, origin))
-                                .unwrap_or(0),
-                            stage = "curl_runtime_job_done",
-                        );
-                    }
+                Err(error) => {
+                    tracing::info!(
+                        target: "moli_cdp_nav_timing",
+                        transfer_id = %transfer_id,
+                        label = %active.label,
+                        origin_scheme = origin.map(|origin| origin.scheme.as_str()).unwrap_or(""),
+                        origin_host = origin.map(|origin| origin.host.as_str()).unwrap_or(""),
+                        origin_port = ?origin.and_then(|origin| origin.port),
+                        origin = ?active.origin,
+                        priority = active.priority,
+                        ok = false,
+                        error = %error,
+                        active_ms = active.started_at.elapsed().as_millis(),
+                        queued_ms = active.queued_for.as_millis(),
+                        active_remaining = state.active.len(),
+                        active_same_origin_remaining = origin
+                            .map(|origin| active_origin_count(&state.active, origin))
+                            .unwrap_or(0),
+                        pending_after = state.pending.len(),
+                        pending_same_origin_after = origin
+                            .map(|origin| pending_origin_count(&state.pending, origin))
+                            .unwrap_or(0),
+                        stage = "curl_runtime_job_done",
+                    );
                 }
             }
-            let result = result.with_context(|| {
-                anyhow!(
-                    "curl request failed for {} after active={}ms queued={}ms",
-                    active.label,
-                    active.started_at.elapsed().as_millis(),
-                    active.queued_for.as_millis()
-                )
-            });
-            self.send_completion(CurlMultiCompletion {
-                easy,
-                context: active.context,
-                result,
-            });
         }
+        let result = result.with_context(|| {
+            anyhow!(
+                "curl request failed for {} after active={}ms queued={}ms",
+                active.label,
+                active.started_at.elapsed().as_millis(),
+                active.queued_for.as_millis()
+            )
+        });
+        self.send_completion(CurlMultiCompletion {
+            transfer_id,
+            easy,
+            context: active.context,
+            result,
+        });
     }
 
     fn wait_for_curl_progress(&self, multi: &Multi) {
@@ -659,8 +766,8 @@ impl<H: Handler + Send + 'static, C: Send + 'static> CurlRuntimeOwner<H, C> {
 struct CurlOwnerState<H: Handler, C> {
     closed: bool,
     pending: VecDeque<CurlPendingJob<H, C>>,
-    dns: CurlDnsOwnerResidence<CurlPendingJob<H, C>>,
-    active: Vec<CurlActiveTransfer<H, C>>,
+    dns: CurlDnsOwnerResidence<CurlTransferId, CurlPendingJob<H, C>>,
+    active: HashMap<CurlTransferId, CurlActiveTransfer<H, C>>,
 }
 
 impl<H: Handler, C> Default for CurlOwnerState<H, C> {
@@ -669,7 +776,7 @@ impl<H: Handler, C> Default for CurlOwnerState<H, C> {
             closed: false,
             pending: VecDeque::new(),
             dns: CurlDnsOwnerResidence::default(),
-            active: Vec::new(),
+            active: HashMap::new(),
         }
     }
 }
@@ -685,18 +792,21 @@ struct CurlActiveTransfer<H: Handler, C> {
 }
 
 struct CurlPendingJob<H: Handler, C> {
+    transfer_id: CurlTransferId,
     job: CurlMultiJob<H, C>,
     enqueued_at: Instant,
 }
 
 fn enqueue_pending_job<H: Handler, C>(
     pending: &mut VecDeque<CurlPendingJob<H, C>>,
+    transfer_id: CurlTransferId,
     job: CurlMultiJob<H, C>,
 ) {
     if curl_runtime_trace_enabled() {
         let origin = job.origin.as_ref();
         tracing::info!(
             target: "moli_cdp_nav_timing",
+            transfer_id = %transfer_id,
             label = %job.label,
             origin_scheme = origin.map(|origin| origin.scheme.as_str()).unwrap_or(""),
             origin_host = origin.map(|origin| origin.host.as_str()).unwrap_or(""),
@@ -711,6 +821,7 @@ fn enqueue_pending_job<H: Handler, C>(
         );
     }
     let pending_job = CurlPendingJob {
+        transfer_id,
         job,
         enqueued_at: Instant::now(),
     };
@@ -758,19 +869,17 @@ fn job_is_eligible<H: Handler, C>(
     max_active_per_host: Option<NonZeroUsize>,
 ) -> bool {
     match (origin, max_active_per_host) {
-        (Some(origin), Some(limit)) => {
-            active_origin_count(state.active.as_slice(), origin) < limit.get()
-        }
+        (Some(origin), Some(limit)) => active_origin_count(&state.active, origin) < limit.get(),
         _ => true,
     }
 }
 
 fn active_origin_count<H: Handler, C>(
-    active: &[CurlActiveTransfer<H, C>],
+    active: &HashMap<CurlTransferId, CurlActiveTransfer<H, C>>,
     origin: &CurlOriginKey,
 ) -> usize {
     active
-        .iter()
+        .values()
         .filter(|active| active.origin.as_ref() == Some(origin))
         .count()
 }
@@ -785,48 +894,64 @@ fn pending_origin_count<H: Handler, C>(
         .count()
 }
 
-fn completed_transfer_indices<H: Handler, C>(
+fn completed_transfers<H: Handler, C>(
     multi: &Multi,
-    active: &[CurlActiveTransfer<H, C>],
-) -> Vec<(usize, std::result::Result<(), curl::Error>)> {
+    active: &HashMap<CurlTransferId, CurlActiveTransfer<H, C>>,
+) -> Vec<(CurlTransferId, std::result::Result<(), curl::Error>)> {
     let mut completed = Vec::new();
     multi.messages(|message| {
-        for (index, transfer) in active.iter().enumerate() {
-            if message.is_for2(&transfer.handle) {
-                if let Some(result) = message.result_for2(&transfer.handle) {
-                    completed.push((index, result));
-                }
-                break;
-            }
+        let Ok(token) = message.token() else {
+            debug!("ignored curl completion whose private token could not be read");
+            return;
+        };
+        let Some(transfer_id) = CurlTransferId::from_token(token) else {
+            debug!("ignored curl completion with an empty private token");
+            return;
+        };
+        let Some(transfer) = active.get(&transfer_id) else {
+            debug!(%transfer_id, "ignored stale curl completion");
+            return;
+        };
+        if let Some(result) = message.result_for2(&transfer.handle) {
+            completed.push((transfer_id, result));
         }
     });
     completed
 }
 
-/// Removes a completion batch without exposing the active-vector removal
-/// order to clients. `completed` is ordered exactly as libcurl reported its
-/// completion messages, while its indices refer to `active` before any member
-/// of the batch is removed.
-fn take_completed_in_notification_order<T, E>(
-    active: &mut Vec<T>,
-    completed: Vec<(usize, E)>,
-) -> Vec<(T, E)> {
-    let original_active_len = active.len();
-    let mut removed_indices = Vec::with_capacity(completed.len());
+/// Removes exact active transfers while preserving libcurl's notification
+/// order. Unknown IDs are stale terminals for already-retired residences and
+/// cannot recover or disturb a newer transfer.
+fn take_transfers_in_notification_order<K, T, E>(
+    active: &mut HashMap<K, T>,
+    completed: Vec<(K, E)>,
+) -> Vec<(K, T, E)>
+where
+    K: Copy + Eq + std::hash::Hash,
+{
     completed
         .into_iter()
-        .map(|(original_index, result)| {
-            let removed_before = removed_indices
-                .iter()
-                .filter(|removed_index| **removed_index < original_index)
-                .count();
-            debug_assert!(original_index < original_active_len);
-            debug_assert!(!removed_indices.contains(&original_index));
-            let current_index = original_index - removed_before;
-            removed_indices.push(original_index);
-            (active.remove(current_index), result)
+        .filter_map(|(transfer_id, result)| {
+            active
+                .remove(&transfer_id)
+                .map(|transfer| (transfer_id, transfer, result))
         })
         .collect()
+}
+
+fn next_transfer_id() -> Result<CurlTransferId> {
+    let value = next_nonzero_usize(&NEXT_CURL_TRANSFER_ID)
+        .context("curl transfer identity space exhausted")?;
+    Ok(CurlTransferId::new(value))
+}
+
+fn next_nonzero_usize(counter: &AtomicUsize) -> Result<NonZeroUsize> {
+    let sequence = counter
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            current.checked_add(1)
+        })
+        .map_err(|_| anyhow!("identity space exhausted"))?;
+    NonZeroUsize::new(sequence).ok_or_else(|| anyhow!("identity must be non-zero"))
 }
 
 fn make_runtime_multi(config: &CurlMultiRuntimeConfig) -> Multi {
@@ -870,6 +995,11 @@ fn runtime_wait_timeout(multi: &Multi, poll_interval: Duration) -> Result<Durati
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+    };
+
     use super::*;
 
     #[derive(Debug)]
@@ -900,6 +1030,10 @@ mod tests {
         }
     }
 
+    fn test_transfer_id(sequence: usize) -> CurlTransferId {
+        CurlTransferId::new(NonZeroUsize::new(sequence).expect("test transfer ID is non-zero"))
+    }
+
     #[test]
     fn runtime_config_rejects_zero_poll_interval() {
         let config = CurlMultiRuntimeConfig {
@@ -922,35 +1056,162 @@ mod tests {
     fn pending_jobs_are_ordered_by_priority() {
         let mut pending = VecDeque::new();
 
-        enqueue_pending_job(&mut pending, test_job("auto-a", 1, None));
-        enqueue_pending_job(&mut pending, test_job("low", 0, None));
-        enqueue_pending_job(&mut pending, test_job("high-a", 2, None));
-        enqueue_pending_job(&mut pending, test_job("auto-b", 1, None));
-        enqueue_pending_job(&mut pending, test_job("high-b", 2, None));
+        enqueue_pending_job(
+            &mut pending,
+            test_transfer_id(1),
+            test_job("auto-a", 1, None),
+        );
+        enqueue_pending_job(&mut pending, test_transfer_id(2), test_job("low", 0, None));
+        enqueue_pending_job(
+            &mut pending,
+            test_transfer_id(3),
+            test_job("high-a", 2, None),
+        );
+        enqueue_pending_job(
+            &mut pending,
+            test_transfer_id(4),
+            test_job("auto-b", 1, None),
+        );
+        enqueue_pending_job(
+            &mut pending,
+            test_transfer_id(5),
+            test_job("high-b", 2, None),
+        );
 
-        let labels = pending
+        let ordered = pending
             .iter()
-            .map(|job| job.job.label.as_str())
+            .map(|job| (job.transfer_id.token(), job.job.label.as_str()))
             .collect::<Vec<_>>();
-        assert_eq!(labels, ["high-a", "high-b", "auto-a", "auto-b", "low"]);
+        assert_eq!(
+            ordered,
+            [
+                (3, "high-a"),
+                (5, "high-b"),
+                (1, "auto-a"),
+                (4, "auto-b"),
+                (2, "low"),
+            ]
+        );
     }
 
     #[test]
     fn completed_jobs_preserve_libcurl_notification_order() {
-        let mut active = vec!["first", "second", "third", "fourth"];
+        let mut active = HashMap::from([
+            (test_transfer_id(1), "first"),
+            (test_transfer_id(2), "second"),
+            (test_transfer_id(3), "third"),
+            (test_transfer_id(4), "fourth"),
+        ]);
 
-        // libcurl reported the newest active entry first, followed by the
-        // oldest. Vector-index removal must not reverse that observable order.
-        let completed = take_completed_in_notification_order(
+        // libcurl reported the newest transfer first, followed by the oldest.
+        // Hash-map storage must not leak its iteration order to completions.
+        let completed = take_transfers_in_notification_order(
             &mut active,
-            vec![(3, "fourth-result"), (0, "first-result")],
+            vec![
+                (test_transfer_id(4), "fourth-result"),
+                (test_transfer_id(1), "first-result"),
+            ],
         );
 
         assert_eq!(
             completed,
-            vec![("fourth", "fourth-result"), ("first", "first-result")]
+            vec![
+                (test_transfer_id(4), "fourth", "fourth-result"),
+                (test_transfer_id(1), "first", "first-result"),
+            ]
         );
-        assert_eq!(active, ["second", "third"]);
+        assert_eq!(active.len(), 2);
+        assert_eq!(active[&test_transfer_id(2)], "second");
+        assert_eq!(active[&test_transfer_id(3)], "third");
+    }
+
+    #[test]
+    fn stale_completion_cannot_remove_a_live_transfer() {
+        let mut active = HashMap::from([(test_transfer_id(2), "live")]);
+
+        let completed = take_transfers_in_notification_order(
+            &mut active,
+            vec![(test_transfer_id(1), "stale-result")],
+        );
+
+        assert!(completed.is_empty());
+        assert_eq!(active[&test_transfer_id(2)], "live");
+    }
+
+    #[test]
+    fn transfer_identity_uses_the_same_nonzero_value_as_its_token() {
+        let transfer_id = test_transfer_id(7);
+
+        assert_eq!(transfer_id.token(), 7);
+        assert_eq!(CurlTransferId::from_token(7), Some(transfer_id));
+        assert_eq!(CurlTransferId::from_token(0), None);
+    }
+
+    #[test]
+    fn transfer_sequence_never_wraps_or_reuses_zero() {
+        let next = AtomicUsize::new(1);
+        assert_eq!(next_nonzero_usize(&next).unwrap().get(), 1);
+        assert_eq!(next_nonzero_usize(&next).unwrap().get(), 2);
+
+        let exhausted = AtomicUsize::new(usize::MAX);
+        assert!(next_nonzero_usize(&exhausted).is_err());
+        assert_eq!(exhausted.load(Ordering::Relaxed), usize::MAX);
+    }
+
+    #[test]
+    fn submitted_identity_reaches_the_matching_runtime_completion() {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .expect("test HTTP listener should bind to a local port");
+        let address = listener
+            .local_addr()
+            .expect("test HTTP listener should have an address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener
+                .accept()
+                .expect("curl should connect to the test HTTP listener");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("test HTTP connection should accept a read timeout");
+            let mut request = [0; 4096];
+            let _ = stream
+                .read(&mut request)
+                .expect("test HTTP request should be readable");
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .expect("test HTTP response should be writable");
+        });
+
+        let (runtime, completion_rx) = CurlMultiRuntime::new(CurlMultiRuntimeConfig {
+            poll_interval: Duration::from_millis(5),
+            ..CurlMultiRuntimeConfig::default()
+        })
+        .expect("test curl runtime should start");
+        let mut easy = Easy2::new(TestHandler);
+        easy.url(&format!("http://{address}/identity"))
+            .expect("test curl URL should be valid");
+        let transfer_id = runtime
+            .submit(CurlMultiJob {
+                easy,
+                context: "matching-context".to_owned(),
+                origin: None,
+                dns_resolution: CurlDnsResolution::curl_managed(),
+                priority: 1,
+                label: "identity-test".to_owned(),
+            })
+            .expect("test curl transfer should be accepted");
+
+        let completion = completion_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("test curl transfer should reach terminal completion");
+        assert_eq!(completion.transfer_id, transfer_id);
+        assert_eq!(completion.context, "matching-context");
+        assert!(completion.easy.is_some());
+        completion
+            .result
+            .expect("test curl transfer should complete successfully");
+
+        runtime.shutdown();
+        server.join().expect("test HTTP server should finish");
     }
 
     #[test]
@@ -973,7 +1234,7 @@ mod tests {
             closed: false,
             pending: VecDeque::new(),
             dns: CurlDnsOwnerResidence::default(),
-            active: vec![active],
+            active: HashMap::from([(test_transfer_id(1), active)]),
         };
         let cap = NonZeroUsize::new(1);
 

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::IpAddr};
+use std::{collections::HashMap, hash::Hash, net::IpAddr};
 
 use anyhow::{Context, Result, anyhow};
 use crossbeam_channel::{Receiver, Sender};
@@ -83,11 +83,8 @@ impl CurlDnsResolution {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct CurlDnsOwnerRequestId(u64);
-
-pub(crate) struct CurlDnsOwnerCompletion {
-    request_id: CurlDnsOwnerRequestId,
+pub(crate) struct CurlDnsOwnerCompletion<I> {
+    request_id: I,
     result: DnsLookupResult,
 }
 
@@ -102,15 +99,14 @@ pub(crate) struct CurlDnsReady<P> {
 /// owns only the lookup. Completion returns through a channel and is claimed by
 /// exact request identity on the curl owner; a late completion after shutdown
 /// cannot recover or mutate a retired transfer.
-pub(crate) struct CurlDnsOwnerResidence<P> {
+pub(crate) struct CurlDnsOwnerResidence<I, P> {
     partition: DnsCachePartition,
-    completion_tx: Sender<CurlDnsOwnerCompletion>,
-    completion_rx: Receiver<CurlDnsOwnerCompletion>,
-    waiting: HashMap<CurlDnsOwnerRequestId, P>,
-    next_request_id: u64,
+    completion_tx: Sender<CurlDnsOwnerCompletion<I>>,
+    completion_rx: Receiver<CurlDnsOwnerCompletion<I>>,
+    waiting: HashMap<I, P>,
 }
 
-impl<P> Default for CurlDnsOwnerResidence<P> {
+impl<I, P> Default for CurlDnsOwnerResidence<I, P> {
     fn default() -> Self {
         let (completion_tx, completion_rx) = crossbeam_channel::unbounded();
         Self {
@@ -118,26 +114,29 @@ impl<P> Default for CurlDnsOwnerResidence<P> {
             completion_tx,
             completion_rx,
             waiting: HashMap::new(),
-            next_request_id: 1,
         }
     }
 }
 
-impl<P> CurlDnsOwnerResidence<P> {
+impl<I, P> CurlDnsOwnerResidence<I, P>
+where
+    I: Copy + Eq + Hash + Send + 'static,
+{
     pub(crate) fn is_empty(&self) -> bool {
         self.waiting.is_empty()
     }
 
-    pub(crate) fn completion_receiver(&self) -> &Receiver<CurlDnsOwnerCompletion> {
+    pub(crate) fn completion_receiver(&self) -> &Receiver<CurlDnsOwnerCompletion<I>> {
         &self.completion_rx
     }
 
-    pub(crate) fn start(&mut self, pending: P, target: DnsTarget, owner_waker: MultiWaker) {
-        let request_id = CurlDnsOwnerRequestId(self.next_request_id);
-        self.next_request_id = self
-            .next_request_id
-            .checked_add(1)
-            .expect("curl owner DNS request identity must not wrap");
+    pub(crate) fn start(
+        &mut self,
+        request_id: I,
+        pending: P,
+        target: DnsTarget,
+        owner_waker: MultiWaker,
+    ) {
         let previous = self.waiting.insert(request_id, pending);
         assert!(
             previous.is_none(),
@@ -160,7 +159,10 @@ impl<P> CurlDnsOwnerResidence<P> {
         }
     }
 
-    pub(crate) fn claim(&mut self, completion: CurlDnsOwnerCompletion) -> Option<CurlDnsReady<P>> {
+    pub(crate) fn claim(
+        &mut self,
+        completion: CurlDnsOwnerCompletion<I>,
+    ) -> Option<CurlDnsReady<P>> {
         let pending = self.waiting.remove(&completion.request_id)?;
         Some(CurlDnsReady {
             pending,
@@ -214,8 +216,8 @@ mod tests {
 
     #[test]
     fn exact_completion_can_be_claimed_only_once() {
-        let mut residence = CurlDnsOwnerResidence::default();
-        let request_id = CurlDnsOwnerRequestId(7);
+        let mut residence = CurlDnsOwnerResidence::<u64, _>::default();
+        let request_id = 7;
         residence.waiting.insert(request_id, "pending");
 
         let ready = residence
@@ -238,9 +240,9 @@ mod tests {
 
     #[test]
     fn queued_stale_completion_does_not_hide_next_ready_request() {
-        let mut residence = CurlDnsOwnerResidence::default();
-        let stale_id = CurlDnsOwnerRequestId(3);
-        let ready_id = CurlDnsOwnerRequestId(4);
+        let mut residence = CurlDnsOwnerResidence::<u64, _>::default();
+        let stale_id = 3;
+        let ready_id = 4;
         residence.waiting.insert(ready_id, "ready");
         residence
             .completion_tx

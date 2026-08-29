@@ -926,7 +926,7 @@ impl RuntimeOwner {
             context: ActiveTransferContext::Buffered(Box::new(context)),
         };
         match self.curl_runtime.submit(curl_job) {
-            Ok(()) => Ok(JobOutcome::Submitted),
+            Ok(_) => Ok(JobOutcome::Submitted),
             Err(error) => Err((
                 error
                     .job
@@ -1111,7 +1111,7 @@ impl RuntimeOwner {
             context: ActiveTransferContext::Streaming(Box::new(context)),
         };
         match self.curl_runtime.submit(curl_job) {
-            Ok(()) => Ok(StreamingJobOutcome::Submitted),
+            Ok(_) => Ok(StreamingJobOutcome::Submitted),
             Err(error) => {
                 let context = error
                     .job
@@ -1309,7 +1309,7 @@ impl RuntimeOwner {
             context: ActiveTransferContext::StreamingRaw(Box::new(context)),
         };
         match self.curl_runtime.submit(curl_job) {
-            Ok(()) => Ok(StreamingJobOutcome::Submitted),
+            Ok(_) => Ok(StreamingJobOutcome::Submitted),
             Err(error) => {
                 let context = error
                     .job
