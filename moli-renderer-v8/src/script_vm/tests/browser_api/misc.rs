@@ -25318,6 +25318,94 @@ popup.location.href = `javascript:
 }
 
 #[tokio::test]
+async fn lightweight_popup_nested_eval_uses_popup_response_csp() {
+    let result = lightweight_popup_nested_eval_result(
+        "script-src 'unsafe-inline' 'unsafe-eval'",
+        "Content-Security-Policy: script-src 'unsafe-inline'",
+        "EvalError",
+    )
+    .await;
+    assert_eq!(result, "EvalError");
+}
+
+#[tokio::test]
+async fn lightweight_popup_nested_eval_uses_popup_response_trusted_types() {
+    let result = lightweight_popup_nested_eval_result(
+        "script-src 'unsafe-inline' 'unsafe-eval'",
+        "Content-Security-Policy: script-src 'unsafe-inline' 'unsafe-eval'; require-trusted-types-for 'script'",
+        "EvalError",
+    )
+    .await;
+    assert_eq!(result, "EvalError");
+}
+
+async fn lightweight_popup_nested_eval_result(
+    opener_policy: &'static str,
+    popup_policy_header: &'static str,
+    expected: &'static str,
+) -> String {
+    let (popup_url, server) = spawn_lightweight_popup_response_html_server(
+        "popup nested eval policy test server",
+        "popup nested eval policy",
+        popup_policy_header,
+        r#"<!doctype html><script>
+trustedTypes.createPolicy("default", {
+  createScript: (value, _type, sink) => sink === "Location href" ? value : null
+});
+onload = () => {
+  location.href = `javascript:
+    try {
+      eval("globalThis.__popupNestedEvalRan = true");
+      opener.postMessage("allowed", "*");
+    } catch (error) {
+      opener.postMessage(error.name, "*");
+    }
+  `;
+};
+</script>"#,
+    )
+    .await;
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    let document_url = Url::parse(&popup_url)
+        .expect("popup url")
+        .join("/base/page.html")
+        .expect("document url");
+    let mut vm = new_storage_page_task_executor_test_vm_with_loader(document_url.as_str(), &loader);
+    vm.set_response_content_security_policies(&[opener_policy.to_owned()]);
+    let popup_url_literal = serde_json::to_string(&popup_url).expect("serialize popup url");
+
+    vm.eval(&format!(
+        r#"
+globalThis.__popupNestedEvalResult = "pending";
+addEventListener("message", event => {{
+  globalThis.__popupNestedEvalResult = String(event.data);
+}});
+open({popup_url_literal});
+"#
+    ))
+    .expect("popup nested eval setup should evaluate");
+    wait_for_one_page_resource_completion_selected_task_executor_test_turn(
+        &mut vm,
+        &loader,
+        "popup nested eval document completion",
+    )
+    .await;
+    server
+        .await
+        .expect("popup nested eval policy server should finish");
+    advance_page_task_executor_until_eval_equals(
+        &mut vm,
+        &loader,
+        "String(globalThis.__popupNestedEvalResult)",
+        expected,
+        "popup nested eval policy result",
+    )
+    .await;
+    vm.eval("String(globalThis.__popupNestedEvalResult)")
+        .expect("popup nested eval result should evaluate")
+}
+
+#[tokio::test]
 async fn lightweight_popup_post_message_round_trips_with_wasm_module() {
     let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let mut vm = new_storage_page_task_executor_test_vm_with_loader(

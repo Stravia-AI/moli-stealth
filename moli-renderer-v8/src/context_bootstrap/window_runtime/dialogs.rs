@@ -173,7 +173,7 @@ pub(crate) fn window_open_callback<'s>(
         window_open_entered_document_url(scope, host).to_string()
     };
     if url.scheme() == "javascript" {
-        let source = crate::native_bridge::javascript_url_csp_source(&url);
+        let source = crate::javascript_url::csp_source(&url);
         let host = unsafe { &mut *host_ptr };
         let owner = host.entered_owner_dispatch_scope(scope);
         if !host.allows_inline_javascript_navigation_by_csp(scope, owner, &source) {

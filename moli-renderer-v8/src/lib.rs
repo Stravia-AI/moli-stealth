@@ -57,6 +57,7 @@ mod frame_owner_model;
 mod host;
 mod host_bindings;
 mod inspector_microtasks;
+mod javascript_url;
 mod layout_renderer;
 mod link_as;
 mod live_document_parser;

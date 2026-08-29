@@ -2,7 +2,6 @@ use std::{future::Future, pin::Pin, time::Instant};
 
 use anyhow::{Result, anyhow, ensure};
 use moli_fetch::{BrowserNavigationRequestKind, FetchCancelHandle, Request, StreamingRawResponse};
-use percent_encoding::percent_decode_str;
 use tokio::sync::oneshot;
 use tracing::debug;
 use url::Url;
@@ -24,14 +23,6 @@ use crate::runtime::{
 };
 
 use super::{PageVm, PageVmEnvConfig, PageVmRuntimeHooks};
-
-fn javascript_location_navigation_source(url: &Url) -> String {
-    let source = url
-        .as_str()
-        .strip_prefix("javascript:")
-        .unwrap_or_else(|| url.path());
-    percent_decode_str(source).decode_utf8_lossy().into_owned()
-}
 
 pub(super) enum LoadedFollowedLocationNavigation {
     NoDocument,
@@ -681,6 +672,7 @@ impl PageVm {
                 PageVmFollowNavigationTurnOutcome::Completed,
             )));
         };
+        let navigation_kind = pending.kind();
         let initiator_url = self.vm().document_runtime.document_url().clone();
         let navigation_handoff = pending.handoff;
         let url = pending.url.clone();
@@ -694,7 +686,7 @@ impl PageVm {
         let service_worker_client_navigate = pending.service_worker_client_navigate;
         tracing::debug!(stage = ?stage, %url, "following pending location navigation asynchronously");
 
-        if url.scheme() == "javascript" {
+        if navigation_kind == crate::native_bridge::PendingLocationNavigationKind::JavascriptUrl {
             if let Some(client_id) = reserved_service_worker_client_id {
                 self.vm_mut()
                     .unregister_reserved_service_worker_client_after_navigation_abort(client_id);
@@ -1098,7 +1090,9 @@ impl PageVm {
         &mut self,
         stage: PageVmInitStage,
     ) -> Result<PageVmFollowNavigationTurnOutcome> {
-        let Some(pending) = self.vm_mut().take_pending_location_navigation_with_seed() else {
+        let Some(pending) = self.vm_mut().take_pending_location_navigation_of_kind(
+            crate::native_bridge::PendingLocationNavigationKind::JavascriptUrl,
+        ) else {
             return Ok(PageVmFollowNavigationTurnOutcome::Completed);
         };
         let initiator_url = self.vm().document_runtime.document_url().clone();
@@ -1135,7 +1129,7 @@ impl PageVm {
         url: Url,
         stage: PageVmInitStage,
     ) -> Result<PageVmFollowNavigationTurnOutcome> {
-        let source = javascript_location_navigation_source(&url);
+        let source = crate::javascript_url::decoded_source(&url);
         tracing::debug!(
             stage = ?stage,
             %url,

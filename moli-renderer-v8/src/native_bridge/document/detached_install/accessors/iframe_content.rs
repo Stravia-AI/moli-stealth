@@ -45,7 +45,7 @@ pub(in crate::native_bridge) fn detached_iframe_content_document<'s>(
         } else {
             parsed_base_url
         };
-    let document = crate::dom_parser::parse_child_document_projection_from_source(
+    let document = crate::dom_parser::parse_browsing_context_document_projection_from_source(
         scope,
         snapshot.url.clone(),
         &snapshot.markup,

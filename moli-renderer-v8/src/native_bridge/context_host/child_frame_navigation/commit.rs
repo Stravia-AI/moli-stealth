@@ -17,7 +17,6 @@ use crate::{
         FrameScriptJobKind, PendingChildJavascriptUrlDocumentScript,
     },
 };
-use percent_encoding::percent_decode_str;
 use url::Url;
 
 pub(crate) struct ChildFrameNavigationCommitTaskRun {
@@ -468,7 +467,7 @@ impl JsContextHost {
             snapshot.local_window_id,
             snapshot.document_id,
         );
-        let source = javascript_url_source(&url);
+        let source = crate::javascript_url::decoded_source(&url);
         let work = PendingChildJavascriptUrlDocumentScript {
             child_handle: handle,
             owner: task_owner,
@@ -768,12 +767,4 @@ impl JsContextHost {
             owner_transition: Some(install.owner_transition),
         }
     }
-}
-
-fn javascript_url_source(url: &Url) -> String {
-    let source = url
-        .as_str()
-        .strip_prefix("javascript:")
-        .unwrap_or_else(|| url.path());
-    percent_decode_str(source).decode_utf8_lossy().into_owned()
 }

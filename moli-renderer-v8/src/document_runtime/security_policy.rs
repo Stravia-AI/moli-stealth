@@ -1011,6 +1011,43 @@ impl DocumentRuntime {
         }
     }
 
+    pub(crate) fn non_url_csp_check_for_document(
+        &self,
+        document_handle: Option<DomHandle>,
+        document_url: &Url,
+        response_policies: &[String],
+        response_report_only_policies: &[String],
+        response_reporting_endpoints: &ContentSecurityPolicyReportingEndpoints,
+        kind: ContentSecurityPolicyNonUrlKind,
+    ) -> DocumentContentSecurityPolicyCheck {
+        let enforced_policies = self
+            .document_content_security_policy_strings_for_optional_document(
+                document_handle,
+                response_policies,
+                response_reporting_endpoints,
+            );
+        let enforced_violation = document_non_url_policy_violation_from_document_policies(
+            enforced_policies,
+            document_url,
+            kind,
+            ContentSecurityPolicyDisposition::Enforce,
+        );
+        let report_only_policies = document_response_content_security_policy_strings(
+            response_report_only_policies,
+            response_reporting_endpoints,
+        );
+        let report_only_violation = document_non_url_policy_violation_from_document_policies(
+            report_only_policies,
+            document_url,
+            kind,
+            ContentSecurityPolicyDisposition::Report,
+        );
+        DocumentContentSecurityPolicyCheck {
+            report_only_violation,
+            enforced_violation,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn document_frame_csp_violation(
         &self,
@@ -1031,7 +1068,7 @@ impl DocumentRuntime {
         )
     }
 
-    pub(crate) fn script_element_request_csp_violation_for_child_document(
+    pub(crate) fn script_element_request_csp_violation_for_document(
         &self,
         document_handle: Option<DomHandle>,
         document_url: &Url,
@@ -1039,7 +1076,7 @@ impl DocumentRuntime {
         response_reporting_endpoints: &ContentSecurityPolicyReportingEndpoints,
         request_url: &Url,
     ) -> Option<DocumentContentSecurityPolicyViolation> {
-        self.script_element_request_csp_violation_for_child_document_with_redirect_status(
+        self.script_element_request_csp_violation_for_document_with_redirect_status(
             document_handle,
             document_url,
             response_policies,
@@ -1050,7 +1087,7 @@ impl DocumentRuntime {
         )
     }
 
-    pub(crate) fn script_element_request_csp_violation_for_child_document_with_redirect_status(
+    pub(crate) fn script_element_request_csp_violation_for_document_with_redirect_status(
         &self,
         document_handle: Option<DomHandle>,
         document_url: &Url,
@@ -1075,14 +1112,14 @@ impl DocumentRuntime {
         )
     }
 
-    pub(crate) fn script_element_request_csp_report_only_violation_for_child_document(
+    pub(crate) fn script_element_request_csp_report_only_violation_for_document(
         &self,
         document_url: &Url,
         response_report_only_policies: &[String],
         response_reporting_endpoints: &ContentSecurityPolicyReportingEndpoints,
         request_url: &Url,
     ) -> Option<DocumentContentSecurityPolicyViolation> {
-        self.script_element_request_csp_report_only_violation_for_child_document_with_redirect_status(
+        self.script_element_request_csp_report_only_violation_for_document_with_redirect_status(
             document_url,
             response_report_only_policies,
             response_reporting_endpoints,
@@ -1092,7 +1129,7 @@ impl DocumentRuntime {
         )
     }
 
-    pub(crate) fn script_element_request_csp_report_only_violation_for_child_document_with_redirect_status(
+    pub(crate) fn script_element_request_csp_report_only_violation_for_document_with_redirect_status(
         &self,
         document_url: &Url,
         response_report_only_policies: &[String],
@@ -1113,7 +1150,7 @@ impl DocumentRuntime {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn document_connect_csp_check_for_child_document_with_redirect_status(
+    pub(crate) fn document_connect_csp_check_for_document_with_redirect_status(
         &self,
         document_handle: Option<DomHandle>,
         document_url: &Url,
@@ -1188,7 +1225,7 @@ impl DocumentRuntime {
         )
     }
 
-    pub(crate) fn inline_script_csp_violation_for_child_document(
+    pub(crate) fn inline_script_csp_violation_for_document(
         &self,
         document_handle: Option<DomHandle>,
         document_url: &Url,
@@ -1208,7 +1245,7 @@ impl DocumentRuntime {
         )
     }
 
-    pub(crate) fn inline_script_csp_report_only_violation_for_child_document(
+    pub(crate) fn inline_script_csp_report_only_violation_for_document(
         &self,
         document_url: &Url,
         response_report_only_policies: &[String],
@@ -1226,6 +1263,7 @@ impl DocumentRuntime {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn wasm_eval_csp_violation(&self) -> Option<DocumentContentSecurityPolicyViolation> {
         self.non_url_csp_violation(
             ContentSecurityPolicyNonUrlKind::WasmEval,
@@ -1233,26 +1271,7 @@ impl DocumentRuntime {
         )
     }
 
-    pub(crate) fn eval_csp_violation(
-        &self,
-        allow_trusted_types_eval: bool,
-    ) -> Option<DocumentContentSecurityPolicyViolation> {
-        self.non_url_csp_violation(
-            eval_csp_kind(allow_trusted_types_eval),
-            ContentSecurityPolicyDisposition::Enforce,
-        )
-    }
-
-    pub(crate) fn eval_csp_report_only_violation(
-        &self,
-        allow_trusted_types_eval: bool,
-    ) -> Option<DocumentContentSecurityPolicyViolation> {
-        self.non_url_csp_report_only_violation(
-            eval_csp_kind(allow_trusted_types_eval),
-            ContentSecurityPolicyDisposition::Report,
-        )
-    }
-
+    #[cfg(test)]
     fn non_url_csp_violation(
         &self,
         kind: ContentSecurityPolicyNonUrlKind,
@@ -1272,6 +1291,7 @@ impl DocumentRuntime {
         )
     }
 
+    #[cfg(test)]
     fn non_url_csp_report_only_violation(
         &self,
         kind: ContentSecurityPolicyNonUrlKind,
@@ -1292,6 +1312,7 @@ impl DocumentRuntime {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn wasm_eval_csp_report_only_violation(
         &self,
     ) -> Option<DocumentContentSecurityPolicyViolation> {
@@ -1301,26 +1322,7 @@ impl DocumentRuntime {
         )
     }
 
-    pub(crate) fn trusted_types_sink_csp_violation(
-        &self,
-        sink: &str,
-        sample: &str,
-    ) -> Option<DocumentContentSecurityPolicyViolation> {
-        let document_url = self.document_url();
-        let policies = self.document_content_security_policy_strings_for_optional_document(
-            Some(self.document_handle()),
-            &self.policy_container.response_content_security_policies,
-            &self.policy_container.content_security_reporting_endpoints,
-        );
-        document_trusted_types_sink_policy_violation_from_document_policies(
-            policies,
-            document_url,
-            sink,
-            sample,
-            ContentSecurityPolicyDisposition::Enforce,
-        )
-    }
-
+    #[cfg(test)]
     pub(crate) fn trusted_types_sink_csp_report_only_violation(
         &self,
         sink: &str,
@@ -1342,6 +1344,7 @@ impl DocumentRuntime {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn trusted_types_for_script_requirements(
         &self,
     ) -> TrustedTypesForScriptRequirements {
@@ -1428,103 +1431,7 @@ impl DocumentRuntime {
         document_policies_require_trusted_types_for_script(&policies)
     }
 
-    pub(crate) fn allows_trusted_types_eval(&self) -> bool {
-        let policies = self.document_content_security_policy_strings_for_optional_document(
-            Some(self.document_handle()),
-            &self.policy_container.response_content_security_policies,
-            &self.policy_container.content_security_reporting_endpoints,
-        );
-        document_policies_allow_trusted_types_eval(&policies)
-    }
-
-    pub(crate) fn allows_trusted_type_policy_name(&self, policy_name: &str) -> bool {
-        let policies = self.document_content_security_policy_strings_for_optional_document(
-            Some(self.document_handle()),
-            &self.policy_container.response_content_security_policies,
-            &self.policy_container.content_security_reporting_endpoints,
-        );
-        document_policies_allow_trusted_type_policy_name(policies, policy_name)
-    }
-
-    pub(crate) fn wasm_eval_csp_violation_for_child_document(
-        &self,
-        document_handle: Option<DomHandle>,
-        document_url: &Url,
-        response_policies: &[String],
-        response_reporting_endpoints: &ContentSecurityPolicyReportingEndpoints,
-    ) -> Option<DocumentContentSecurityPolicyViolation> {
-        let policies = self.document_content_security_policy_strings_for_optional_document(
-            document_handle,
-            response_policies,
-            response_reporting_endpoints,
-        );
-        document_non_url_policy_violation_from_document_policies(
-            policies,
-            document_url,
-            ContentSecurityPolicyNonUrlKind::WasmEval,
-            ContentSecurityPolicyDisposition::Enforce,
-        )
-    }
-
-    pub(crate) fn eval_csp_violation_for_child_document(
-        &self,
-        document_handle: Option<DomHandle>,
-        document_url: &Url,
-        response_policies: &[String],
-        response_reporting_endpoints: &ContentSecurityPolicyReportingEndpoints,
-        allow_trusted_types_eval: bool,
-    ) -> Option<DocumentContentSecurityPolicyViolation> {
-        let policies = self.document_content_security_policy_strings_for_optional_document(
-            document_handle,
-            response_policies,
-            response_reporting_endpoints,
-        );
-        document_non_url_policy_violation_from_document_policies(
-            policies,
-            document_url,
-            eval_csp_kind(allow_trusted_types_eval),
-            ContentSecurityPolicyDisposition::Enforce,
-        )
-    }
-
-    pub(crate) fn trusted_types_sink_csp_violation_for_child_document(
-        &self,
-        document_handle: Option<DomHandle>,
-        document_url: &Url,
-        response_policies: &[String],
-        response_reporting_endpoints: &ContentSecurityPolicyReportingEndpoints,
-        sink: &str,
-        sample: &str,
-    ) -> Option<DocumentContentSecurityPolicyViolation> {
-        let policies = self.document_content_security_policy_strings_for_optional_document(
-            document_handle,
-            response_policies,
-            response_reporting_endpoints,
-        );
-        document_trusted_types_sink_policy_violation_from_document_policies(
-            policies,
-            document_url,
-            sink,
-            sample,
-            ContentSecurityPolicyDisposition::Enforce,
-        )
-    }
-
-    pub(crate) fn requires_trusted_types_for_script_for_child_document(
-        &self,
-        document_handle: Option<DomHandle>,
-        response_policies: &[String],
-        response_reporting_endpoints: &ContentSecurityPolicyReportingEndpoints,
-    ) -> bool {
-        let policies = self.document_content_security_policy_strings_for_optional_document(
-            document_handle,
-            response_policies,
-            response_reporting_endpoints,
-        );
-        document_policies_require_trusted_types_for_script(&policies)
-    }
-
-    pub(crate) fn allows_trusted_types_eval_for_child_document(
+    pub(crate) fn allows_trusted_types_eval_for_document(
         &self,
         document_handle: Option<DomHandle>,
         response_policies: &[String],
@@ -1538,7 +1445,7 @@ impl DocumentRuntime {
         document_policies_allow_trusted_types_eval(&policies)
     }
 
-    pub(crate) fn allows_trusted_type_policy_name_for_child_document(
+    pub(crate) fn allows_trusted_type_policy_name_for_document(
         &self,
         document_handle: Option<DomHandle>,
         response_policies: &[String],
@@ -1551,43 +1458,6 @@ impl DocumentRuntime {
             response_reporting_endpoints,
         );
         document_policies_allow_trusted_type_policy_name(policies, policy_name)
-    }
-
-    pub(crate) fn wasm_eval_csp_report_only_violation_for_child_document(
-        &self,
-        document_url: &Url,
-        response_report_only_policies: &[String],
-        response_reporting_endpoints: &ContentSecurityPolicyReportingEndpoints,
-    ) -> Option<DocumentContentSecurityPolicyViolation> {
-        let policies = document_response_content_security_policy_strings(
-            response_report_only_policies,
-            response_reporting_endpoints,
-        );
-        document_non_url_policy_violation_from_document_policies(
-            policies,
-            document_url,
-            ContentSecurityPolicyNonUrlKind::WasmEval,
-            ContentSecurityPolicyDisposition::Report,
-        )
-    }
-
-    pub(crate) fn eval_csp_report_only_violation_for_child_document(
-        &self,
-        document_url: &Url,
-        response_report_only_policies: &[String],
-        response_reporting_endpoints: &ContentSecurityPolicyReportingEndpoints,
-        allow_trusted_types_eval: bool,
-    ) -> Option<DocumentContentSecurityPolicyViolation> {
-        let policies = document_response_content_security_policy_strings(
-            response_report_only_policies,
-            response_reporting_endpoints,
-        );
-        document_non_url_policy_violation_from_document_policies(
-            policies,
-            document_url,
-            eval_csp_kind(allow_trusted_types_eval),
-            ContentSecurityPolicyDisposition::Report,
-        )
     }
 
     pub(crate) fn queue_content_security_policy_violation_event_best_effort<'s>(
@@ -2147,6 +2017,7 @@ fn document_inline_style_element_policy_violation_from_document_policies(
     })
 }
 
+#[cfg(test)]
 fn document_trusted_types_sink_policy_violation_from_document_policies(
     policies: Vec<DocumentContentSecurityPolicyString>,
     document_url: &Url,
@@ -2204,14 +2075,6 @@ fn document_policies_require_trusted_types_for_script(
             &policy.policy,
         ))
     })
-}
-
-fn eval_csp_kind(allow_trusted_types_eval: bool) -> ContentSecurityPolicyNonUrlKind {
-    if allow_trusted_types_eval {
-        ContentSecurityPolicyNonUrlKind::TrustedTypesEval
-    } else {
-        ContentSecurityPolicyNonUrlKind::Eval
-    }
 }
 
 fn document_policies_allow_trusted_types_eval(
@@ -2506,22 +2369,28 @@ mod tests {
         let reporting_endpoints = ContentSecurityPolicyReportingEndpoints::default();
 
         assert!(
-            runtime.requires_trusted_types_for_script_for_child_document(
-                Some(child_document),
-                &[],
-                &reporting_endpoints,
-            )
+            runtime
+                .trusted_types_for_script_requirements_for_document(
+                    Some(child_document),
+                    &[],
+                    &[],
+                    &reporting_endpoints,
+                )
+                .is_enforced()
         );
         assert!(
             !runtime.requires_trusted_types_for_script(),
             "a child document's meta policy must not affect the parent document"
         );
         assert!(
-            runtime.requires_trusted_types_for_script_for_child_document(
-                Some(child_document),
-                &[],
-                &reporting_endpoints,
-            ),
+            runtime
+                .trusted_types_for_script_requirements_for_document(
+                    Some(child_document),
+                    &[],
+                    &[],
+                    &reporting_endpoints,
+                )
+                .is_enforced(),
             "checking the parent must not discard the child document's delivered policy"
         );
     }
@@ -2851,7 +2720,7 @@ mod tests {
         runtime.set_content_security_reporting_endpoints(reporting_endpoints());
 
         let inline = runtime
-            .inline_script_csp_violation_for_child_document(
+            .inline_script_csp_violation_for_document(
                 Some(runtime.document_handle()),
                 runtime.document_url(),
                 &["script-src 'none'; report-to csp".to_owned()],
@@ -3055,7 +2924,7 @@ mod tests {
         let reporting_endpoints = ContentSecurityPolicyReportingEndpoints::default();
 
         let violation = runtime
-            .script_element_request_csp_violation_for_child_document(
+            .script_element_request_csp_violation_for_document(
                 None,
                 &document_url,
                 &response_policies,
@@ -3078,7 +2947,7 @@ mod tests {
         let reporting_endpoints = ContentSecurityPolicyReportingEndpoints::default();
 
         let violation = runtime
-            .inline_script_csp_violation_for_child_document(
+            .inline_script_csp_violation_for_document(
                 None,
                 &document_url,
                 &blocking_policies,
@@ -3090,7 +2959,7 @@ mod tests {
         assert_eq!(violation.blocked_uri, "inline");
         assert!(
             runtime
-                .inline_script_csp_violation_for_child_document(
+                .inline_script_csp_violation_for_document(
                     None,
                     &document_url,
                     &allowing_policies,

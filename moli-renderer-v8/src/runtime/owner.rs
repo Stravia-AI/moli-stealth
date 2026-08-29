@@ -4241,7 +4241,7 @@ impl RendererOwnerHandle {
             match entry
                 .page_vm_mut()
                 .vm_mut()
-                .publish_pending_non_javascript_location_navigation()
+                .publish_pending_document_location_navigation()
             {
                 Ok(published) => published,
                 Err(error) => {
@@ -4333,7 +4333,7 @@ impl RendererOwnerHandle {
         ) && let Err(error) = entry
             .page_vm_mut()
             .vm_mut()
-            .publish_pending_non_javascript_location_navigation()
+            .publish_pending_document_location_navigation()
         {
             let concrete_output = entry
                 .page_vm_mut()

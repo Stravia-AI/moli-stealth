@@ -113,9 +113,7 @@ impl PageVm {
             return None;
         }
         let current_document = self.document_lifecycle.identity();
-        let suspends_exact_lifecycle = self
-            .vm()
-            .pending_location_navigation_scheme_is("javascript")
+        let suspends_exact_lifecycle = self.vm().has_pending_javascript_location_navigation()
             && pending_document_lifecycle_turn
                 .as_ref()
                 .is_some_and(|pending| pending.document == current_document);

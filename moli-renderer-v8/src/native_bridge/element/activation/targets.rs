@@ -289,7 +289,7 @@ fn hyperlink_javascript_url_allowed_by_csp(
     else {
         return false;
     };
-    let source = crate::native_bridge::javascript_url_csp_source(&url);
+    let source = crate::javascript_url::csp_source(&url);
     unsafe { &mut *runtime_ptr }.allows_inline_javascript_navigation_by_csp(scope, owner, &source)
 }
 

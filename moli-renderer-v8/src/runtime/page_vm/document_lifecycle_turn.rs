@@ -332,9 +332,7 @@ impl PageVm {
             )
             .await?;
             if self.vm().has_pending_location_navigation()
-                && !self
-                    .vm()
-                    .pending_location_navigation_scheme_is("javascript")
+                && !self.vm().has_pending_javascript_location_navigation()
             {
                 return Ok(self
                     .transition_lifecycle_for_pending_top_level_navigation(
@@ -455,9 +453,7 @@ impl PageVm {
                 )
                 .await?;
                 if self.vm().has_pending_location_navigation()
-                    && !self
-                        .vm()
-                        .pending_location_navigation_scheme_is("javascript")
+                    && !self.vm().has_pending_javascript_location_navigation()
                 {
                     return Ok(self
                         .transition_lifecycle_for_pending_top_level_navigation(

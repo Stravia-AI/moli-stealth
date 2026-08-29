@@ -69,6 +69,22 @@ pub(crate) struct PendingLocationNavigation {
         Option<crate::types::ServiceWorkerClientNavigateContinuation>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PendingLocationNavigationKind {
+    JavascriptUrl,
+    Document,
+}
+
+impl PendingLocationNavigation {
+    pub(crate) fn kind(&self) -> PendingLocationNavigationKind {
+        if self.url.scheme() == "javascript" {
+            PendingLocationNavigationKind::JavascriptUrl
+        } else {
+            PendingLocationNavigationKind::Document
+        }
+    }
+}
+
 pub(crate) enum PendingTopLevelNavigation {
     Location(Box<PendingLocationNavigation>),
     #[cfg(test)]
@@ -192,16 +208,12 @@ impl JsContextHost {
         )
     }
 
-    pub(crate) fn pending_location_navigation_scheme_is(&self, scheme: &str) -> bool {
-        self.pending_top_level_navigation
-            .as_ref()
-            .is_some_and(|pending| {
-                matches!(
-                    pending,
-                    PendingTopLevelNavigation::Location(pending)
-                        if pending.url.scheme() == scheme
-                )
-            })
+    pub(crate) fn pending_location_navigation_kind(&self) -> Option<PendingLocationNavigationKind> {
+        match self.pending_top_level_navigation.as_ref()? {
+            PendingTopLevelNavigation::Location(pending) => Some(pending.kind()),
+            #[cfg(test)]
+            PendingTopLevelNavigation::HistoryTraversal(_) => None,
+        }
     }
 
     pub(crate) fn pending_location_navigation_runtime_command_cause(
@@ -236,6 +248,16 @@ impl JsContextHost {
             unreachable!("pending top-level navigation kind changed without an intervening call");
         };
         Some(*pending)
+    }
+
+    pub(crate) fn take_pending_location_navigation_of_kind(
+        &mut self,
+        expected: PendingLocationNavigationKind,
+    ) -> Option<PendingLocationNavigation> {
+        if self.pending_location_navigation_kind() != Some(expected) {
+            return None;
+        }
+        self.take_pending_location_navigation()
     }
 
     pub(crate) fn clear_pending_location_navigation(&mut self) {

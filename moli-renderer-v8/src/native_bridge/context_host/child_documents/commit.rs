@@ -173,7 +173,7 @@ impl JsContextHost {
         let source = if is_xml_document {
             std::borrow::Cow::Borrowed(snapshot.markup.as_str())
         } else {
-            crate::dom_parser::preserve_decoded_bom_only_child_body(
+            crate::dom_parser::preserve_decoded_bom_only_browsing_context_body(
                 &snapshot.markup,
                 snapshot.content_type.as_deref(),
             )

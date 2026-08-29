@@ -199,14 +199,16 @@ pub(crate) use moli_page_types::{
     NavigationActivationSeed, NavigationHistoryDocumentId, NavigationHistoryEntryId,
     NavigationHistoryEntryKey, NavigationHistoryEntrySeed, NavigationHistorySerializedEntry,
 };
-pub(crate) use navigation::{PendingLocationNavigation, PendingTopLevelNavigation};
+pub(crate) use navigation::{
+    PendingLocationNavigation, PendingLocationNavigationKind, PendingTopLevelNavigation,
+};
 pub(crate) use popups::{
     LightweightPopupClassicScriptFetchTarget, LightweightPopupDocumentFetchTarget,
     LightweightPopupNavigationTaskToken, PopupClassicScriptLoadApplication,
     PopupDocumentLoadApplication, PopupDocumentLoadBodyActivity, active_lightweight_popup_id,
     defer_active_lightweight_popup_restore, enter_active_lightweight_popup_scope,
-    enter_top_level_lightweight_popup_scope, javascript_url_csp_source,
-    lightweight_popup_id_from_window, restore_active_lightweight_popup_scope,
+    enter_top_level_lightweight_popup_scope, lightweight_popup_id_from_window,
+    restore_active_lightweight_popup_scope,
     restore_deferred_active_lightweight_popup_scope_if_present,
 };
 pub(crate) use range_records::{RangeBoundarySide, RangeRecordHandle};

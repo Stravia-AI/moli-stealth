@@ -5380,10 +5380,17 @@ impl ScriptVm {
             .has_pending_location_navigation()
     }
 
-    pub(super) fn pending_location_navigation_scheme_is(&self, scheme: &str) -> bool {
+    pub(super) fn pending_location_navigation_kind(
+        &self,
+    ) -> Option<super::native_bridge::PendingLocationNavigationKind> {
         self._context_host
             .borrow()
-            .pending_location_navigation_scheme_is(scheme)
+            .pending_location_navigation_kind()
+    }
+
+    pub(super) fn has_pending_javascript_location_navigation(&self) -> bool {
+        self.pending_location_navigation_kind()
+            == Some(super::native_bridge::PendingLocationNavigationKind::JavascriptUrl)
     }
 
     pub(super) fn pending_location_navigation_runtime_command_cause(
@@ -5546,14 +5553,22 @@ impl ScriptVm {
             .take_pending_location_navigation()
     }
 
-    pub(super) fn take_pending_non_javascript_location_navigation(
+    pub(super) fn take_pending_location_navigation_of_kind(
+        &mut self,
+        kind: super::native_bridge::PendingLocationNavigationKind,
+    ) -> Option<super::native_bridge::PendingLocationNavigation> {
+        self._context_host
+            .borrow_mut()
+            .take_pending_location_navigation_of_kind(kind)
+    }
+
+    pub(super) fn take_pending_document_location_navigation(
         &mut self,
     ) -> Option<super::native_bridge::PendingLocationNavigation> {
-        if self.pending_location_navigation_scheme_is("javascript") {
-            return None;
-        }
         let source_url = self.document_runtime.document_url().clone();
-        let pending = self.take_pending_location_navigation_with_seed()?;
+        let pending = self.take_pending_location_navigation_of_kind(
+            super::native_bridge::PendingLocationNavigationKind::Document,
+        )?;
         self.restore_top_level_location_runtime_state(&source_url);
         Some(pending)
     }
@@ -5565,10 +5580,8 @@ impl ScriptVm {
     /// proves that the browser owns the navigation. At that exact boundary we
     /// consume it once, freeze its source Document and command cause, and stop
     /// relying on protocol to pull mutable Page state in a later turn.
-    pub(super) fn publish_pending_non_javascript_location_navigation(
-        &mut self,
-    ) -> anyhow::Result<bool> {
-        let Some(pending) = self.take_pending_non_javascript_location_navigation() else {
+    pub(super) fn publish_pending_document_location_navigation(&mut self) -> anyhow::Result<bool> {
+        let Some(pending) = self.take_pending_document_location_navigation() else {
             return Ok(false);
         };
         let source_document = pending.source_document.ok_or_else(|| {

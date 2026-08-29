@@ -52,7 +52,6 @@ use moli_fetch::Request;
 use moli_storage_key::{MoliStorageKey, StoragePartitionRelation, site_for_url};
 use moli_url::origin_ascii_serialization;
 use moli_webapi_declare::{ObjectLiteralDeclaration, WebApiObject};
-use percent_encoding::percent_decode_str;
 use std::collections::{HashMap, HashSet};
 use url::Url;
 
@@ -865,16 +864,17 @@ impl JsContextHost {
             self.lightweight_popup_window_names.insert(name, popup_id);
         }
         if moli_url::is_about_blank(&initial_url)
-            && let Some(document) = crate::dom_parser::parse_child_document_projection_from_source(
-                scope,
-                initial_url.clone(),
-                "<!doctype html><html><head></head><body></body></html>",
-                Some("text/html"),
-                None,
-                crate::parser::HtmlParser::with_scripting_enabled(
-                    self.lightweight_popup_scripting_enabled(popup_id),
-                ),
-            )
+            && let Some(document) =
+                crate::dom_parser::parse_browsing_context_document_projection_from_source(
+                    scope,
+                    initial_url.clone(),
+                    "<!doctype html><html><head></head><body></body></html>",
+                    Some("text/html"),
+                    None,
+                    crate::parser::HtmlParser::with_scripting_enabled(
+                        self.lightweight_popup_scripting_enabled(popup_id),
+                    ),
+                )
         {
             if let Some(document_handle) =
                 self.remember_lightweight_popup_document_handle(scope, popup_id, document)
@@ -903,7 +903,7 @@ impl JsContextHost {
         let navigation_task =
             LightweightPopupNavigationTaskToken::from_parts(initial_document_owner, navigation_id);
         let queue_synthetic_load = if parsed_url.scheme() == "javascript" {
-            let source = javascript_url_source(&parsed_url);
+            let source = crate::javascript_url::decoded_source(&parsed_url);
             self.queue_lightweight_popup_javascript_url_task(scope, navigation_task, source);
             true
         } else if moli_url::is_about_blank(&initial_url) {
@@ -961,7 +961,7 @@ impl JsContextHost {
             document_target,
         )?;
         if target_url.scheme() == "javascript" {
-            let source = javascript_url_source(&target_url);
+            let source = crate::javascript_url::decoded_source(&target_url);
             self.queue_lightweight_popup_javascript_url_task(scope, navigation_task, source);
             return Some(window);
         }
@@ -1497,7 +1497,7 @@ impl JsContextHost {
         let previous_url = current_url.clone().unwrap_or_else(about_blank_url);
         if target_url.scheme() == "javascript" {
             let owner = self.entered_owner_dispatch_scope(scope);
-            let csp_source = javascript_url_csp_source(&target_url);
+            let csp_source = crate::javascript_url::csp_source(&target_url);
             if !self.allows_inline_javascript_navigation_by_csp(scope, owner, &csp_source) {
                 return true;
             }
@@ -1508,7 +1508,7 @@ impl JsContextHost {
             ) else {
                 return false;
             };
-            let source = javascript_url_source(&target_url);
+            let source = crate::javascript_url::decoded_source(&target_url);
             self.queue_lightweight_popup_javascript_url_task(scope, navigation_task, source);
             return true;
         }
@@ -2087,16 +2087,18 @@ impl JsContextHost {
             } else {
                 String::new()
             };
-        let Some(document) = crate::dom_parser::parse_child_document_projection_from_source(
-            scope,
-            document_url,
-            "<!doctype html><html><head></head><body></body></html>",
-            Some("text/html"),
-            None,
-            crate::parser::HtmlParser::with_scripting_enabled(
-                self.lightweight_popup_scripting_enabled(popup_id),
-            ),
-        ) else {
+        let Some(document) =
+            crate::dom_parser::parse_browsing_context_document_projection_from_source(
+                scope,
+                document_url,
+                "<!doctype html><html><head></head><body></body></html>",
+                Some("text/html"),
+                None,
+                crate::parser::HtmlParser::with_scripting_enabled(
+                    self.lightweight_popup_scripting_enabled(popup_id),
+                ),
+            )
+        else {
             return;
         };
         if let Some(document_handle) =
@@ -2767,7 +2769,7 @@ impl JsContextHost {
         source: LightweightPopupDocumentProjectionSource<'_>,
     ) -> Option<LightweightPopupDocumentProjectionApplication> {
         let popup_id = source.task.popup_id();
-        let document = crate::dom_parser::parse_child_document_projection_from_source(
+        let document = crate::dom_parser::parse_browsing_context_document_projection_from_source(
             scope,
             source.document_url.clone(),
             source.markup,
@@ -2918,7 +2920,7 @@ impl JsContextHost {
                     continue;
                 };
                 if let Some(violation) = unsafe { &*self.runtime }
-                    .script_element_request_csp_report_only_violation_for_child_document(
+                    .script_element_request_csp_report_only_violation_for_document(
                         &continuation.document_url,
                         &continuation.response_content_security_report_only_policies,
                         &continuation.response_content_security_reporting_endpoints,
@@ -2934,7 +2936,7 @@ impl JsContextHost {
                     }
                 }
                 if let Some(violation) = unsafe { &*self.runtime }
-                    .script_element_request_csp_violation_for_child_document(
+                    .script_element_request_csp_violation_for_document(
                         Some(continuation.document_handle),
                         &continuation.document_url,
                         &continuation.response_content_security_policies,
@@ -2980,7 +2982,7 @@ impl JsContextHost {
             }
             if script_src.is_none()
                 && let Some(violation) = unsafe { &*self.runtime }
-                    .inline_script_csp_report_only_violation_for_child_document(
+                    .inline_script_csp_report_only_violation_for_document(
                         &continuation.document_url,
                         &continuation.response_content_security_report_only_policies,
                         &continuation.response_content_security_reporting_endpoints,
@@ -2996,7 +2998,7 @@ impl JsContextHost {
             }
             if script_src.is_none()
                 && let Some(violation) = unsafe { &*self.runtime }
-                    .inline_script_csp_violation_for_child_document(
+                    .inline_script_csp_violation_for_document(
                         Some(continuation.document_handle),
                         &continuation.document_url,
                         &continuation.response_content_security_policies,
@@ -3298,7 +3300,7 @@ impl JsContextHost {
         let redirect_status =
             crate::content_security_policy::ContentSecurityPolicyRedirectStatus::FollowedRedirect;
         if let Some(violation) = unsafe { &*self.runtime }
-            .script_element_request_csp_report_only_violation_for_child_document_with_redirect_status(
+            .script_element_request_csp_report_only_violation_for_document_with_redirect_status(
                 document_url,
                 response_content_security_report_only_policies,
                 response_content_security_reporting_endpoints,
@@ -3313,7 +3315,7 @@ impl JsContextHost {
             );
         }
         if let Some(violation) = unsafe { &*self.runtime }
-            .script_element_request_csp_violation_for_child_document_with_redirect_status(
+            .script_element_request_csp_violation_for_document_with_redirect_status(
                 document_handle,
                 document_url,
                 response_content_security_policies,
@@ -4505,18 +4507,6 @@ fn u64_from_value(
 
 fn about_blank_url() -> Url {
     Url::parse("about:blank").expect("about:blank should parse")
-}
-
-pub(crate) fn javascript_url_csp_source(url: &Url) -> String {
-    format!("javascript:{}", javascript_url_source(url))
-}
-
-fn javascript_url_source(url: &Url) -> String {
-    let source = url
-        .as_str()
-        .strip_prefix("javascript:")
-        .unwrap_or_else(|| url.path());
-    percent_decode_str(source).decode_utf8_lossy().into_owned()
 }
 
 fn urls_refer_to_same_document_except_fragment(current: Option<&Url>, target: &Url) -> bool {

@@ -298,7 +298,7 @@ impl LivePageEntry {
         &self,
     ) -> Option<crate::page_task_queue::RendererTopLevelNavigationHandoff> {
         let vm = self.active_page_vm()?.vm();
-        vm.pending_location_navigation_scheme_is("javascript")
+        vm.has_pending_javascript_location_navigation()
             .then(|| vm.pending_location_navigation_handoff())
             .flatten()
     }

@@ -1790,7 +1790,7 @@ impl RendererOwnerLocalStore {
                 entry
                     .page_vm_mut()
                     .vm_mut()
-                    .publish_pending_non_javascript_location_navigation()?;
+                    .publish_pending_document_location_navigation()?;
             }
             let javascript_dialog_broker = entry.page_vm().javascript_dialog_broker();
             let devtools_target = entry.page_vm().devtools_target();
@@ -2605,7 +2605,7 @@ impl RendererOwnerLocalStore {
             entry
                 .page_vm_mut()
                 .vm_mut()
-                .publish_pending_non_javascript_location_navigation()
+                .publish_pending_document_location_navigation()
                 .map(|_| ())
         } else {
             Ok(())

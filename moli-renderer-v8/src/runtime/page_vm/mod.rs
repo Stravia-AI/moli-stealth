@@ -1871,9 +1871,7 @@ impl PageVm {
 
     fn request_pending_cross_document_navigation_termination(&self) -> bool {
         if !self.vm().has_pending_location_navigation()
-            || self
-                .vm()
-                .pending_location_navigation_scheme_is("javascript")
+            || self.vm().has_pending_javascript_location_navigation()
         {
             return false;
         }
@@ -3652,7 +3650,7 @@ impl PageVm {
                     }
                 };
                 let navigation_triggered = if navigation_triggered
-                    && page_vm.vm().pending_location_navigation_scheme_is("javascript")
+                    && page_vm.vm().has_pending_javascript_location_navigation()
                 {
                     match page_vm.follow_pending_javascript_location_navigation_if_present(
                         PageVmInitStage::Load,
@@ -3779,9 +3777,7 @@ impl PageVm {
                 page_vm.vm_mut().resync_child_browsing_contexts();
                 let navigation_triggered = page_vm.vm_mut().has_pending_location_navigation();
                 let navigation_triggered = if navigation_triggered
-                    && page_vm
-                        .vm()
-                        .pending_location_navigation_scheme_is("javascript")
+                    && page_vm.vm().has_pending_javascript_location_navigation()
                 {
                     match page_vm.follow_pending_javascript_location_navigation_if_present(
                         PageVmInitStage::Load,

@@ -3528,7 +3528,7 @@ fn taking_protocol_handoff_location_navigation_restores_source_location() {
     assert_eq!(assigned_path, "/download");
 
     let pending_url = vm
-        .take_pending_non_javascript_location_navigation()
+        .take_pending_document_location_navigation()
         .map(|pending| pending.url)
         .expect("location assignment should queue a protocol-visible navigation");
     assert_eq!(

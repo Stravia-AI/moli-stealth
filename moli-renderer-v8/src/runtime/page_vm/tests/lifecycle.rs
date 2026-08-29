@@ -1195,7 +1195,7 @@ location.href
                 assert!(
                     !page_vm
                         .vm_mut()
-                        .publish_pending_non_javascript_location_navigation()?,
+                        .publish_pending_document_location_navigation()?,
                     "a javascript: pending navigation must never be published to the browser"
                 );
                 assert!(

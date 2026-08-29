@@ -282,12 +282,12 @@ pub(crate) fn parse_detached_html_document_from_source_with_declarative_shadow_r
     build_detached_document_from_dom_host(scope, parsed, DetachedDocumentKind::Html, true)
 }
 
-/// Builds the DOM projection used for a child browsing-context document.
+/// Builds the DOM projection used for a non-top browsing-context document.
 ///
 /// The projection never executes scripts itself. `html_parser` carries the
 /// target Document's scripting state solely for parser behavior such as
 /// `<noscript>` tokenization; every caller must select that state explicitly.
-pub(crate) fn parse_child_document_projection_from_source<'s>(
+pub(crate) fn parse_browsing_context_document_projection_from_source<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     document_url: Url,
     source: &str,
@@ -295,9 +295,9 @@ pub(crate) fn parse_child_document_projection_from_source<'s>(
     character_set: Option<&str>,
     html_parser: HtmlParser,
 ) -> Option<v8::Local<'s, v8::Object>> {
-    let source = preserve_decoded_bom_only_child_body(source, content_type);
+    let source = preserve_decoded_bom_only_browsing_context_body(source, content_type);
     let (parsed, kind) =
-        parse_child_document_snapshot(document_url, &source, content_type, html_parser);
+        parse_browsing_context_document_snapshot(document_url, &source, content_type, html_parser);
     build_detached_document_from_dom_host_with_content_type(
         scope,
         parsed,
@@ -308,7 +308,7 @@ pub(crate) fn parse_child_document_projection_from_source<'s>(
     )
 }
 
-pub(crate) fn preserve_decoded_bom_only_child_body<'a>(
+pub(crate) fn preserve_decoded_bom_only_browsing_context_body<'a>(
     source: &'a str,
     content_type: Option<&str>,
 ) -> std::borrow::Cow<'a, str> {
@@ -319,7 +319,7 @@ pub(crate) fn preserve_decoded_bom_only_child_body<'a>(
     }
 }
 
-fn parse_child_document_snapshot(
+fn parse_browsing_context_document_snapshot(
     document_url: Url,
     source: &str,
     content_type: Option<&str>,
@@ -438,7 +438,7 @@ mod tests {
 
     #[test]
     fn child_document_snapshot_uses_xml_parser_for_xml_like_urls() {
-        let (xml, xml_kind) = parse_child_document_snapshot(
+        let (xml, xml_kind) = parse_browsing_context_document_snapshot(
             Url::parse("https://example.test/common/dummy.xml").unwrap(),
             "<foo>Dummy XML document</foo>\n",
             None,
@@ -451,7 +451,7 @@ mod tests {
             Some("Dummy XML document")
         );
 
-        let (xhtml, xhtml_kind) = parse_child_document_snapshot(
+        let (xhtml, xhtml_kind) = parse_browsing_context_document_snapshot(
             Url::parse("https://example.test/common/dummy.xhtml").unwrap(),
             r#"<!DOCTYPE html><html xmlns="http://www.w3.org/1999/xhtml"><head><title>Dummy XHTML document</title></head><body /></html>
 "#,
@@ -465,7 +465,7 @@ mod tests {
             Some("Dummy XHTML document")
         );
 
-        let (html, html_kind) = parse_child_document_snapshot(
+        let (html, html_kind) = parse_browsing_context_document_snapshot(
             Url::parse("https://example.test/common/dummy.html").unwrap(),
             "<p>Dummy HTML document</p>\n",
             None,
@@ -480,9 +480,9 @@ mod tests {
     }
 
     #[test]
-    fn child_document_projection_uses_explicit_scripting_mode() {
+    fn browsing_context_document_projection_uses_explicit_scripting_mode() {
         let parse = |parser| {
-            parse_child_document_snapshot(
+            parse_browsing_context_document_snapshot(
                 Url::parse("https://example.test/child.html").expect("test URL"),
                 "<noscript><span id='fallback'></span></noscript>",
                 Some("text/html"),
