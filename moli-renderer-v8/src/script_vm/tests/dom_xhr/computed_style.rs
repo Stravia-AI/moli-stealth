@@ -7776,6 +7776,67 @@ unrelatedHost.attachShadow({ mode: 'open' }).innerHTML =
 }
 
 #[test]
+fn inspector_computed_style_bulk_read_handles_large_inherited_custom_property_sets() {
+    const CUSTOM_PROPERTY_COUNT: usize = 512;
+    let mut vm = new_storage_test_vm("https://computed-style-inspector-many-custom.test/");
+    vm.eval(&format!(
+        r#"
+CSS.registerProperty({{
+  name: '--non-inherited-bulk',
+  syntax: '*',
+  inherits: false,
+  initialValue: 'registered-initial'
+}});
+const style = document.createElement('style');
+style.textContent = `:root {{${{Array.from(
+  {{ length: {CUSTOM_PROPERTY_COUNT} }},
+  (_, index) => `--bulk-${{String(index).padStart(4, '0')}}: value-${{index}};`
+).join('')}}--removed-bulk: ancestor;}}
+#target {{ --removed-bulk: initial; --non-inherited-bulk: registered-local; }}`;
+(document.head || document.documentElement || document).appendChild(style);
+const target = document.createElement('div');
+target.id = 'target';
+(document.body || document.documentElement || document).appendChild(target);
+"#,
+    ))
+    .expect("large custom-property fixture should initialize");
+    let target = element_handle_by_id(&vm, "target");
+
+    for observation in 0..2 {
+        let properties = vm
+            .computed_style_properties_for_inspector_handle(target)
+            .expect("live element should resolve");
+        assert_eq!(
+            properties
+                .iter()
+                .filter(|(name, _)| name.starts_with("--bulk-"))
+                .count(),
+            CUSTOM_PROPERTY_COUNT,
+            "observation {observation} lost custom properties",
+        );
+        let properties = properties
+            .into_iter()
+            .collect::<std::collections::HashMap<_, _>>();
+        for (name, expected) in [
+            ("--bulk-0000", "value-0"),
+            ("--bulk-0256", "value-256"),
+            ("--bulk-0511", "value-511"),
+            ("--non-inherited-bulk", "registered-local"),
+        ] {
+            assert_eq!(
+                properties.get(name).map(String::as_str),
+                Some(expected),
+                "observation {observation} returned the wrong value for {name}",
+            );
+        }
+        assert!(
+            !properties.contains_key("--removed-bulk"),
+            "observation {observation} exposed a tombstoned inherited value",
+        );
+    }
+}
+
+#[test]
 fn inspector_computed_style_bulk_read_uses_child_document_scope_and_viewport() {
     let mut vm = new_storage_test_vm("https://computed-style-inspector-child.test/");
     vm.eval(

@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use dom::ElementState as StyloElementState;
 use style::{
     Atom,
@@ -692,13 +694,26 @@ fn computed_style_snapshot_after_style_update_with_key(
 
 fn computed_custom_property_names_for_style(style: &ComputedValues) -> Vec<String> {
     let custom_properties = style.custom_properties();
-    let mut names = Vec::new();
-    let mut index = 0;
-    while let Some((name, value)) = custom_properties.property_at(index) {
-        if value.is_some() {
+    let property_count = custom_properties.inherited.len() + custom_properties.non_inherited.len();
+    let mut seen = HashSet::with_capacity(property_count);
+    let mut names = Vec::with_capacity(property_count);
+    for (name, _) in custom_properties
+        .inherited
+        .iter()
+        .chain(custom_properties.non_inherited.iter())
+    {
+        // Stylo's maps are copy-on-write chains. Walk each chain once, but
+        // publish a name only when its effective entry is live; an older
+        // ancestor entry may be shadowed by a tombstone in the child map.
+        if seen.insert(name)
+            && custom_properties
+                .inherited
+                .get(name)
+                .or_else(|| custom_properties.non_inherited.get(name))
+                .is_some()
+        {
             names.push(format!("--{name}"));
         }
-        index += 1;
     }
     names
 }
@@ -1470,33 +1485,30 @@ fn serialize_resolved_computed_property(
 }
 
 fn serialize_computed_custom_property(style: &ComputedValues, property: &str) -> Option<String> {
+    // `property_at(index)` is backed by an O(index) COW-chain walk. Parse the
+    // custom name once and use the map's keyed lookup instead.
+    let PropertyId::Custom(name) = PropertyId::parse_enabled_for_all_content(property).ok()? else {
+        return None;
+    };
     let custom_properties = style.custom_properties();
-    let mut index = 0;
-    while let Some((name, value)) = custom_properties.property_at(index) {
-        if format!("--{name}") == property {
-            value.as_ref()?;
-            let property_id = PropertyId::Custom(name.clone());
-            let mut context = resolved::Context {
-                style,
-                for_property: property_id.clone(),
-                current_longhand: None,
-            };
-            let mut serialized = String::new();
-            style
-                .computed_or_resolved_property_value(
-                    property_id,
-                    Some(&mut context),
-                    &mut serialized,
-                )
-                .ok()?;
-            if serialized.is_empty() {
-                return Some(" ".to_owned());
-            }
-            return Some(serialized);
-        }
-        index += 1;
+    custom_properties
+        .inherited
+        .get(&name)
+        .or_else(|| custom_properties.non_inherited.get(&name))?;
+    let property_id = PropertyId::Custom(name);
+    let mut context = resolved::Context {
+        style,
+        for_property: property_id.clone(),
+        current_longhand: None,
+    };
+    let mut serialized = String::new();
+    style
+        .computed_or_resolved_property_value(property_id, Some(&mut context), &mut serialized)
+        .ok()?;
+    if serialized.is_empty() {
+        return Some(" ".to_owned());
     }
-    None
+    Some(serialized)
 }
 
 fn inherited_style_parent(host: &DomHost, handle: DomHandle) -> Option<DomHandle> {
