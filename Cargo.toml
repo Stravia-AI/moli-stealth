@@ -98,7 +98,7 @@ stylo_atoms = { git = "https://github.com/ldm0/stylo", rev = "32c3de3f2aab3340c5
 stylo_dom = { git = "https://github.com/ldm0/stylo", rev = "32c3de3f2aab3340c51f03f2a0878d1e4eed7fd6" }
 stylo_static_prefs = { git = "https://github.com/ldm0/stylo", rev = "32c3de3f2aab3340c51f03f2a0878d1e4eed7fd6" }
 stylo_traits = { git = "https://github.com/ldm0/stylo", rev = "32c3de3f2aab3340c51f03f2a0878d1e4eed7fd6" }
-taffy = { git = "https://github.com/ldm0/taffy", rev = "7f581f5e488588410f1b46cf97e0d8f651ef8839" }
+taffy = { git = "https://github.com/ldm0/taffy", rev = "d286da5eab39c2856821892699f3c0ccc803fb24" }
 
 [workspace.lints.clippy]
 disallowed_methods = "deny"
