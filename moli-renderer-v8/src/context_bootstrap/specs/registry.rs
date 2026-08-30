@@ -1209,7 +1209,7 @@ const CONSTRUCTOR_SPECS_AFTER_STREAMS: &[ConstructorSpec] = &[
     ConstructorSpec {
         name: "DOMQuad",
         parent: None,
-        kind: ConstructorKind::Illegal,
+        kind: ConstructorKind::DomQuad,
     },
     ConstructorSpec {
         name: "DOMMatrixReadOnly",
