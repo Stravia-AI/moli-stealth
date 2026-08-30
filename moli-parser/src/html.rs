@@ -371,6 +371,26 @@ pub(super) struct DocumentSink {
     // degrades and never recovers for this parser session.
     source_positions_known: Cell<bool>,
     current_script_nonceable: Cell<Option<bool>>,
+    html4_empty_system_id_quirks_override_pending: Cell<bool>,
+}
+
+const HTML4_QUIRKS_PUBLIC_ID_PREFIXES: [&str; 2] = [
+    "-//W3C//DTD HTML 4.01 Frameset//",
+    "-//W3C//DTD HTML 4.01 Transitional//",
+];
+
+fn html4_doctype_without_nonempty_system_id_requires_quirks(
+    name: &str,
+    public_id: &str,
+    system_id: &str,
+) -> bool {
+    name.eq_ignore_ascii_case("html")
+        && system_id.is_empty()
+        && HTML4_QUIRKS_PUBLIC_ID_PREFIXES.iter().any(|prefix| {
+            public_id
+                .get(..prefix.len())
+                .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix))
+        })
 }
 
 impl HtmlParser {
@@ -1438,6 +1458,7 @@ impl DocumentSink {
             target: RefCell::new(target),
             source_positions_known: Cell::new(true),
             current_script_nonceable: Cell::new(None),
+            html4_empty_system_id_quirks_override_pending: Cell::new(false),
         }
     }
 
@@ -1627,6 +1648,20 @@ impl TreeSink for DocumentSink {
     }
 
     fn set_quirks_mode(&self, mode: QuirksMode) {
+        // html5ever 0.39 distinguishes `Some("")` from a missing system ID
+        // when selecting HTML 4.01 limited-quirks mode. The HTML Standard now
+        // puts both in quirks mode. Keep the token and its parse-error state
+        // intact, and only correct the mode reported immediately after the
+        // initial doctype callback.
+        let mode = if self
+            .html4_empty_system_id_quirks_override_pending
+            .replace(false)
+            && mode == QuirksMode::LimitedQuirks
+        {
+            QuirksMode::Quirks
+        } else {
+            mode
+        };
         self.target.borrow_mut().set_html_quirks_mode(mode);
     }
 
@@ -1694,6 +1729,16 @@ impl TreeSink for DocumentSink {
         public_id: StrTendril,
         system_id: StrTendril,
     ) {
+        // TreeSink receives an empty tendril for both a missing and an explicit
+        // empty system identifier. Those cases intentionally share the same
+        // quirks-mode outcome for these two HTML 4.01 public identifiers.
+        self.html4_empty_system_id_quirks_override_pending.set(
+            html4_doctype_without_nonempty_system_id_requires_quirks(
+                name.as_ref(),
+                public_id.as_ref(),
+                system_id.as_ref(),
+            ),
+        );
         self.mutate_target(|target| {
             target.append_doctype(
                 name.to_string(),
@@ -1918,6 +1963,59 @@ mod tests {
                 .elements_by_tag_name_ns(enabled.document_node_id(), Some(HTML_NS), "main", true,)
                 .is_empty(),
             "body noscript markup must remain raw text when scripting is enabled"
+        );
+    }
+
+    #[test]
+    fn html4_empty_system_identifiers_trigger_quirks_mode() {
+        let mode = |html: &str| {
+            parse_test_document(html)
+                .document()
+                .expect("parsed document")
+                .quirks_mode()
+        };
+        let quirks = mode("<html></html>");
+        let no_quirks = mode("<!doctype html><html></html>");
+        let limited_quirks = mode(concat!(
+            "<!doctype html PUBLIC \"-//W3C//DTD HTML 4.01 Frameset//\" ",
+            "\"https://www.w3.org/TR/html4/frameset.dtd\"><html></html>",
+        ));
+
+        assert_ne!(quirks, no_quirks, "test must distinguish quirks mode");
+        assert_ne!(
+            quirks, limited_quirks,
+            "test must distinguish quirks from limited-quirks mode"
+        );
+        assert_ne!(
+            no_quirks, limited_quirks,
+            "test must distinguish no-quirks from limited-quirks mode"
+        );
+
+        for public_id in [
+            "-//W3C//DTD HTML 4.01 Frameset//",
+            "-//w3c//dtd html 4.01 transitional//",
+        ] {
+            let missing = format!("<!doctype html PUBLIC \"{public_id}\"><html></html>");
+            let empty = format!("<!doctype html PUBLIC \"{public_id}\" \"\"><html></html>");
+            let nonempty =
+                format!("<!doctype html PUBLIC \"{public_id}\" \"legacy.dtd\"><html></html>");
+
+            assert_eq!(mode(&missing), quirks, "missing system ID for {public_id}");
+            assert_eq!(mode(&empty), quirks, "empty system ID for {public_id}");
+            assert_eq!(
+                mode(&nonempty),
+                limited_quirks,
+                "nonempty system ID for {public_id}"
+            );
+        }
+
+        assert_eq!(
+            mode(concat!(
+                "<!doctype html PUBLIC \"-//W3C//DTD XHTML 1.0 Frameset//\" ",
+                "\"\"><html></html>",
+            )),
+            limited_quirks,
+            "an empty XHTML system ID must remain limited-quirks"
         );
     }
 
