@@ -170,7 +170,7 @@ const CONSTRUCTOR_SPECS_BEFORE_STREAMS: &[ConstructorSpec] = &[
     },
     ConstructorSpec {
         name: "SVGMatrix",
-        parent: None,
+        parent: Some("DOMMatrix"),
         kind: ConstructorKind::Illegal,
     },
     ConstructorSpec {
