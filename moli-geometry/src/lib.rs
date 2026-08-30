@@ -74,6 +74,29 @@ mod tests {
     }
 
     #[test]
+    fn combined_rotation_applies_z_then_y_then_x() {
+        let combined = DomMatrixComponents::identity().rotated(90.0, 90.0, 90.0);
+        let sequential = DomMatrixComponents::identity()
+            .rotated(0.0, 0.0, 90.0)
+            .rotated(0.0, 90.0, 0.0)
+            .rotated(90.0, 0.0, 0.0);
+
+        for (actual, expected) in [
+            (combined.m11, sequential.m11),
+            (combined.m12, sequential.m12),
+            (combined.m13, sequential.m13),
+            (combined.m21, sequential.m21),
+            (combined.m22, sequential.m22),
+            (combined.m23, sequential.m23),
+            (combined.m31, sequential.m31),
+            (combined.m32, sequential.m32),
+            (combined.m33, sequential.m33),
+        ] {
+            assert_close(actual, expected);
+        }
+    }
+
+    #[test]
     fn css_text_rejects_non_finite_components() {
         assert_eq!(
             DomMatrixComponents::identity()

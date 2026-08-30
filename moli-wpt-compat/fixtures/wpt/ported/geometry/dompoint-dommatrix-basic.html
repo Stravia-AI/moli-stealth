@@ -373,16 +373,16 @@ test(function () {
   assert_approx_equals(zAxis.b, 1, 0.000001);
 
   const multiAxis = new DOMMatrix().rotate(45, 45, 0).transformPoint({ x: 0, y: 0, z: 1 });
-  assert_approx_equals(multiAxis.x, Math.SQRT1_2, 0.000001);
-  assert_approx_equals(multiAxis.y, -0.5, 0.000001);
+  assert_approx_equals(multiAxis.x, 0.5, 0.000001);
+  assert_approx_equals(multiAxis.y, -Math.SQRT1_2, 0.000001);
   assert_approx_equals(multiAxis.z, 0.5, 0.000001);
 
   const ordered = new DOMMatrix().rotate(30, 40, 50);
   const explicit = new DOMMatrix()
-    .rotateAxisAngleSelf(1, 0, 0, 30)
+    .rotateAxisAngleSelf(0, 0, 1, 50)
     .rotateAxisAngleSelf(0, 1, 0, 40)
-    .rotateAxisAngleSelf(0, 0, 1, 50);
-  assert_matrix_approx_equals(ordered, explicit, "rotate(x, y, z) composes in X then Y then Z order");
+    .rotateAxisAngleSelf(1, 0, 0, 30);
+  assert_matrix_approx_equals(ordered, explicit, "rotate(x, y, z) composes in Z then Y then X order");
 }, "DOMMatrix rotate methods honor rotX, rotY, and rotZ");
 
 test(function () {

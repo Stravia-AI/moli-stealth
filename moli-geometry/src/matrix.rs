@@ -267,14 +267,14 @@ impl DomMatrixComponents {
     }
 
     pub fn rotated(mut self, rot_x: f64, rot_y: f64, rot_z: f64) -> Self {
-        if rot_x != 0.0 {
-            self = self.rotated_axis_angle(1.0, 0.0, 0.0, rot_x);
+        if rot_z != 0.0 {
+            self = self.rotated_z(rot_z);
         }
         if rot_y != 0.0 {
             self = self.rotated_axis_angle(0.0, 1.0, 0.0, rot_y);
         }
-        if rot_z != 0.0 {
-            self = self.rotated_z(rot_z);
+        if rot_x != 0.0 {
+            self = self.rotated_axis_angle(1.0, 0.0, 0.0, rot_x);
         }
         self
     }
