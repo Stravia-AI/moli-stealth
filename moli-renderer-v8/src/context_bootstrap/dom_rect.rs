@@ -145,7 +145,7 @@ struct DomRectPrototypeDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(name = "DOMRectReadOnly")]
+#[webapi(name = "DOMRectReadOnly", enumerable)]
 struct DomRectReadOnlyConstructorDeclaration {
     #[webapi(
         static_method = "fromRect",
@@ -156,7 +156,7 @@ struct DomRectReadOnlyConstructorDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(name = "DOMRect")]
+#[webapi(name = "DOMRect", enumerable)]
 struct DomRectConstructorDeclaration {
     #[webapi(
         static_method = "fromRect",

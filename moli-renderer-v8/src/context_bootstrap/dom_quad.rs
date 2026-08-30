@@ -86,7 +86,7 @@ struct DomQuadPrototypeDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(name = "DOMQuad")]
+#[webapi(name = "DOMQuad", enumerable)]
 struct DomQuadConstructorDeclaration {
     #[webapi(
         static_method = "fromRect",
