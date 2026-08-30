@@ -133,7 +133,7 @@ struct WindowPostNetworkTemplateMethodsDeclaration {
     #[webapi(
         method,
         length = 1,
-        callback = window_host::window_clear_timer_callback
+        callback = window_host::window_cancel_animation_frame_callback
     )]
     cancel_animation_frame: (),
 
@@ -147,7 +147,7 @@ struct WindowPostNetworkTemplateMethodsDeclaration {
     #[webapi(
         method,
         length = 1,
-        callback = window_host::window_clear_timer_callback
+        callback = window_host::window_cancel_idle_callback
     )]
     cancel_idle_callback: (),
 
