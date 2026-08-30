@@ -13,6 +13,7 @@ PROXY_ENV_KEYS = (
     "https_proxy",
     "all_proxy",
 )
+TRACE_BACKGROUND_PROCESS_ENV = "MOLI_SMOKE_TRACE_BG"
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 

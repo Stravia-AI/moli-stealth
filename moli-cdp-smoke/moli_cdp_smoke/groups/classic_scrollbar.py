@@ -1,17 +1,33 @@
 from __future__ import annotations
 
+import sys
+
 from . import SmokeState
 from ..assertions import SmokeError, assert_equal
 from ..png_image import decode_png
 from ..raw_cdp import discover_websocket_url
 
 
+def _checkpoint(label: str) -> None:
+    # The supervisor may kill this worker without giving Python a cleanup turn.
+    # Flush before every potentially blocking browser operation so the final
+    # line in the artifact identifies the exact operation that never returned.
+    print(
+        f"[moli-cdp-smoke] CHECKPOINT classic-scrollbar/{label}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
 async def run_classic_scrollbar_group(state: SmokeState) -> None:
     page = state.page
     cdp = state.cdp
+    _checkpoint("initial/discover-browser")
     websocket_url = await discover_websocket_url(state.endpoint)
     is_moli = websocket_url.endswith("/devtools/browser/moli-browser")
+    _checkpoint("initial/set-viewport")
     await page.set_viewport_size({"width": 800, "height": 700})
+    _checkpoint("initial/set-content")
     await page.set_content(
         """
         <!doctype html>
@@ -54,6 +70,7 @@ async def run_classic_scrollbar_group(state: SmokeState) -> None:
         """,
         wait_until="domcontentloaded",
     )
+    _checkpoint("initial/read-geometry")
     metrics = await page.evaluate(
         """() => [
           scroller.clientWidth, scroller.clientHeight,
@@ -82,6 +99,7 @@ async def run_classic_scrollbar_group(state: SmokeState) -> None:
         "Chromium classic scrollbar client and scroll geometry",
     )
 
+    _checkpoint("initial/capture-screenshot")
     image = decode_png(await page.screenshot())
     assert_equal(
         (image.width, image.height),
@@ -97,6 +115,7 @@ async def run_classic_scrollbar_group(state: SmokeState) -> None:
     assert_equal(image.pixel(5, 620), (255, 0, 0, 255), "RTL vertical thumb paint")
 
     async def mouse(event_type: str, x: int, y: int, *, pressed: bool) -> None:
+        _checkpoint(f"initial/input-{event_type}-{x}-{y}")
         await cdp.send(
             "Input.dispatchMouseEvent",
             {
@@ -116,6 +135,7 @@ async def run_classic_scrollbar_group(state: SmokeState) -> None:
     await mouse("mouseMoved", 90, 90, pressed=True)
     await mouse("mouseReleased", 90, 90, pressed=False)
 
+    _checkpoint("initial/read-drag-state")
     state_after_drag = await page.evaluate(
         """() => ({
           left: scroller.scrollLeft,
@@ -137,12 +157,15 @@ async def run_classic_scrollbar_group(state: SmokeState) -> None:
         before_controls = float(state_after_drag["top"])
         await mouse("mousePressed", 190, 5, pressed=True)
         await mouse("mouseReleased", 190, 5, pressed=False)
+        _checkpoint("initial/read-back-button-state")
         after_back = float(await page.evaluate("() => scroller.scrollTop"))
         await mouse("mousePressed", 190, 80, pressed=True)
         await mouse("mouseReleased", 190, 80, pressed=False)
+        _checkpoint("initial/read-forward-button-state")
         after_forward = float(await page.evaluate("() => scroller.scrollTop"))
         await mouse("mousePressed", 190, 60, pressed=True)
         await mouse("mouseReleased", 190, 60, pressed=False)
+        _checkpoint("initial/read-track-state")
         after_track = float(await page.evaluate("() => scroller.scrollTop"))
         control_scroll = [before_controls, after_back, after_forward, after_track]
         expected_track = before_controls + 85 * 0.875
@@ -152,6 +175,7 @@ async def run_classic_scrollbar_group(state: SmokeState) -> None:
             or abs(after_track - expected_track) > 0.01
         ):
             raise SmokeError(f"classic scrollbar button/track steps diverged: {control_scroll!r}")
+        _checkpoint("initial/read-control-events")
         assert_equal(
             await page.evaluate("() => __scrollbarDomEvents"),
             [],
@@ -192,7 +216,9 @@ async def run_classic_scrollbar_group(state: SmokeState) -> None:
 async def _run_multi_scroller_drag_workflow(state: SmokeState, is_moli: bool) -> None:
     page = state.page
     cdp = state.cdp
+    _checkpoint("multi-scroller/set-viewport")
     await page.set_viewport_size({"width": 800, "height": 600})
+    _checkpoint("multi-scroller/set-content")
     await page.set_content(
         """
         <!doctype html>
@@ -247,6 +273,7 @@ async def _run_multi_scroller_drag_workflow(state: SmokeState, is_moli: bool) ->
         """,
         wait_until="domcontentloaded",
     )
+    _checkpoint("multi-scroller/read-geometry")
     metrics = await page.evaluate(
         """() => {
           const outer = document.getElementById("outer");
@@ -278,6 +305,7 @@ async def _run_multi_scroller_drag_workflow(state: SmokeState, is_moli: bool) ->
     scroll = None
     if is_moli:
         async def mouse(event_type: str, x: int, y: int, *, pressed: bool) -> None:
+            _checkpoint(f"multi-scroller/input-{event_type}-{x}-{y}")
             await cdp.send(
                 "Input.dispatchMouseEvent",
                 {
@@ -295,6 +323,7 @@ async def _run_multi_scroller_drag_workflow(state: SmokeState, is_moli: bool) ->
         await mouse("mousePressed", 225, 75, pressed=True)
         await mouse("mouseMoved", 515, 115, pressed=True)
         await mouse("mouseReleased", 515, 115, pressed=False)
+        _checkpoint("multi-scroller/read-captured-drag-state")
         first_drag = await page.evaluate(
             """() => [
               document.getElementById("inner").scrollTop,
@@ -326,6 +355,7 @@ async def _run_multi_scroller_drag_workflow(state: SmokeState, is_moli: bool) ->
         await mouse("mouseMoved", 660, 292, pressed=True)
         await mouse("mouseReleased", 660, 292, pressed=False)
 
+        _checkpoint("multi-scroller/reset-nested-scroll")
         await page.evaluate(
             """() => {
               document.getElementById("outer").scrollTop = 50;
@@ -339,6 +369,7 @@ async def _run_multi_scroller_drag_workflow(state: SmokeState, is_moli: bool) ->
         await mouse("mouseMoved", 295, 125, pressed=True)
         await mouse("mouseReleased", 295, 125, pressed=False)
 
+        _checkpoint("multi-scroller/read-final-drag-state")
         state_after = await page.evaluate(
             """() => ({
               outer: document.getElementById("outer").scrollTop,
@@ -390,7 +421,9 @@ async def _run_multi_scroller_drag_workflow(state: SmokeState, is_moli: bool) ->
 async def _run_root_scrollbar_workflow(state: SmokeState, is_moli: bool) -> None:
     page = state.page
     cdp = state.cdp
+    _checkpoint("root/set-viewport")
     await page.set_viewport_size({"width": 800, "height": 600})
+    _checkpoint("root/set-overflow-content")
     await page.set_content(
         """
         <!doctype html>
@@ -411,6 +444,7 @@ async def _run_root_scrollbar_workflow(state: SmokeState, is_moli: bool) -> None
         """,
         wait_until="domcontentloaded",
     )
+    _checkpoint("root/read-overflow-geometry")
     metrics = await page.evaluate(
         """() => ({
           innerWidth,
@@ -435,6 +469,7 @@ async def _run_root_scrollbar_workflow(state: SmokeState, is_moli: bool) -> None
     ):
         raise SmokeError(f"root scrollbar fixture did not overflow: {metrics!r}")
 
+    _checkpoint("root/capture-overflow-screenshot")
     image = decode_png(await page.screenshot())
     right = metrics["innerWidth"] - 5
     bottom = metrics["innerHeight"] - 5
@@ -449,6 +484,7 @@ async def _run_root_scrollbar_workflow(state: SmokeState, is_moli: bool) -> None
         y = metrics["innerHeight"] - 5
 
         async def mouse(event_type: str, mouse_x: int, mouse_y: int, *, pressed: bool) -> None:
+            _checkpoint(f"root/input-{event_type}-{mouse_x}-{mouse_y}")
             await cdp.send(
                 "Input.dispatchMouseEvent",
                 {
@@ -467,6 +503,7 @@ async def _run_root_scrollbar_workflow(state: SmokeState, is_moli: bool) -> None
         await mouse("mousePressed", 30, y, pressed=True)
         await mouse("mouseMoved", 100, y, pressed=True)
         await mouse("mouseReleased", 100, y, pressed=False)
+        _checkpoint("root/read-drag-state")
         state_after_drag = await page.evaluate(
             "() => [window.scrollX, window.scrollY, __rootScrollbarDomEvents]"
         )
@@ -485,6 +522,7 @@ async def _run_root_scrollbar_workflow(state: SmokeState, is_moli: bool) -> None
         "root_classic_scrollbar_layout_and_cdp_drag",
         {"engine": "moli" if is_moli else "chromium", "metrics": metrics, "scroll": scroll},
     )
+    _checkpoint("root/set-containing-block-content")
     await page.set_content(
         """
         <!doctype html>
@@ -503,6 +541,7 @@ async def _run_root_scrollbar_workflow(state: SmokeState, is_moli: bool) -> None
         """,
         wait_until="domcontentloaded",
     )
+    _checkpoint("root/read-containing-block-geometry")
     containing_block = await page.evaluate(
         """() => {
           const html = document.documentElement.getBoundingClientRect();
@@ -527,6 +566,7 @@ async def _run_root_scrollbar_workflow(state: SmokeState, is_moli: bool) -> None
         "root scrollbar resizes the initial containing block",
     )
 
+    _checkpoint("root/set-stable-empty-content")
     await page.set_content(
         """
         <!doctype html>
@@ -554,12 +594,14 @@ async def _run_root_scrollbar_workflow(state: SmokeState, is_moli: bool) -> None
             }"""
         )
 
+    _checkpoint("root/read-stable-empty-geometry")
     stable_empty = await stable_metrics()
     assert_equal(
         stable_empty,
         [800, 600, 770, 600, 15, 770, 15, 770],
         "empty root stable both-edges gutter",
     )
+    _checkpoint("root/set-stable-overflow-content")
     await page.set_content(
         """
         <!doctype html>
@@ -572,6 +614,7 @@ async def _run_root_scrollbar_workflow(state: SmokeState, is_moli: bool) -> None
         """,
         wait_until="domcontentloaded",
     )
+    _checkpoint("root/read-stable-overflow-geometry")
     stable_overflow = await stable_metrics()
     assert_equal(
         stable_overflow,
@@ -579,6 +622,7 @@ async def _run_root_scrollbar_workflow(state: SmokeState, is_moli: bool) -> None
         "overflowing root stable both-edges gutter",
     )
 
+    _checkpoint("root/set-rtl-content")
     await page.set_content(
         """
         <!doctype html>
@@ -594,6 +638,7 @@ async def _run_root_scrollbar_workflow(state: SmokeState, is_moli: bool) -> None
         """,
         wait_until="domcontentloaded",
     )
+    _checkpoint("root/capture-rtl-screenshot")
     rtl_image = decode_png(await page.screenshot())
     assert_equal(
         rtl_image.pixel(795, 30),
@@ -619,7 +664,9 @@ async def _run_root_scrollbar_workflow(state: SmokeState, is_moli: bool) -> None
 
 async def _run_closed_popover_overflow_workflow(state: SmokeState, is_moli: bool) -> None:
     page = state.page
+    _checkpoint("popover/set-viewport")
     await page.set_viewport_size({"width": 800, "height": 600})
+    _checkpoint("popover/set-content")
     await page.set_content(
         """
         <!doctype html>
@@ -650,16 +697,21 @@ async def _run_closed_popover_overflow_workflow(state: SmokeState, is_moli: bool
             ]"""
         )
 
+    _checkpoint("popover/read-closed-geometry")
     closed = await metrics()
     assert_equal(closed, ["none", 0, 785, 785], "closed popover stays out of root overflow")
+    _checkpoint("popover/show")
     await page.evaluate("() => tip.showPopover()")
+    _checkpoint("popover/read-open-geometry")
     opened = await metrics()
     assert_equal(
         [opened[0], opened[1] > 0, opened[3] > opened[2]],
         ["block", True, True],
         "open popover participates in root overflow",
     )
+    _checkpoint("popover/hide")
     await page.evaluate("() => tip.hidePopover()")
+    _checkpoint("popover/read-reclosed-geometry")
     reclosed = await metrics()
     assert_equal(reclosed, closed, "closing popover removes its root overflow contribution")
 
@@ -677,7 +729,9 @@ async def _run_closed_popover_overflow_workflow(state: SmokeState, is_moli: bool
 async def _run_painted_surface_workflow(state: SmokeState, is_moli: bool) -> None:
     page = state.page
     cdp = state.cdp
+    _checkpoint("painted-surface/set-viewport")
     await page.set_viewport_size({"width": 800, "height": 600})
+    _checkpoint("painted-surface/set-content")
     await page.set_content(
         """
         <!doctype html>
@@ -708,6 +762,7 @@ async def _run_painted_surface_workflow(state: SmokeState, is_moli: bool) -> Non
         """,
         wait_until="domcontentloaded",
     )
+    _checkpoint("painted-surface/prepare-overlap")
     await page.evaluate(
         """() => {
           scroller.scrollTop = 80;
@@ -716,6 +771,7 @@ async def _run_painted_surface_workflow(state: SmokeState, is_moli: bool) -> Non
     )
 
     async def mouse(event_type: str, x: int, y: int, *, pressed: bool) -> None:
+        _checkpoint(f"painted-surface/input-{event_type}-{x}-{y}")
         await cdp.send(
             "Input.dispatchMouseEvent",
             {
@@ -732,6 +788,7 @@ async def _run_painted_surface_workflow(state: SmokeState, is_moli: bool) -> Non
     # scrollbar beneath it. The ordinary painted sibling must win.
     await mouse("mousePressed", 210, 30, pressed=True)
     await mouse("mouseReleased", 210, 30, pressed=False)
+    _checkpoint("painted-surface/read-overlay-hit")
     covered = await page.evaluate(
         "() => [scroller.scrollTop, __paintedSurfaceEvents.slice()]"
     )
@@ -748,6 +805,7 @@ async def _run_painted_surface_workflow(state: SmokeState, is_moli: bool) -> Non
         "topmost painted overlay receives pointer and mouse dispatch",
     )
 
+    _checkpoint("painted-surface/hide-overlay")
     await page.evaluate(
         """() => {
           overlay.style.display = "none";
@@ -758,11 +816,13 @@ async def _run_painted_surface_workflow(state: SmokeState, is_moli: bool) -> Non
     # Moli intentionally caps rendering at 50 ms. A screenshot is an explicit
     # render trigger, so the second input probes the new painted state instead
     # of the still-valid throttled snapshot from the first click.
+    _checkpoint("painted-surface/render-after-mutation")
     await page.screenshot()
     # The lower-right 15x15 intersection is painted UA chrome. Moli exposes
     # it as a consume-only control surface rather than a DOM target.
     await mouse("mousePressed", 210, 110, pressed=True)
     await mouse("mouseReleased", 210, 110, pressed=False)
+    _checkpoint("painted-surface/read-corner-hit")
     corner = await page.evaluate(
         "() => [scroller.scrollTop, __paintedSurfaceEvents.slice()]"
     )
@@ -790,7 +850,9 @@ async def _run_viewport_policy_and_numeric_gutter_workflow(
 ) -> None:
     page = state.page
     cdp = state.cdp
+    _checkpoint("viewport-policy/set-viewport")
     await page.set_viewport_size({"width": 800, "height": 600})
+    _checkpoint("viewport-policy/set-both-edges-content")
     await page.set_content(
         """
         <!doctype html>
@@ -812,6 +874,7 @@ async def _run_viewport_policy_and_numeric_gutter_workflow(
         """,
         wait_until="domcontentloaded",
     )
+    _checkpoint("viewport-policy/read-both-edges-geometry")
     both_edges = await page.evaluate(
         """() => ["block", "flex", "grid", "overflow"].map(id => {
           const scroller = document.getElementById(id);
@@ -834,6 +897,7 @@ async def _run_viewport_policy_and_numeric_gutter_workflow(
         "both-edge gutters participate in numeric layout without inflating scroll ranges",
     )
 
+    _checkpoint("viewport-policy/set-edge-insets-content")
     await page.set_content(
         """
         <!doctype html>
@@ -884,6 +948,7 @@ async def _run_viewport_policy_and_numeric_gutter_workflow(
         """,
         wait_until="domcontentloaded",
     )
+    _checkpoint("viewport-policy/read-edge-insets-geometry")
     resolved_edge_insets = await page.evaluate(
         """() => [
           "border", "content", "auto-small", "auto-mid", "auto-large", "ratio", "vertical"
@@ -914,6 +979,7 @@ async def _run_viewport_policy_and_numeric_gutter_workflow(
         "physical scrollbar insets participate in box sizing, intrinsic sizing, aspect ratio, and vertical writing mode",
     )
 
+    _checkpoint("viewport-policy/set-body-overflow-content")
     await page.set_content(
         """
         <!doctype html>
@@ -939,6 +1005,7 @@ async def _run_viewport_policy_and_numeric_gutter_workflow(
             },
         )
 
+    _checkpoint("viewport-policy/read-hidden-initial-state")
     hidden_before = await page.evaluate(
         """() => {
           scrollTo(0, 0);
@@ -950,13 +1017,18 @@ async def _run_viewport_policy_and_numeric_gutter_workflow(
         }"""
     )
     assert_equal(hidden_before, [800, 1200, 0], "body hidden propagates to viewport")
+    _checkpoint("viewport-policy/wheel-hidden")
     await wheel(80)
+    _checkpoint("viewport-policy/wait-hidden-wheel")
     await page.wait_for_timeout(100)
+    _checkpoint("viewport-policy/read-hidden-wheel-state")
     hidden_wheel = await page.evaluate("() => scrollY")
     assert_equal(hidden_wheel, 0, "body hidden disables user viewport scrolling")
+    _checkpoint("viewport-policy/script-scroll-hidden")
     hidden_script = await page.evaluate("() => { scrollTo(0, 100); return scrollY; }")
     assert_equal(hidden_script, 100, "body hidden retains script viewport scrolling")
 
+    _checkpoint("viewport-policy/set-auto-and-read-width")
     auto_width = await page.evaluate(
         """() => {
           document.body.style.overflow = "auto";
@@ -965,11 +1037,15 @@ async def _run_viewport_policy_and_numeric_gutter_workflow(
         }"""
     )
     assert_equal(auto_width, 785, "body auto exposes the viewport scrollbar")
+    _checkpoint("viewport-policy/wheel-auto")
     await wheel(80)
+    _checkpoint("viewport-policy/wait-auto-wheel")
     await page.wait_for_function("() => scrollY > 0", timeout=2_000)
+    _checkpoint("viewport-policy/read-auto-wheel-state")
     auto_wheel = await page.evaluate("() => scrollY")
     assert_equal(auto_wheel, 80, "body auto permits user viewport scrolling")
 
+    _checkpoint("viewport-policy/set-clip-and-read-width")
     clip_width = await page.evaluate(
         """() => {
           document.body.style.overflow = "clip";
@@ -979,11 +1055,15 @@ async def _run_viewport_policy_and_numeric_gutter_workflow(
         }"""
     )
     assert_equal(clip_width, 800, "body clip maps to hidden at the viewport")
+    _checkpoint("viewport-policy/wheel-clip")
     await wheel(80)
+    _checkpoint("viewport-policy/wait-clip-wheel")
     await page.wait_for_timeout(100)
+    _checkpoint("viewport-policy/read-clip-wheel-state")
     clip_wheel = await page.evaluate("() => scrollY")
     assert_equal(clip_wheel, 100, "clip-derived viewport disables user scrolling")
 
+    _checkpoint("viewport-policy/set-root-stable-content")
     await page.set_content(
         """
         <!doctype html>
@@ -1007,12 +1087,16 @@ async def _run_viewport_policy_and_numeric_gutter_workflow(
             }"""
         )
 
+    _checkpoint("viewport-policy/read-root-stable-geometry")
     stable = await root_gutter_metrics()
     assert_equal(stable, [800, 0, 785, 0, 785], "default-visible root stable gutter")
+    _checkpoint("viewport-policy/set-root-both-edges")
     await page.evaluate(
         "() => { document.documentElement.style.scrollbarGutter = 'stable both-edges'; }"
     )
+    _checkpoint("viewport-policy/render-root-both-edges")
     await page.screenshot()
+    _checkpoint("viewport-policy/read-root-both-edges-geometry")
     both_edge_root = await root_gutter_metrics()
     assert_equal(
         both_edge_root,
@@ -1020,6 +1104,7 @@ async def _run_viewport_policy_and_numeric_gutter_workflow(
         "default-visible root stable both-edge gutters",
     )
 
+    _checkpoint("viewport-policy/set-display-contents-body")
     await page.set_content(
         """
         <!doctype html>
@@ -1030,6 +1115,7 @@ async def _run_viewport_policy_and_numeric_gutter_workflow(
         """,
         wait_until="domcontentloaded",
     )
+    _checkpoint("viewport-policy/read-display-contents-width")
     display_contents_width = await page.evaluate(
         "() => document.documentElement.getBoundingClientRect().width"
     )
@@ -1038,8 +1124,11 @@ async def _run_viewport_policy_and_numeric_gutter_workflow(
         800,
         "display:contents body does not propagate overflow to viewport",
     )
+    _checkpoint("viewport-policy/restore-principal-body")
     await page.evaluate("() => { document.body.style.display = 'block'; }")
+    _checkpoint("viewport-policy/render-principal-body")
     await page.screenshot()
+    _checkpoint("viewport-policy/read-principal-body-width")
     principal_body_width = await page.evaluate(
         "() => document.documentElement.getBoundingClientRect().width"
     )

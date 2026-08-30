@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Sequence
 
-from .config import REPO_ROOT, clear_proxy_env
+from .config import REPO_ROOT, TRACE_BACKGROUND_PROCESS_ENV, clear_proxy_env
 from .process import INHERIT_PROCESS_GROUP_ENV, terminate_process_tree
 from .runner import SmokeGroup, group_listing, resolve_group_selection
 
@@ -167,6 +167,11 @@ def _worker_argv(job: WorkerJob, result_path: Path) -> list[str]:
 def _worker_environment() -> dict[str, str]:
     env = clear_proxy_env(os.environ)
     env[INHERIT_PROCESS_GROUP_ENV] = "1"
+    # The supervisor already persists worker stdout/stderr in the artifact
+    # directory. Stream each worker's Moli child logs into that same file so a
+    # process-level timeout does not destroy the only copy of the renderer
+    # diagnostics held in the worker's memory.
+    env[TRACE_BACKGROUND_PROCESS_ENV] = "1"
     env["PYTHONUNBUFFERED"] = "1"
     return env
 

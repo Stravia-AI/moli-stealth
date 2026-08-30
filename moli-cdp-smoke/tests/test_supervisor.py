@@ -82,6 +82,33 @@ class SupervisorWorkerTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(stale_result.exists())
             self.assertLess(loop.time() - started_at, 2)
 
+    async def test_worker_timeout_preserves_streamed_moli_output(self) -> None:
+        group = GROUPS_BY_NAME["protocol"]
+        job = WorkerJob(group=group, attempt=1, repeat=1)
+        with tempfile.TemporaryDirectory() as temporary:
+            output_dir = Path(temporary)
+
+            script = """
+import os
+import time
+
+assert os.environ["MOLI_SMOKE_TRACE_BG"] == "1"
+print("[moli serve stderr] renderer reached diagnostic checkpoint", flush=True)
+time.sleep(30)
+"""
+
+            def hanging_argv(_: WorkerJob, __: Path) -> list[str]:
+                return [sys.executable, "-c", script]
+
+            with patch("moli_cdp_smoke.supervisor._worker_argv", hanging_argv):
+                outcome = await _run_worker_job(job, output_dir, 0.05)
+
+            self.assertEqual(outcome.status, "timed_out")
+            self.assertIn(
+                "[moli serve stderr] renderer reached diagnostic checkpoint",
+                outcome.log_path.read_text(encoding="utf-8"),
+            )
+
     @unittest.skipUnless(
         sys.platform.startswith("linux"),
         "descendant process-state regression uses Linux /proc",

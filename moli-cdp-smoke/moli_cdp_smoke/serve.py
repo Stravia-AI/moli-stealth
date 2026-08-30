@@ -12,7 +12,12 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
-from .config import REPO_ROOT, clear_proxy_env, moli_binary
+from .config import (
+    REPO_ROOT,
+    TRACE_BACKGROUND_PROCESS_ENV,
+    clear_proxy_env,
+    moli_binary,
+)
 from .process import subprocess_starts_new_session, terminate_process_tree
 
 
@@ -65,7 +70,7 @@ async def _collect_process_output(
         endpoint = _moli_endpoint_from_log_line(text)
         if endpoint is not None and not endpoint_ready.done():
             endpoint_ready.set_result(endpoint)
-        if os.environ.get("MOLI_SMOKE_TRACE_BG") == "1":
+        if os.environ.get(TRACE_BACKGROUND_PROCESS_ENV) == "1":
             print(f"[moli serve {label}] {text}", file=sys.stderr, flush=True)
 
 

@@ -392,7 +392,9 @@ Each run writes `summary.json` plus one log and one result JSON per worker under
 `target/smoke/cdp/<run-id>/`. Use `--output-dir` for a stable artifact path and
 `--timeout` to change the per-worker wall-clock limit. The worker also retains
 its own protocol-operation timeouts, so the wall limit is a final process-level
-safety boundary rather than the primary synchronization mechanism.
+safety boundary rather than the primary synchronization mechanism. Supervised
+worker logs include the live `moli serve` stdout/stderr stream, so the last
+renderer messages survive even when the supervisor terminates a wedged worker.
 
 External-client groups whose binaries or dependency environments are not owned
 by this project remain explicit integration runs.
@@ -531,7 +533,9 @@ Useful environment variables:
 - `MOLI_SMOKE_GROUPS`: comma-separated smoke group list. CLI `--group` takes precedence.
 - `MOLI_INSPECTOR_ROUTING_SCENARIOS`: comma-separated scenario names within the `inspector-routing` group.
 - `MOLI_SMOKE_TRACE=1`: print extra runner-side trace logs.
-- `MOLI_SMOKE_TRACE_BG=1`: print background `moli serve` logs.
+- `MOLI_SMOKE_TRACE_BG=1`: print background `moli serve` logs when invoking a
+  worker directly. The supervisor enables this automatically because it
+  persists each worker's combined output as a diagnostic artifact.
 - `NODE`: Node executable used by optional Node client groups. Defaults to `node`.
 - `PUPPETEER_CORE_MODULE`: module name or path used by the Puppeteer group. Defaults to `puppeteer-core`.
 - `CHROME_REMOTE_INTERFACE_MODULE`: module name or package directory used by the optional CRI group. Defaults to `chrome-remote-interface`.
