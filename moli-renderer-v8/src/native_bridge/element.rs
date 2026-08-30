@@ -432,14 +432,15 @@ pub(super) use global_attributes::{
     html_label_getter_function, html_long_desc_getter_function, html_lowsrc_getter_function,
     html_margin_height_getter_function, html_margin_width_getter_function,
     html_media_getter_function, html_name_getter_function, html_name_setter_function,
-    html_no_href_getter_function, html_no_shade_getter_function, html_no_shade_setter_function,
-    html_ping_getter_function, html_rel_getter_function, html_rel_setter_function,
-    html_scrolling_getter_function, html_shape_getter_function, html_size_getter_function,
-    html_sizes_getter_function, html_type_getter_function, html_use_map_getter_function,
-    html_value_getter_function, html_value_type_getter_function, html_version_getter_function,
-    html_vspace_getter_function, html_width_getter_function, image_decoding_setter_function,
-    image_long_desc_setter_function, image_lowsrc_setter_function, link_target_getter_function,
-    link_target_setter_function, node_access_key_getter_function,
+    html_no_href_getter_function, html_no_resize_getter_function, html_no_resize_setter_function,
+    html_no_shade_getter_function, html_no_shade_setter_function, html_ping_getter_function,
+    html_rel_getter_function, html_rel_setter_function, html_scrolling_getter_function,
+    html_shape_getter_function, html_size_getter_function, html_sizes_getter_function,
+    html_true_speed_getter_function, html_true_speed_setter_function, html_type_getter_function,
+    html_use_map_getter_function, html_value_getter_function, html_value_type_getter_function,
+    html_version_getter_function, html_vspace_getter_function, html_width_getter_function,
+    image_decoding_setter_function, image_long_desc_setter_function, image_lowsrc_setter_function,
+    link_target_getter_function, link_target_setter_function, node_access_key_getter_function,
     node_access_key_label_getter_function, node_access_key_setter_function,
     node_allow_fullscreen_getter_function, node_allow_fullscreen_setter_function,
     node_autocapitalize_getter_function, node_autocapitalize_setter_function,
@@ -1792,6 +1793,25 @@ struct HtmlBodyElementLegacyPrototypeDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
+#[webapi(name = "HTMLFrameSetElement", enumerable)]
+struct HtmlFrameSetElementLegacyPrototypeDeclaration {
+    #[webapi(
+        accessor_property,
+        getter = dom_string_reflection_getter_function,
+        setter = dom_string_reflection_setter_function,
+        data = DomStringReflection::FrameSetCols
+    )]
+    cols: (),
+    #[webapi(
+        accessor_property,
+        getter = dom_string_reflection_getter_function,
+        setter = dom_string_reflection_setter_function,
+        data = DomStringReflection::FrameSetRows
+    )]
+    rows: (),
+}
+
+#[derive(WebApiFunctionTemplate)]
 #[webapi(name = "HTMLHRElement", enumerable)]
 struct HtmlHrElementLegacyPrototypeDeclaration {
     #[webapi(
@@ -1828,6 +1848,13 @@ struct HtmlHrElementLegacyPrototypeDeclaration {
 struct HtmlFontElementLegacyPrototypeDeclaration {
     #[webapi(
         accessor_property,
+        getter = dom_string_reflection_getter_function,
+        setter = dom_string_reflection_setter_function,
+        data = DomStringReflection::FontFace
+    )]
+    face: (),
+    #[webapi(
+        accessor_property,
         getter = html_size_getter_function,
         setter = dom_string_reflection_setter_function,
         setter_data = DomStringReflection::FontSize
@@ -1845,6 +1872,12 @@ struct HtmlFontElementLegacyPrototypeDeclaration {
 #[derive(WebApiFunctionTemplate)]
 #[webapi(name = "HTMLMarqueeElement", enumerable)]
 struct HtmlMarqueeElementLegacyPrototypeDeclaration {
+    #[webapi(
+        accessor_property = "trueSpeed",
+        getter = html_true_speed_getter_function,
+        setter = html_true_speed_setter_function
+    )]
+    true_speed: (),
     #[webapi(
         accessor_property = "loop",
         getter = marquee_loop_getter_function,
@@ -3884,6 +3917,12 @@ struct HtmlEmbedElementUrlPrototypeDeclaration {
 #[derive(WebApiFunctionTemplate)]
 #[webapi(name = "HTMLFrameElement", enumerable)]
 struct HtmlFrameElementLegacyPrototypeDeclaration {
+    #[webapi(
+        accessor_property = "noResize",
+        getter = html_no_resize_getter_function,
+        setter = html_no_resize_setter_function
+    )]
+    no_resize: (),
     #[webapi(
         accessor_property,
         getter = generic_src_getter_function,
@@ -7178,6 +7217,7 @@ pub(crate) fn install_element_template_bindings<'s>(
         }
         "HTMLFrameSetElement" => {
             install_body_or_frameset_window_event_handler_accessors(scope, prototype);
+            install!(HtmlFrameSetElementLegacyPrototypeDeclaration);
         }
         "HTMLHRElement" => install!(HtmlHrElementLegacyPrototypeDeclaration),
         "HTMLFontElement" => install!(HtmlFontElementLegacyPrototypeDeclaration),
