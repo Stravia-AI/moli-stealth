@@ -117,6 +117,11 @@ impl DomHost {
                 raw_text_parent: false,
             }],
             HtmlSerializationTarget::ChildrenOnly => {
+                if node.as_element().is_some_and(|element| {
+                    is_void_html_element(element.namespace(), element.local_name())
+                }) {
+                    return Some(String::new());
+                }
                 let mut stack = vec![HostHtmlSerializationFrame::Children {
                     handle,
                     raw_text_parent: false,
@@ -281,19 +286,19 @@ impl DomHost {
                     stack.push(HostHtmlSerializationFrame::CloseElement(
                         element.local_name(),
                     ));
-                }
-                stack.push(HostHtmlSerializationFrame::Children {
-                    handle,
-                    raw_text_parent: raw_text_child,
-                });
-                if let Some((shadow_root, init)) =
-                    self.serialized_shadow_root_for_host(handle, shadow_root_inclusion)
-                {
-                    stack.push(HostHtmlSerializationFrame::ShadowRootTemplate {
-                        host: handle,
-                        shadow_root,
-                        init,
+                    stack.push(HostHtmlSerializationFrame::Children {
+                        handle,
+                        raw_text_parent: raw_text_child,
                     });
+                    if let Some((shadow_root, init)) =
+                        self.serialized_shadow_root_for_host(handle, shadow_root_inclusion)
+                    {
+                        stack.push(HostHtmlSerializationFrame::ShadowRootTemplate {
+                            host: handle,
+                            shadow_root,
+                            init,
+                        });
+                    }
                 }
             }
             NodeData::Text(text) => {

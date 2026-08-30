@@ -102,12 +102,16 @@ pub(super) fn is_void_html_element(namespace: &str, local_name: &str) -> bool {
             local_name,
             "area"
                 | "base"
+                | "basefont"
+                | "bgsound"
                 | "br"
                 | "col"
                 | "embed"
+                | "frame"
                 | "hr"
                 | "img"
                 | "input"
+                | "keygen"
                 | "link"
                 | "meta"
                 | "param"
@@ -166,6 +170,12 @@ impl NativeDom {
 
     pub fn inner_html(&self, node_id: NativeNodeId) -> Option<String> {
         let node = self.node(node_id)?;
+        if node
+            .as_element()
+            .is_some_and(|element| is_void_html_element(element.namespace(), element.local_name()))
+        {
+            return Some(String::new());
+        }
         let mut html = String::new();
         let raw_text_child = node.as_element().is_some_and(|element| {
             element.namespace() == "http://www.w3.org/1999/xhtml"
@@ -264,13 +274,26 @@ mod tests {
     #[test]
     fn html_serializers_share_the_complete_void_element_set() {
         let mut dom = NativeDom::new_html(test_url());
+        let container = dom.create_element("div");
+        let mut expected = String::new();
+        let mut void_elements = Vec::new();
         for local_name in [
-            "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param",
-            "source", "track", "wbr",
+            "area", "base", "basefont", "bgsound", "br", "col", "embed", "frame", "hr", "img",
+            "input", "keygen", "link", "meta", "param", "source", "track", "wbr",
         ] {
             let element = dom.create_element(local_name);
+            let ignored_child = dom.create_element("span");
+            assert!(dom.append_child(element, ignored_child));
             assert_eq!(dom.outer_html(element), Some(format!("<{local_name}>")));
+            assert_eq!(dom.inner_html(element).as_deref(), Some(""));
+            assert!(dom.append_child(container, element));
+            expected.push_str(&format!("<{local_name}>"));
+            void_elements.push(element);
         }
+        assert_eq!(
+            dom.inner_html(container).as_deref(),
+            Some(expected.as_str())
+        );
 
         let foreign_param = dom
             .create_element_ns(Some("http://www.w3.org/2000/svg"), "param")
@@ -281,13 +304,15 @@ mod tests {
         );
 
         let mut host = DomHost::from_dom(dom);
-        let container = host.create_element("div");
         let param = host.create_element("param");
         assert!(host.append_child(container, param));
         assert_eq!(
             host.get_html(container, false, &[]).as_deref(),
-            Some("<param>")
+            Some(format!("{expected}<param>").as_str())
         );
+        for element in void_elements {
+            assert_eq!(host.get_html(element, false, &[]).as_deref(), Some(""));
+        }
     }
 
     #[test]

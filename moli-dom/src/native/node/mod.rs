@@ -845,8 +845,8 @@ fn serialize_html_node_frame<'a, S>(
             let children_root = element.template_contents().unwrap_or(node_id);
             if !is_void_html_element(element.namespace(), element.local_name()) {
                 stack.push(HtmlSerializationFrame::CloseElement(element.local_name()));
+                push_child_html_serialization_frames(dom, children_root, raw_text_child, stack);
             }
-            push_child_html_serialization_frames(dom, children_root, raw_text_child, stack);
         }
         NodeData::Text(text) => {
             if raw_text_parent {
