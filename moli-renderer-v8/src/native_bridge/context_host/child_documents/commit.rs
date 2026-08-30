@@ -318,8 +318,10 @@ impl JsContextHost {
                 }
                 self.replace_child_custom_elements_registry_for_document_commit(scope, handle);
             }
-            FrameLocalWindowOwnerTransition::Installed { .. }
-            | FrameLocalWindowOwnerTransition::Preserved { .. } => {}
+            FrameLocalWindowOwnerTransition::Preserved { .. } => {
+                self.replace_child_custom_elements_registry_for_document_commit(scope, handle);
+            }
+            FrameLocalWindowOwnerTransition::Installed { .. } => {}
             FrameLocalWindowOwnerTransition::Retired { .. } => {
                 unreachable!("a child document commit must install a current LocalWindow")
             }

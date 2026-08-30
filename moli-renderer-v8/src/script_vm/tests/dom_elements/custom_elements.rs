@@ -1921,7 +1921,7 @@ fn detached_iframe_document_keeps_content_window_custom_elements_registry() {
 }
 
 #[test]
-fn iframe_initial_srcdoc_reuses_then_later_navigation_replaces_custom_elements_registry() {
+fn iframe_document_navigation_replaces_custom_elements_registry() {
     let mut vm = new_storage_test_vm("https://example.com/");
 
     let setup = vm
@@ -1955,13 +1955,13 @@ fn iframe_initial_srcdoc_reuses_then_later_navigation_replaces_custom_elements_r
               const afterFirstNavigation = childWindow.customElements;
               window.__ceFirstCommittedRegistry = afterFirstNavigation;
               window.__ceRetainedChildWindow = childWindow;
-              const firstNavigationReused =
-                afterFirstNavigation === window.__cePerDocumentBefore;
+              const firstNavigationReplaced =
+                afterFirstNavigation !== window.__cePerDocumentBefore;
               childWindow.document.open();
               const afterOpen = childWindow.customElements === afterFirstNavigation;
               childWindow.document.close();
               frame.srcdoc = "<title>later child</title>";
-              return JSON.stringify({firstNavigationReused, afterOpen});
+              return JSON.stringify({firstNavigationReplaced, afterOpen});
             })()
             "#,
         )
@@ -1969,7 +1969,7 @@ fn iframe_initial_srcdoc_reuses_then_later_navigation_replaces_custom_elements_r
 
     assert_eq!(
         first_commit,
-        r#"{"firstNavigationReused":true,"afterOpen":true}"#
+        r#"{"firstNavigationReplaced":true,"afterOpen":true}"#
     );
     vm.drain_pending_child_frame_work_for_test();
 
