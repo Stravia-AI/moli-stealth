@@ -8,12 +8,15 @@ const DOM_RECT_Y_SLOT: &str = "__moliDomRectY";
 const DOM_RECT_WIDTH_SLOT: &str = "__moliDomRectWidth";
 const DOM_RECT_HEIGHT_SLOT: &str = "__moliDomRectHeight";
 const DOM_RECT_BRAND_SLOT: &str = "__moliDomRectBrand";
+const DOM_RECT_MUTABLE_BRAND_SLOT: &str = "__moliDomRectMutableBrand";
 
 #[derive(WebApiObject)]
 #[webapi(interface = "DOMRect")]
 struct DomRectObjectDeclaration {
     #[webapi(slot = DOM_RECT_BRAND_SLOT, init = true)]
     brand: (),
+    #[webapi(slot = DOM_RECT_MUTABLE_BRAND_SLOT, init = true)]
+    mutable_brand: (),
 
     #[webapi(slot = DOM_RECT_X_SLOT)]
     x: f64,
@@ -566,6 +569,38 @@ fn dom_rect_receiver_branded<'s>(
 ) -> bool {
     get_private_value(scope, receiver, DOM_RECT_BRAND_SLOT)
         .is_some_and(|value| value.boolean_value(scope))
+}
+
+pub(super) fn dom_rect_clone_data<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    object: v8::Local<'s, v8::Object>,
+) -> Option<(bool, [f64; 4])> {
+    if !dom_rect_receiver_branded(scope, object) {
+        return None;
+    }
+    let mutable = get_private_value(scope, object, DOM_RECT_MUTABLE_BRAND_SLOT)
+        .is_some_and(|value| value.boolean_value(scope));
+    Some((
+        mutable,
+        [
+            dom_rect_slot(object, scope, DOM_RECT_X_SLOT),
+            dom_rect_slot(object, scope, DOM_RECT_Y_SLOT),
+            dom_rect_slot(object, scope, DOM_RECT_WIDTH_SLOT),
+            dom_rect_slot(object, scope, DOM_RECT_HEIGHT_SLOT),
+        ],
+    ))
+}
+
+pub(super) fn build_dom_rect_clone_object<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    mutable: bool,
+    [x, y, width, height]: [f64; 4],
+) -> v8::Local<'s, v8::Object> {
+    if mutable {
+        build_dom_rect_object(scope, x, y, width, height)
+    } else {
+        build_dom_rect_readonly_object(scope, x, y, width, height)
+    }
 }
 
 const DOM_RECT_WRITABLE_ATTRIBUTE_SLOTS: &[&str] = &[

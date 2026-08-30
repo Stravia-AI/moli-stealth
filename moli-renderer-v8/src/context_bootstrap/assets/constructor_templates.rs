@@ -21,8 +21,8 @@ use super::super::{
     },
     form_data_runtime::build_form_data_constructor_template,
     geometry_runtime::{
-        dom_matrix_constructor_callback, dom_point_constructor_callback,
-        dom_point_readonly_constructor_callback,
+        dom_matrix_constructor_callback, dom_matrix_readonly_constructor_callback,
+        dom_point_constructor_callback, dom_point_readonly_constructor_callback,
     },
     idle_detection::idle_detector_constructor_callback,
     image_data::image_data_constructor_callback,
@@ -385,6 +385,11 @@ pub(in crate::context_bootstrap) fn build_constructor_template<'s>(
         ConstructorKind::DomQuad => v8::FunctionTemplate::builder(dom_quad_constructor_callback)
             .length(0)
             .build(scope),
+        ConstructorKind::DomMatrixReadOnly => {
+            v8::FunctionTemplate::builder(dom_matrix_readonly_constructor_callback)
+                .length(0)
+                .build(scope)
+        }
         ConstructorKind::DomMatrix => {
             v8::FunctionTemplate::builder(dom_matrix_constructor_callback)
                 .length(0)

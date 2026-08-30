@@ -1219,7 +1219,7 @@ const CONSTRUCTOR_SPECS_AFTER_STREAMS: &[ConstructorSpec] = &[
     ConstructorSpec {
         name: "DOMMatrixReadOnly",
         parent: None,
-        kind: ConstructorKind::DomMatrix,
+        kind: ConstructorKind::DomMatrixReadOnly,
     },
     ConstructorSpec {
         name: "DOMMatrix",
