@@ -1,4 +1,4 @@
-use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource, OwnerTaskReadySignal};
+use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource};
 
 use crate::{
     native_bridge::WindowExecutionContextIdentity,
@@ -7,7 +7,7 @@ use crate::{
     types::MessagePortId,
 };
 
-use super::RendererOwnerWakeSender;
+use super::{RendererOwnerWakeSender, RendererOwnerWakeSource, RendererPageTaskReadySignal};
 
 /// Exact Page-side attachment that owned a MessagePort when delivery became
 /// runnable.
@@ -67,7 +67,7 @@ pub(crate) struct RendererPageMessagePortDeliveryRouteClosed;
 pub(crate) struct RendererPageMessagePortDeliveryRoute {
     task_route: OwnerReadyTaskRoute<
         ReadyPageTask<RendererPageMessagePortDeliveryTask>,
-        RendererPageMessagePortDeliveryReadySignal,
+        RendererPageTaskReadySignal,
     >,
 }
 
@@ -93,7 +93,7 @@ impl RendererPageMessagePortDeliveryRoute {
 pub(crate) struct RendererPageMessagePortDeliverySender {
     task_route: OwnerReadyTaskRoute<
         ReadyPageTask<RendererPageMessagePortDeliveryTask>,
-        RendererPageMessagePortDeliveryReadySignal,
+        RendererPageTaskReadySignal,
     >,
     root_document: RendererDocumentToken,
 }
@@ -118,7 +118,7 @@ impl RendererPageMessagePortDeliverySender {
 pub(crate) struct RendererPageMessagePortDeliveryProducer {
     task_route: OwnerReadyTaskRoute<
         ReadyPageTask<RendererPageMessagePortDeliveryTask>,
-        RendererPageMessagePortDeliveryReadySignal,
+        RendererPageTaskReadySignal,
     >,
     owner: RendererPageMessagePortDeliveryOwner,
 }
@@ -141,32 +141,22 @@ impl RendererPageMessagePortDeliveryProducer {
     }
 }
 
-#[derive(Clone, Debug)]
-struct RendererPageMessagePortDeliveryReadySignal {
-    owner_wake: RendererOwnerWakeSender,
-}
-
-impl OwnerTaskReadySignal for RendererPageMessagePortDeliveryReadySignal {
-    fn signal_ready(&self) {
-        self.owner_wake.signal_message_port_delivery();
-    }
-}
-
 /// Unique Page-lifetime consumer for page-side MessagePort delivery tasks.
 #[derive(Debug)]
 pub(crate) struct RendererPageMessagePortDeliverySource {
     source: OwnerReadyTaskSource<
         ReadyPageTask<RendererPageMessagePortDeliveryTask>,
-        RendererPageMessagePortDeliveryReadySignal,
+        RendererPageTaskReadySignal,
     >,
 }
 
 impl RendererPageMessagePortDeliverySource {
     pub(crate) fn new(owner_wake: RendererOwnerWakeSender) -> Self {
         Self {
-            source: OwnerReadyTaskSource::new(RendererPageMessagePortDeliveryReadySignal {
+            source: OwnerReadyTaskSource::new(RendererPageTaskReadySignal::new(
                 owner_wake,
-            }),
+                RendererOwnerWakeSource::MessagePortDelivery,
+            )),
         }
     }
 

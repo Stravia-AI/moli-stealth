@@ -1,4 +1,4 @@
-use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource, OwnerTaskReadySignal};
+use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource};
 
 use crate::{
     frame_owner_model::{
@@ -9,7 +9,7 @@ use crate::{
     runtime::{PageOwnerTurnOutcome, RendererDocumentToken},
 };
 
-use super::RendererOwnerWakeSender;
+use super::{RendererOwnerWakeSender, RendererOwnerWakeSource, RendererPageTaskReadySignal};
 
 /// Stable Page namespace plus the exact child Document/realm that owns one
 /// modulepreload load/error event action.
@@ -89,7 +89,7 @@ impl RendererPageChildModulepreloadEventActionRouteClosed {
 pub(crate) struct RendererPageChildModulepreloadEventActionRoute {
     task_route: OwnerReadyTaskRoute<
         ReadyPageTask<RendererPageChildModulepreloadEventActionTask>,
-        ChildModulepreloadEventActionReadySignal,
+        RendererPageTaskReadySignal,
     >,
 }
 
@@ -113,7 +113,7 @@ impl RendererPageChildModulepreloadEventActionRoute {
 pub(crate) struct RendererPageChildModulepreloadEventActionSender {
     task_route: OwnerReadyTaskRoute<
         ReadyPageTask<RendererPageChildModulepreloadEventActionTask>,
-        ChildModulepreloadEventActionReadySignal,
+        RendererPageTaskReadySignal,
     >,
     root_document: RendererDocumentToken,
 }
@@ -134,32 +134,22 @@ impl RendererPageChildModulepreloadEventActionSender {
     }
 }
 
-#[derive(Clone, Debug)]
-struct ChildModulepreloadEventActionReadySignal {
-    owner_wake: RendererOwnerWakeSender,
-}
-
-impl OwnerTaskReadySignal for ChildModulepreloadEventActionReadySignal {
-    fn signal_ready(&self) {
-        self.owner_wake.signal_child_modulepreload_event_action();
-    }
-}
-
 /// Unique Page-lifetime consumer for child modulepreload event actions.
 #[derive(Debug)]
 pub(crate) struct RendererPageChildModulepreloadEventActionSource {
     source: OwnerReadyTaskSource<
         ReadyPageTask<RendererPageChildModulepreloadEventActionTask>,
-        ChildModulepreloadEventActionReadySignal,
+        RendererPageTaskReadySignal,
     >,
 }
 
 impl RendererPageChildModulepreloadEventActionSource {
     pub(crate) fn new(owner_wake: RendererOwnerWakeSender) -> Self {
         Self {
-            source: OwnerReadyTaskSource::new(ChildModulepreloadEventActionReadySignal {
+            source: OwnerReadyTaskSource::new(RendererPageTaskReadySignal::new(
                 owner_wake,
-            }),
+                RendererOwnerWakeSource::ChildModulepreloadEventAction,
+            )),
         }
     }
 

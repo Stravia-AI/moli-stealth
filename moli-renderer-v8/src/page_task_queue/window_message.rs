@@ -1,4 +1,4 @@
-use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource, OwnerTaskReadySignal};
+use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource};
 
 use crate::{
     native_bridge::WindowTaskTarget,
@@ -6,7 +6,7 @@ use crate::{
     runtime::{PageOwnerTurnOutcome, RendererDocumentToken},
 };
 
-use super::RendererOwnerWakeSender;
+use super::{RendererOwnerWakeSender, RendererOwnerWakeSource, RendererPageTaskReadySignal};
 
 /// PageVm-local key for a structured-clone payload retained by JsContextHost.
 ///
@@ -93,7 +93,7 @@ pub(crate) struct RendererPageWindowMessageRouteClosed;
 pub(crate) struct RendererPageWindowMessageRoute {
     task_route: OwnerReadyTaskRoute<
         ReadyPageTask<RendererPageWindowMessageTask>,
-        RendererPageWindowMessageReadySignal,
+        RendererPageTaskReadySignal,
     >,
     owner_wake: RendererOwnerWakeSender,
 }
@@ -120,7 +120,7 @@ impl RendererPageWindowMessageRoute {
 pub(crate) struct RendererPageWindowMessageSender {
     task_route: OwnerReadyTaskRoute<
         ReadyPageTask<RendererPageWindowMessageTask>,
-        RendererPageWindowMessageReadySignal,
+        RendererPageTaskReadySignal,
     >,
     owner_wake: RendererOwnerWakeSender,
     root_document: RendererDocumentToken,
@@ -149,17 +149,6 @@ impl RendererPageWindowMessageSender {
     }
 }
 
-#[derive(Clone, Debug)]
-struct RendererPageWindowMessageReadySignal {
-    owner_wake: RendererOwnerWakeSender,
-}
-
-impl OwnerTaskReadySignal for RendererPageWindowMessageReadySignal {
-    fn signal_ready(&self) {
-        self.owner_wake.signal_window_message_task();
-    }
-}
-
 /// Unique Page-lifetime consumer for Window.postMessage tasks.
 ///
 /// This is one FIFO posted-message task source for the Page. A current
@@ -171,7 +160,7 @@ impl OwnerTaskReadySignal for RendererPageWindowMessageReadySignal {
 pub(crate) struct RendererPageWindowMessageSource {
     source: OwnerReadyTaskSource<
         ReadyPageTask<RendererPageWindowMessageTask>,
-        RendererPageWindowMessageReadySignal,
+        RendererPageTaskReadySignal,
     >,
     owner_wake: RendererOwnerWakeSender,
 }
@@ -179,9 +168,10 @@ pub(crate) struct RendererPageWindowMessageSource {
 impl RendererPageWindowMessageSource {
     pub(crate) fn new(owner_wake: RendererOwnerWakeSender) -> Self {
         Self {
-            source: OwnerReadyTaskSource::new(RendererPageWindowMessageReadySignal {
-                owner_wake: owner_wake.clone(),
-            }),
+            source: OwnerReadyTaskSource::new(RendererPageTaskReadySignal::new(
+                owner_wake.clone(),
+                RendererOwnerWakeSource::WindowMessageTask,
+            )),
             owner_wake,
         }
     }

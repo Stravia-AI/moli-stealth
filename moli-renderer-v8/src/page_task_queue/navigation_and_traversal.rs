@@ -1,4 +1,4 @@
-use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource, OwnerTaskReadySignal};
+use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource};
 
 use crate::{
     resource_ready::{ReadyPageTask, RendererPageTaskReadyMetadata},
@@ -6,7 +6,7 @@ use crate::{
 };
 
 use super::{
-    RendererOwnerWakeSender,
+    RendererOwnerWakeSender, RendererOwnerWakeSource, RendererPageTaskReadySignal,
     child_navigation_commit::{
         PageChildNavigationCommitTurnAction, RendererPageChildNavigationCommitOwner,
         RendererPageChildNavigationCommitSender, RendererPageChildNavigationCommitTask,
@@ -122,7 +122,7 @@ impl RendererPageNavigationAndTraversalSender {
 pub(crate) struct RendererPageNavigationAndTraversalRoute {
     task_route: OwnerReadyTaskRoute<
         ReadyPageTask<RendererPageNavigationAndTraversalTask>,
-        RendererPageNavigationAndTraversalReadySignal,
+        RendererPageTaskReadySignal,
     >,
 }
 
@@ -144,32 +144,22 @@ impl RendererPageNavigationAndTraversalRoute {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct RendererPageNavigationAndTraversalRouteClosed;
 
-#[derive(Clone, Debug)]
-struct RendererPageNavigationAndTraversalReadySignal {
-    owner_wake: RendererOwnerWakeSender,
-}
-
-impl OwnerTaskReadySignal for RendererPageNavigationAndTraversalReadySignal {
-    fn signal_ready(&self) {
-        self.owner_wake.signal_navigation_and_traversal_task();
-    }
-}
-
 /// Unique Page-lifetime consumer for the HTML navigation-and-traversal source.
 #[derive(Debug)]
 pub(crate) struct RendererPageNavigationAndTraversalSource {
     source: OwnerReadyTaskSource<
         ReadyPageTask<RendererPageNavigationAndTraversalTask>,
-        RendererPageNavigationAndTraversalReadySignal,
+        RendererPageTaskReadySignal,
     >,
 }
 
 impl RendererPageNavigationAndTraversalSource {
     pub(crate) fn new(owner_wake: RendererOwnerWakeSender) -> Self {
         Self {
-            source: OwnerReadyTaskSource::new(RendererPageNavigationAndTraversalReadySignal {
+            source: OwnerReadyTaskSource::new(RendererPageTaskReadySignal::new(
                 owner_wake,
-            }),
+                RendererOwnerWakeSource::NavigationAndTraversalTask,
+            )),
         }
     }
 

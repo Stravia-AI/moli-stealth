@@ -1,4 +1,4 @@
-use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource, OwnerTaskReadySignal};
+use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource};
 
 use crate::{
     native_bridge::WindowExecutionContextIdentity,
@@ -11,7 +11,7 @@ use crate::{
     },
 };
 
-use super::RendererOwnerWakeSender;
+use super::{RendererOwnerWakeSender, RendererOwnerWakeSource, RendererPageTaskReadySignal};
 
 /// Exact Page-side Worker wrapper that owns one client-facing event.
 ///
@@ -168,7 +168,7 @@ pub(crate) struct RendererPageDedicatedWorkerClientEventRouteClosed;
 pub(crate) struct RendererPageDedicatedWorkerClientEventRoute {
     task_route: OwnerReadyTaskRoute<
         ReadyPageTask<RendererPageDedicatedWorkerClientEventTask>,
-        RendererPageDedicatedWorkerClientEventReadySignal,
+        RendererPageTaskReadySignal,
     >,
     page_token: crate::runtime::RendererPageToken,
 }
@@ -195,7 +195,7 @@ impl RendererPageDedicatedWorkerClientEventRoute {
 pub(crate) struct RendererPageDedicatedWorkerClientEventSender {
     task_route: OwnerReadyTaskRoute<
         ReadyPageTask<RendererPageDedicatedWorkerClientEventTask>,
-        RendererPageDedicatedWorkerClientEventReadySignal,
+        RendererPageTaskReadySignal,
     >,
     root_document: RendererDocumentToken,
     page_token: crate::runtime::RendererPageToken,
@@ -227,7 +227,7 @@ impl RendererPageDedicatedWorkerClientEventSender {
 pub(crate) struct RendererPageDedicatedWorkerClientEventProducer {
     task_route: OwnerReadyTaskRoute<
         ReadyPageTask<RendererPageDedicatedWorkerClientEventTask>,
-        RendererPageDedicatedWorkerClientEventReadySignal,
+        RendererPageTaskReadySignal,
     >,
     owner: RendererPageDedicatedWorkerClientEventOwner,
 }
@@ -249,23 +249,12 @@ impl RendererPageDedicatedWorkerClientEventProducer {
     }
 }
 
-#[derive(Clone, Debug)]
-struct RendererPageDedicatedWorkerClientEventReadySignal {
-    owner_wake: RendererOwnerWakeSender,
-}
-
-impl OwnerTaskReadySignal for RendererPageDedicatedWorkerClientEventReadySignal {
-    fn signal_ready(&self) {
-        self.owner_wake.signal_dedicated_worker_client_event();
-    }
-}
-
 /// Unique Page-lifetime consumer for DedicatedWorker client events.
 #[derive(Debug)]
 pub(crate) struct RendererPageDedicatedWorkerClientEventSource {
     source: OwnerReadyTaskSource<
         ReadyPageTask<RendererPageDedicatedWorkerClientEventTask>,
-        RendererPageDedicatedWorkerClientEventReadySignal,
+        RendererPageTaskReadySignal,
     >,
     page_token: crate::runtime::RendererPageToken,
 }
@@ -274,9 +263,10 @@ impl RendererPageDedicatedWorkerClientEventSource {
     pub(crate) fn new(owner_wake: RendererOwnerWakeSender) -> Self {
         let page_token = owner_wake.token();
         Self {
-            source: OwnerReadyTaskSource::new(RendererPageDedicatedWorkerClientEventReadySignal {
+            source: OwnerReadyTaskSource::new(RendererPageTaskReadySignal::new(
                 owner_wake,
-            }),
+                RendererOwnerWakeSource::DedicatedWorkerClientEvent,
+            )),
             page_token,
         }
     }

@@ -1,4 +1,4 @@
-use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource, OwnerTaskReadySignal};
+use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource};
 
 use crate::{
     context_bootstrap::{WebCryptoRejection, WebCryptoTaskResult},
@@ -7,7 +7,7 @@ use crate::{
     runtime::{PageOwnerTurnOutcome, RendererDocumentToken},
 };
 
-use super::RendererOwnerWakeSender;
+use super::{RendererOwnerWakeSender, RendererOwnerWakeSource, RendererPageTaskReadySignal};
 
 /// PageVm-local identity of one pending WebCrypto Promise.
 ///
@@ -107,10 +107,8 @@ pub(crate) struct RendererPageWebCryptoTaskRouteClosed;
 
 #[derive(Clone, Debug)]
 pub(crate) struct RendererPageWebCryptoTaskRoute {
-    task_route: OwnerReadyTaskRoute<
-        ReadyPageTask<RendererPageWebCryptoTask>,
-        RendererPageWebCryptoTaskReadySignal,
-    >,
+    task_route:
+        OwnerReadyTaskRoute<ReadyPageTask<RendererPageWebCryptoTask>, RendererPageTaskReadySignal>,
 }
 
 impl RendererPageWebCryptoTaskRoute {
@@ -132,10 +130,8 @@ impl RendererPageWebCryptoTaskRoute {
 /// PageVm-stamped route used only while a WebCrypto Promise is registered.
 #[derive(Clone, Debug)]
 pub(crate) struct RendererPageWebCryptoTaskSender {
-    task_route: OwnerReadyTaskRoute<
-        ReadyPageTask<RendererPageWebCryptoTask>,
-        RendererPageWebCryptoTaskReadySignal,
-    >,
+    task_route:
+        OwnerReadyTaskRoute<ReadyPageTask<RendererPageWebCryptoTask>, RendererPageTaskReadySignal>,
     root_document: RendererDocumentToken,
 }
 
@@ -158,10 +154,8 @@ impl RendererPageWebCryptoTaskSender {
 /// rebuilding the exact task at registration time.
 #[derive(Debug)]
 pub(crate) struct RendererPageWebCryptoTaskProducer {
-    task_route: OwnerReadyTaskRoute<
-        ReadyPageTask<RendererPageWebCryptoTask>,
-        RendererPageWebCryptoTaskReadySignal,
-    >,
+    task_route:
+        OwnerReadyTaskRoute<ReadyPageTask<RendererPageWebCryptoTask>, RendererPageTaskReadySignal>,
     owner: RendererPageWebCryptoTaskOwner,
 }
 
@@ -183,30 +177,20 @@ impl RendererPageWebCryptoTaskProducer {
     }
 }
 
-#[derive(Clone, Debug)]
-struct RendererPageWebCryptoTaskReadySignal {
-    owner_wake: RendererOwnerWakeSender,
-}
-
-impl OwnerTaskReadySignal for RendererPageWebCryptoTaskReadySignal {
-    fn signal_ready(&self) {
-        self.owner_wake.signal_webcrypto_task();
-    }
-}
-
 /// Unique Page-lifetime consumer for completed WebCrypto operations.
 #[derive(Debug)]
 pub(crate) struct RendererPageWebCryptoTaskSource {
-    source: OwnerReadyTaskSource<
-        ReadyPageTask<RendererPageWebCryptoTask>,
-        RendererPageWebCryptoTaskReadySignal,
-    >,
+    source:
+        OwnerReadyTaskSource<ReadyPageTask<RendererPageWebCryptoTask>, RendererPageTaskReadySignal>,
 }
 
 impl RendererPageWebCryptoTaskSource {
     pub(crate) fn new(owner_wake: RendererOwnerWakeSender) -> Self {
         Self {
-            source: OwnerReadyTaskSource::new(RendererPageWebCryptoTaskReadySignal { owner_wake }),
+            source: OwnerReadyTaskSource::new(RendererPageTaskReadySignal::new(
+                owner_wake,
+                RendererOwnerWakeSource::WebCryptoTask,
+            )),
         }
     }
 

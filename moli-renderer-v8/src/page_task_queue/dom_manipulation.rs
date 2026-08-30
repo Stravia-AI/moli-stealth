@@ -1,4 +1,4 @@
-use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource, OwnerTaskReadySignal};
+use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource};
 
 use crate::{
     resource_ready::{ReadyPageTask, RendererPageTaskReadyMetadata},
@@ -6,7 +6,7 @@ use crate::{
 };
 
 use super::{
-    RendererOwnerWakeSender,
+    RendererOwnerWakeSender, RendererOwnerWakeSource, RendererPageTaskReadySignal,
     broadcast_channel_delivery::{
         RendererPageBroadcastChannelDeliveryOwner, RendererPageBroadcastChannelDeliverySender,
         RendererPageBroadcastChannelDeliveryTask,
@@ -216,7 +216,7 @@ impl RendererPageDomManipulationSender {
 pub(crate) struct RendererPageDomManipulationRoute {
     task_route: OwnerReadyTaskRoute<
         ReadyPageTask<RendererPageDomManipulationTask>,
-        RendererPageDomManipulationReadySignal,
+        RendererPageTaskReadySignal,
     >,
 }
 
@@ -243,23 +243,12 @@ impl RendererPageDomManipulationRoute {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct RendererPageDomManipulationRouteClosed;
 
-#[derive(Clone, Debug)]
-struct RendererPageDomManipulationReadySignal {
-    owner_wake: RendererOwnerWakeSender,
-}
-
-impl OwnerTaskReadySignal for RendererPageDomManipulationReadySignal {
-    fn signal_ready(&self) {
-        self.owner_wake.signal_dom_manipulation_task();
-    }
-}
-
 /// Unique consumer for the Page's HTML DOM-manipulation task source.
 #[derive(Debug)]
 pub(crate) struct RendererPageDomManipulationSource {
     source: OwnerReadyTaskSource<
         ReadyPageTask<RendererPageDomManipulationTask>,
-        RendererPageDomManipulationReadySignal,
+        RendererPageTaskReadySignal,
     >,
 }
 
@@ -282,9 +271,10 @@ impl RendererPageDomManipulationSource {
 
     pub(crate) fn new(owner_wake: RendererOwnerWakeSender) -> Self {
         Self {
-            source: OwnerReadyTaskSource::new(RendererPageDomManipulationReadySignal {
+            source: OwnerReadyTaskSource::new(RendererPageTaskReadySignal::new(
                 owner_wake,
-            }),
+                RendererOwnerWakeSource::DomManipulationTask,
+            )),
         }
     }
 

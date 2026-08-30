@@ -1,4 +1,4 @@
-use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource, OwnerTaskReadySignal};
+use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource};
 
 use crate::{
     context_bootstrap::IndexedDbTaskId,
@@ -7,7 +7,7 @@ use crate::{
     runtime::{PageOwnerTurnOutcome, RendererDocumentToken},
 };
 
-use super::RendererOwnerWakeSender;
+use super::{RendererOwnerWakeSender, RendererOwnerWakeSource, RendererPageTaskReadySignal};
 
 /// One concrete unit of Page-side IndexedDB work.
 ///
@@ -78,7 +78,7 @@ pub(crate) struct RendererPageIndexedDbTaskRouteClosed;
 #[derive(Clone, Debug)]
 pub(crate) struct RendererPageIndexedDbTaskRoute {
     task_route:
-        OwnerReadyTaskRoute<ReadyPageTask<RendererPageIndexedDbTask>, IndexedDbTaskReadySignal>,
+        OwnerReadyTaskRoute<ReadyPageTask<RendererPageIndexedDbTask>, RendererPageTaskReadySignal>,
     owner_wake: RendererOwnerWakeSender,
 }
 
@@ -103,7 +103,7 @@ impl RendererPageIndexedDbTaskRoute {
 #[derive(Clone, Debug)]
 pub(crate) struct RendererPageIndexedDbTaskSender {
     task_route:
-        OwnerReadyTaskRoute<ReadyPageTask<RendererPageIndexedDbTask>, IndexedDbTaskReadySignal>,
+        OwnerReadyTaskRoute<ReadyPageTask<RendererPageIndexedDbTask>, RendererPageTaskReadySignal>,
     owner_wake: RendererOwnerWakeSender,
     root_document: RendererDocumentToken,
 }
@@ -132,31 +132,21 @@ impl RendererPageIndexedDbTaskSender {
     }
 }
 
-#[derive(Clone, Debug)]
-struct IndexedDbTaskReadySignal {
-    owner_wake: RendererOwnerWakeSender,
-}
-
-impl OwnerTaskReadySignal for IndexedDbTaskReadySignal {
-    fn signal_ready(&self) {
-        self.owner_wake.signal_indexed_db_task();
-    }
-}
-
 /// Unique Page-lifetime consumer for Page-side IndexedDB tasks.
 #[derive(Debug)]
 pub(crate) struct RendererPageIndexedDbTaskSource {
     source:
-        OwnerReadyTaskSource<ReadyPageTask<RendererPageIndexedDbTask>, IndexedDbTaskReadySignal>,
+        OwnerReadyTaskSource<ReadyPageTask<RendererPageIndexedDbTask>, RendererPageTaskReadySignal>,
     owner_wake: RendererOwnerWakeSender,
 }
 
 impl RendererPageIndexedDbTaskSource {
     pub(crate) fn new(owner_wake: RendererOwnerWakeSender) -> Self {
         Self {
-            source: OwnerReadyTaskSource::new(IndexedDbTaskReadySignal {
-                owner_wake: owner_wake.clone(),
-            }),
+            source: OwnerReadyTaskSource::new(RendererPageTaskReadySignal::new(
+                owner_wake.clone(),
+                RendererOwnerWakeSource::IndexedDbTask,
+            )),
             owner_wake,
         }
     }

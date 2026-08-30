@@ -265,112 +265,20 @@ impl RendererOwnerWakeSender {
         self.signal_source(RendererOwnerWakeSource::ParseTimeDocumentScriptWork);
     }
 
-    pub(crate) fn signal_dom_manipulation_task(&self) {
-        self.signal_source(RendererOwnerWakeSource::DomManipulationTask);
-    }
-
-    pub(crate) fn signal_user_interaction_task(&self) {
-        self.signal_source(RendererOwnerWakeSource::UserInteractionTask);
-    }
-
-    pub(crate) fn signal_file_reading_task(&self) {
-        self.signal_source(RendererOwnerWakeSource::FileReadingTask);
-    }
-
-    pub(crate) fn signal_misc_platform_api_task(&self) {
-        self.signal_source(RendererOwnerWakeSource::MiscPlatformApiTask);
-    }
-
-    pub(crate) fn signal_navigation_and_traversal_task(&self) {
-        self.signal_source(RendererOwnerWakeSource::NavigationAndTraversalTask);
-    }
-
-    pub(crate) fn signal_rendering_update_task(&self) {
-        self.signal_source(RendererOwnerWakeSource::RenderingUpdateTask);
-    }
-
-    pub(crate) fn signal_media_element_event_task(&self) {
-        self.signal_source(RendererOwnerWakeSource::MediaElementEventTask);
-    }
-
-    pub(crate) fn signal_dedicated_worker_client_event(&self) {
-        self.signal_source(RendererOwnerWakeSource::DedicatedWorkerClientEvent);
-    }
-
-    pub(crate) fn signal_shared_worker_client_event(&self) {
-        self.signal_source(RendererOwnerWakeSource::SharedWorkerClientEvent);
-    }
-
-    pub(crate) fn signal_service_worker_internal_task(&self) {
-        self.signal_source(RendererOwnerWakeSource::ServiceWorkerInternalTask);
-    }
-
-    pub(crate) fn signal_service_worker_client_message(&self) {
-        self.signal_source(RendererOwnerWakeSource::ServiceWorkerClientMessage);
-    }
-
-    pub(crate) fn signal_webcrypto_task(&self) {
-        self.signal_source(RendererOwnerWakeSource::WebCryptoTask);
-    }
-
     pub(crate) fn signal_indexed_db_task(&self) {
         self.signal_source(RendererOwnerWakeSource::IndexedDbTask);
-    }
-
-    pub(crate) fn signal_opfs_task(&self) {
-        self.signal_source(RendererOwnerWakeSource::OpfsTask);
-    }
-
-    pub(crate) fn signal_internal_loading_task(&self) {
-        self.signal_source(RendererOwnerWakeSource::InternalLoadingTask);
-    }
-
-    pub(crate) fn signal_main_document_runtime_task(&self) {
-        self.signal_source(RendererOwnerWakeSource::MainDocumentRuntimeTask);
-    }
-
-    pub(crate) fn signal_child_module_dependency_fetch_start(&self) {
-        self.signal_source(RendererOwnerWakeSource::ChildModuleDependencyFetchStart);
-    }
-
-    pub(crate) fn signal_child_module_script_terminal(&self) {
-        self.signal_source(RendererOwnerWakeSource::ChildModuleScriptTerminal);
-    }
-
-    pub(crate) fn signal_child_modulepreload_event_action(&self) {
-        self.signal_source(RendererOwnerWakeSource::ChildModulepreloadEventAction);
     }
 
     pub(crate) fn signal_child_frame_task(&self) {
         self.signal_source(RendererOwnerWakeSource::ChildFrameTask);
     }
 
-    pub(crate) fn signal_v8_foreground_task(&self) {
-        self.signal_source(RendererOwnerWakeSource::V8ForegroundTask);
-    }
-
-    pub(crate) fn signal_module_reaction(&self) {
-        self.signal_source(RendererOwnerWakeSource::ModuleReaction);
-    }
-
     pub(crate) fn signal_window_message_task(&self) {
         self.signal_source(RendererOwnerWakeSource::WindowMessageTask);
     }
 
-    pub(crate) fn signal_message_port_delivery(&self) {
-        self.signal_source(RendererOwnerWakeSource::MessagePortDelivery);
-    }
-
     pub(crate) fn token(&self) -> RendererPageToken {
         self.token
-    }
-
-    pub(crate) fn signal_modulepreload_start(&self) {
-        self.signal_source(RendererOwnerWakeSource::ModulepreloadStart);
-    }
-
-    pub(crate) fn signal_dynamic_import_owner_action(&self) {
-        self.signal_source(RendererOwnerWakeSource::DynamicImportOwnerAction);
     }
 
     pub(crate) fn signal_document_lifecycle_turn(&self) {
@@ -411,7 +319,7 @@ impl RendererOwnerWakeSender {
         }
     }
 
-    fn signal_source(&self, source: RendererOwnerWakeSource) {
+    pub(super) fn signal_source(&self, source: RendererOwnerWakeSource) {
         let _ = self.tx.send(RendererOwnerWake::page(self.token, source));
     }
 }

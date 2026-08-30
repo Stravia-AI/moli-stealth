@@ -64,8 +64,8 @@ use crate::{
 };
 
 use super::{
-    PageRuntimeWakeSignal, RendererOwnerWakeSender, RendererPageChildFrameTaskSource,
-    RendererPageChildModuleDependencyFetchStartSender,
+    PageRuntimeWakeSignal, RendererOwnerWakeSender, RendererOwnerWakeSource,
+    RendererPageChildFrameTaskSource, RendererPageChildModuleDependencyFetchStartSender,
     RendererPageChildModuleDependencyFetchStartSource, RendererPageChildModuleScriptTerminalSender,
     RendererPageChildModuleScriptTerminalSource, RendererPageChildModulepreloadEventActionSender,
     RendererPageChildModulepreloadEventActionSource, RendererPageDedicatedWorkerClientEventSource,
@@ -1073,7 +1073,7 @@ impl RenderingUpdateLane {
                 wake_tx,
                 RendererPageToken::new_for_testing(document_token(1).page_id),
             ),
-            RendererOwnerWakeSender::signal_rendering_update_task,
+            RendererOwnerWakeSource::RenderingUpdateTask,
         );
         let route = source.route();
         Self {
@@ -1131,7 +1131,7 @@ impl MediaElementEventLane {
                 wake_tx,
                 RendererPageToken::new_for_testing(document_token(1).page_id),
             ),
-            RendererOwnerWakeSender::signal_media_element_event_task,
+            RendererOwnerWakeSource::MediaElementEventTask,
         );
         let route = source.route();
         Self {
@@ -1191,7 +1191,7 @@ impl UserInteractionLane {
                 wake_tx,
                 RendererPageToken::new_for_testing(document_token(1).page_id),
             ),
-            RendererOwnerWakeSender::signal_user_interaction_task,
+            RendererOwnerWakeSource::UserInteractionTask,
         );
         let route = source.route();
         Self {
@@ -1260,7 +1260,7 @@ impl FileReadingLane {
                 wake_tx,
                 RendererPageToken::new_for_testing(document_token(1).page_id),
             ),
-            RendererOwnerWakeSender::signal_file_reading_task,
+            RendererOwnerWakeSource::FileReadingTask,
         );
         let route = source.route();
         Self {
@@ -1320,7 +1320,7 @@ impl MiscPlatformApiLane {
                 wake_tx,
                 RendererPageToken::new_for_testing(document_token(1).page_id),
             ),
-            RendererOwnerWakeSender::signal_misc_platform_api_task,
+            RendererOwnerWakeSource::MiscPlatformApiTask,
         );
         let route = source.route();
         Self {

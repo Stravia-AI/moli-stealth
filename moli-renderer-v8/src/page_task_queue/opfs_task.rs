@@ -1,4 +1,4 @@
-use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource, OwnerTaskReadySignal};
+use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource};
 
 use crate::{
     native_bridge::WindowExecutionContextIdentity,
@@ -7,7 +7,7 @@ use crate::{
     runtime::{PageOwnerTurnOutcome, RendererDocumentToken},
 };
 
-use super::RendererOwnerWakeSender;
+use super::{RendererOwnerWakeSender, RendererOwnerWakeSource, RendererPageTaskReadySignal};
 
 /// PageVm-local identity of one pending OPFS settlement.
 ///
@@ -106,7 +106,8 @@ pub(crate) struct RendererPageOpfsTaskRouteClosed;
 
 #[derive(Clone, Debug)]
 pub(crate) struct RendererPageOpfsTaskRoute {
-    task_route: OwnerReadyTaskRoute<ReadyPageTask<RendererPageOpfsTask>, OpfsTaskReadySignal>,
+    task_route:
+        OwnerReadyTaskRoute<ReadyPageTask<RendererPageOpfsTask>, RendererPageTaskReadySignal>,
 }
 
 impl RendererPageOpfsTaskRoute {
@@ -127,7 +128,8 @@ impl RendererPageOpfsTaskRoute {
 
 #[derive(Clone, Debug)]
 pub(crate) struct RendererPageOpfsTaskSender {
-    task_route: OwnerReadyTaskRoute<ReadyPageTask<RendererPageOpfsTask>, OpfsTaskReadySignal>,
+    task_route:
+        OwnerReadyTaskRoute<ReadyPageTask<RendererPageOpfsTask>, RendererPageTaskReadySignal>,
     root_document: RendererDocumentToken,
 }
 
@@ -146,7 +148,8 @@ impl RendererPageOpfsTaskSender {
 
 #[derive(Debug)]
 pub(crate) struct RendererPageOpfsTaskProducer {
-    task_route: OwnerReadyTaskRoute<ReadyPageTask<RendererPageOpfsTask>, OpfsTaskReadySignal>,
+    task_route:
+        OwnerReadyTaskRoute<ReadyPageTask<RendererPageOpfsTask>, RendererPageTaskReadySignal>,
     owner: RendererPageOpfsTaskOwner,
 }
 
@@ -173,26 +176,18 @@ impl RendererPageOpfsTaskProducer {
     }
 }
 
-#[derive(Clone, Debug)]
-struct OpfsTaskReadySignal {
-    owner_wake: RendererOwnerWakeSender,
-}
-
-impl OwnerTaskReadySignal for OpfsTaskReadySignal {
-    fn signal_ready(&self) {
-        self.owner_wake.signal_opfs_task();
-    }
-}
-
 #[derive(Debug)]
 pub(crate) struct RendererPageOpfsTaskSource {
-    source: OwnerReadyTaskSource<ReadyPageTask<RendererPageOpfsTask>, OpfsTaskReadySignal>,
+    source: OwnerReadyTaskSource<ReadyPageTask<RendererPageOpfsTask>, RendererPageTaskReadySignal>,
 }
 
 impl RendererPageOpfsTaskSource {
     pub(crate) fn new(owner_wake: RendererOwnerWakeSender) -> Self {
         Self {
-            source: OwnerReadyTaskSource::new(OpfsTaskReadySignal { owner_wake }),
+            source: OwnerReadyTaskSource::new(RendererPageTaskReadySignal::new(
+                owner_wake,
+                RendererOwnerWakeSource::OpfsTask,
+            )),
         }
     }
 

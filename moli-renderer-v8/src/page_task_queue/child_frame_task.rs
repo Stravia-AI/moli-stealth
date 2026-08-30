@@ -1,4 +1,4 @@
-use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource, OwnerTaskReadySignal};
+use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource};
 
 use crate::{
     document_runtime::DomHandle,
@@ -11,7 +11,10 @@ use crate::{
     runtime::{PageOwnerTurnOutcome, RendererDocumentToken},
 };
 
-use super::{RendererOwnerWakeSender, RendererPageChildRealmMaterializationTarget};
+use super::{
+    RendererOwnerWakeSender, RendererOwnerWakeSource, RendererPageChildRealmMaterializationTarget,
+    RendererPageTaskReadySignal,
+};
 
 /// PageVm-local ledger key for one child document-script execution task.
 ///
@@ -514,7 +517,7 @@ impl RendererPageChildClassicScriptSourceLoadRouteClosed {
 #[derive(Clone, Debug)]
 pub(crate) struct RendererPageChildFrameTaskRoute {
     task_route:
-        OwnerReadyTaskRoute<ReadyPageTask<RendererPageChildFrameTask>, ChildFrameTaskReadySignal>,
+        OwnerReadyTaskRoute<ReadyPageTask<RendererPageChildFrameTask>, RendererPageTaskReadySignal>,
     owner_wake: RendererOwnerWakeSender,
 }
 
@@ -539,7 +542,7 @@ impl RendererPageChildFrameTaskRoute {
 #[derive(Clone, Debug)]
 pub(crate) struct RendererPageChildFrameTaskSender {
     task_route:
-        OwnerReadyTaskRoute<ReadyPageTask<RendererPageChildFrameTask>, ChildFrameTaskReadySignal>,
+        OwnerReadyTaskRoute<ReadyPageTask<RendererPageChildFrameTask>, RendererPageTaskReadySignal>,
     owner_wake: RendererOwnerWakeSender,
     root_document: RendererDocumentToken,
 }
@@ -640,31 +643,23 @@ impl RendererPageChildFrameTaskSender {
     }
 }
 
-#[derive(Clone, Debug)]
-struct ChildFrameTaskReadySignal {
-    owner_wake: RendererOwnerWakeSender,
-}
-
-impl OwnerTaskReadySignal for ChildFrameTaskReadySignal {
-    fn signal_ready(&self) {
-        self.owner_wake.signal_child_frame_task();
-    }
-}
-
 /// Unique Page-lifetime consumer for the child-frame task family.
 #[derive(Debug)]
 pub(crate) struct RendererPageChildFrameTaskSource {
-    source:
-        OwnerReadyTaskSource<ReadyPageTask<RendererPageChildFrameTask>, ChildFrameTaskReadySignal>,
+    source: OwnerReadyTaskSource<
+        ReadyPageTask<RendererPageChildFrameTask>,
+        RendererPageTaskReadySignal,
+    >,
     owner_wake: RendererOwnerWakeSender,
 }
 
 impl RendererPageChildFrameTaskSource {
     pub(crate) fn new(owner_wake: RendererOwnerWakeSender) -> Self {
         Self {
-            source: OwnerReadyTaskSource::new(ChildFrameTaskReadySignal {
-                owner_wake: owner_wake.clone(),
-            }),
+            source: OwnerReadyTaskSource::new(RendererPageTaskReadySignal::new(
+                owner_wake.clone(),
+                RendererOwnerWakeSource::ChildFrameTask,
+            )),
             owner_wake,
         }
     }

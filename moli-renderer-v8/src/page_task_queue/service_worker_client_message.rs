@@ -1,4 +1,4 @@
-use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource, OwnerTaskReadySignal};
+use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource};
 
 use crate::{
     resource_ready::{ReadyPageTask, RendererPageTaskReadyMetadata},
@@ -6,7 +6,7 @@ use crate::{
     types::{ServiceWorkerClientMessageCompletion, ServiceWorkerWindowClientTarget},
 };
 
-use super::RendererOwnerWakeSender;
+use super::{RendererOwnerWakeSender, RendererOwnerWakeSource, RendererPageTaskReadySignal};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct RendererPageServiceWorkerClientMessageOwner {
@@ -67,7 +67,7 @@ impl RendererPageServiceWorkerClientMessageTask {
 pub(crate) struct RendererPageServiceWorkerClientMessageRoute {
     task_route: OwnerReadyTaskRoute<
         ReadyPageTask<RendererPageServiceWorkerClientMessageTask>,
-        RendererPageServiceWorkerClientMessageReadySignal,
+        RendererPageTaskReadySignal,
     >,
 }
 
@@ -94,7 +94,7 @@ impl RendererPageServiceWorkerClientMessageRoute {
 pub(crate) struct RendererPageServiceWorkerClientMessageSender {
     task_route: OwnerReadyTaskRoute<
         ReadyPageTask<RendererPageServiceWorkerClientMessageTask>,
-        RendererPageServiceWorkerClientMessageReadySignal,
+        RendererPageTaskReadySignal,
     >,
     root_document: RendererDocumentToken,
 }
@@ -115,31 +115,21 @@ impl RendererPageServiceWorkerClientMessageSender {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct RendererPageServiceWorkerClientMessageRouteClosed;
 
-#[derive(Clone, Debug)]
-struct RendererPageServiceWorkerClientMessageReadySignal {
-    owner_wake: RendererOwnerWakeSender,
-}
-
-impl OwnerTaskReadySignal for RendererPageServiceWorkerClientMessageReadySignal {
-    fn signal_ready(&self) {
-        self.owner_wake.signal_service_worker_client_message();
-    }
-}
-
 #[derive(Debug)]
 pub(crate) struct RendererPageServiceWorkerClientMessageSource {
     source: OwnerReadyTaskSource<
         ReadyPageTask<RendererPageServiceWorkerClientMessageTask>,
-        RendererPageServiceWorkerClientMessageReadySignal,
+        RendererPageTaskReadySignal,
     >,
 }
 
 impl RendererPageServiceWorkerClientMessageSource {
     pub(crate) fn new(owner_wake: RendererOwnerWakeSender) -> Self {
         Self {
-            source: OwnerReadyTaskSource::new(RendererPageServiceWorkerClientMessageReadySignal {
+            source: OwnerReadyTaskSource::new(RendererPageTaskReadySignal::new(
                 owner_wake,
-            }),
+                RendererOwnerWakeSource::ServiceWorkerClientMessage,
+            )),
         }
     }
 

@@ -16,7 +16,7 @@ use std::time::Instant;
 use std::{cell::RefCell, rc::Rc};
 
 use super::{
-    PageRuntimeWakeSignal, RendererOwnerWakeSender,
+    PageRuntimeWakeSignal, RendererOwnerWakeSender, RendererOwnerWakeSource,
     child_frame_task::{
         RendererPageChildFrameTask, RendererPageChildFrameTaskOwner,
         RendererPageChildFrameTaskRoute, RendererPageChildFrameTaskSender,
@@ -618,25 +618,25 @@ impl RendererPageOwnedTaskSources {
         let dom_manipulation = RendererPageDomManipulationSource::new(owner_wake.clone());
         let user_interaction = RendererPageUserInteractionSource::new(
             owner_wake.clone(),
-            RendererOwnerWakeSender::signal_user_interaction_task,
+            RendererOwnerWakeSource::UserInteractionTask,
         );
         let file_reading = RendererPageFileReadingSource::new(
             owner_wake.clone(),
-            RendererOwnerWakeSender::signal_file_reading_task,
+            RendererOwnerWakeSource::FileReadingTask,
         );
         let misc_platform_api = RendererPageMiscPlatformApiSource::new(
             owner_wake.clone(),
-            RendererOwnerWakeSender::signal_misc_platform_api_task,
+            RendererOwnerWakeSource::MiscPlatformApiTask,
         );
         let navigation_and_traversal =
             RendererPageNavigationAndTraversalSource::new(owner_wake.clone());
         let rendering_update = RendererPageRenderingUpdateSource::new(
             owner_wake.clone(),
-            RendererOwnerWakeSender::signal_rendering_update_task,
+            RendererOwnerWakeSource::RenderingUpdateTask,
         );
         let media_element_event = RendererPageMediaElementEventSource::new(
             owner_wake.clone(),
-            RendererOwnerWakeSender::signal_media_element_event_task,
+            RendererOwnerWakeSource::MediaElementEventTask,
         );
         let dedicated_worker_client_event =
             RendererPageDedicatedWorkerClientEventSource::new(owner_wake.clone());

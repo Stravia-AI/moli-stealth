@@ -1,4 +1,4 @@
-use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource, OwnerTaskReadySignal};
+use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource};
 
 use crate::{
     native_bridge::WindowDocumentTaskTarget,
@@ -7,22 +7,9 @@ use crate::{
 };
 
 use super::{
-    RendererOwnerWakeSender, RendererPageWindowDocumentTask, RendererPageWindowDocumentTaskOwner,
+    RendererOwnerWakeSender, RendererOwnerWakeSource, RendererPageTaskReadySignal,
+    RendererPageWindowDocumentTask, RendererPageWindowDocumentTaskOwner,
 };
-
-type ReadySignalFn = fn(&RendererOwnerWakeSender);
-
-#[derive(Clone, Debug)]
-struct RendererPageWindowDocumentTaskReadySignal {
-    owner_wake: RendererOwnerWakeSender,
-    signal: ReadySignalFn,
-}
-
-impl OwnerTaskReadySignal for RendererPageWindowDocumentTaskReadySignal {
-    fn signal_ready(&self) {
-        (self.signal)(&self.owner_wake);
-    }
-}
 
 /// Shared route for task-source families whose stable queue only needs an
 /// exact Window/Document owner, a Host-local payload id, and a family-local
@@ -35,7 +22,7 @@ impl OwnerTaskReadySignal for RendererPageWindowDocumentTaskReadySignal {
 pub(crate) struct RendererPageWindowDocumentTaskRoute<I, K> {
     task_route: OwnerReadyTaskRoute<
         ReadyPageTask<RendererPageWindowDocumentTask<I, K>>,
-        RendererPageWindowDocumentTaskReadySignal,
+        RendererPageTaskReadySignal,
     >,
 }
 
@@ -103,17 +90,17 @@ impl<I: Copy, K: Copy> RendererPageWindowDocumentTaskSender<I, K> {
 pub(crate) struct RendererPageWindowDocumentTaskSource<I, K> {
     source: OwnerReadyTaskSource<
         ReadyPageTask<RendererPageWindowDocumentTask<I, K>>,
-        RendererPageWindowDocumentTaskReadySignal,
+        RendererPageTaskReadySignal,
     >,
 }
 
 impl<I: Copy, K: Copy> RendererPageWindowDocumentTaskSource<I, K> {
-    pub(crate) fn new(owner_wake: RendererOwnerWakeSender, signal: ReadySignalFn) -> Self {
+    pub(crate) fn new(
+        owner_wake: RendererOwnerWakeSender,
+        source: RendererOwnerWakeSource,
+    ) -> Self {
         Self {
-            source: OwnerReadyTaskSource::new(RendererPageWindowDocumentTaskReadySignal {
-                owner_wake,
-                signal,
-            }),
+            source: OwnerReadyTaskSource::new(RendererPageTaskReadySignal::new(owner_wake, source)),
         }
     }
 

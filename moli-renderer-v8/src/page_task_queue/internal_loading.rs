@@ -1,6 +1,6 @@
 use std::{collections::VecDeque, time::Instant};
 
-use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource, OwnerTaskReadySignal};
+use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource};
 
 use crate::{
     frame_owner_model::FrameDocumentTaskOwner,
@@ -10,6 +10,7 @@ use crate::{
 
 use super::{
     PageOwnedInternalLoadingTask, PageOwnedInternalLoadingTaskEffect, RendererOwnerWakeSender,
+    RendererOwnerWakeSource, RendererPageTaskReadySignal,
 };
 
 /// PageVm namespace plus the exact main Document that produced one HTML
@@ -61,7 +62,7 @@ pub(crate) struct RendererPageInternalLoadingRouteClosed;
 pub(crate) struct RendererPageInternalLoadingRoute {
     task_route: OwnerReadyTaskRoute<
         ReadyPageTask<RendererPageInternalLoadingTask>,
-        InternalLoadingReadySignal,
+        RendererPageTaskReadySignal,
     >,
 }
 
@@ -86,7 +87,7 @@ impl RendererPageInternalLoadingRoute {
 pub(crate) struct RendererPageInternalLoadingSender {
     task_route: OwnerReadyTaskRoute<
         ReadyPageTask<RendererPageInternalLoadingTask>,
-        InternalLoadingReadySignal,
+        RendererPageTaskReadySignal,
     >,
     root_document: RendererDocumentToken,
 }
@@ -110,30 +111,22 @@ impl RendererPageInternalLoadingSender {
     }
 }
 
-#[derive(Clone, Debug)]
-struct InternalLoadingReadySignal {
-    owner_wake: RendererOwnerWakeSender,
-}
-
-impl OwnerTaskReadySignal for InternalLoadingReadySignal {
-    fn signal_ready(&self) {
-        self.owner_wake.signal_internal_loading_task();
-    }
-}
-
 /// Unique Page-lifetime consumer for HTML internal-loading tasks.
 #[derive(Debug)]
 pub(crate) struct RendererPageInternalLoadingSource {
     source: OwnerReadyTaskSource<
         ReadyPageTask<RendererPageInternalLoadingTask>,
-        InternalLoadingReadySignal,
+        RendererPageTaskReadySignal,
     >,
 }
 
 impl RendererPageInternalLoadingSource {
     pub(crate) fn new(owner_wake: RendererOwnerWakeSender) -> Self {
         Self {
-            source: OwnerReadyTaskSource::new(InternalLoadingReadySignal { owner_wake }),
+            source: OwnerReadyTaskSource::new(RendererPageTaskReadySignal::new(
+                owner_wake,
+                RendererOwnerWakeSource::InternalLoadingTask,
+            )),
         }
     }
 

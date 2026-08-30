@@ -1,4 +1,4 @@
-use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource, OwnerTaskReadySignal};
+use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource};
 use moli_shared_worker::SharedWorkerClientId;
 
 use crate::{
@@ -8,7 +8,7 @@ use crate::{
     shared_worker_runtime::{SharedWorkerClientEndpointDisposition, SharedWorkerClientEvent},
 };
 
-use super::RendererOwnerWakeSender;
+use super::{RendererOwnerWakeSender, RendererOwnerWakeSource, RendererPageTaskReadySignal};
 
 /// Exact Page-side SharedWorker wrapper that owns one client event.
 ///
@@ -99,7 +99,7 @@ pub(crate) struct RendererPageSharedWorkerClientEventRouteClosed;
 pub(crate) struct RendererPageSharedWorkerClientEventRoute {
     task_route: OwnerReadyTaskRoute<
         ReadyPageTask<RendererPageSharedWorkerClientEventTask>,
-        RendererPageSharedWorkerClientEventReadySignal,
+        RendererPageTaskReadySignal,
     >,
 }
 
@@ -125,7 +125,7 @@ impl RendererPageSharedWorkerClientEventRoute {
 pub(crate) struct RendererPageSharedWorkerClientEventSender {
     task_route: OwnerReadyTaskRoute<
         ReadyPageTask<RendererPageSharedWorkerClientEventTask>,
-        RendererPageSharedWorkerClientEventReadySignal,
+        RendererPageTaskReadySignal,
     >,
     root_document: RendererDocumentToken,
 }
@@ -149,7 +149,7 @@ impl RendererPageSharedWorkerClientEventSender {
 pub(crate) struct RendererPageSharedWorkerClientEventRealmSender {
     task_route: OwnerReadyTaskRoute<
         ReadyPageTask<RendererPageSharedWorkerClientEventTask>,
-        RendererPageSharedWorkerClientEventReadySignal,
+        RendererPageTaskReadySignal,
     >,
     root_document: RendererDocumentToken,
     execution_context: WindowExecutionContextIdentity,
@@ -176,7 +176,7 @@ impl RendererPageSharedWorkerClientEventRealmSender {
 pub(crate) struct RendererPageSharedWorkerClientEventProducer {
     task_route: OwnerReadyTaskRoute<
         ReadyPageTask<RendererPageSharedWorkerClientEventTask>,
-        RendererPageSharedWorkerClientEventReadySignal,
+        RendererPageTaskReadySignal,
     >,
     owner: RendererPageSharedWorkerClientEventOwner,
 }
@@ -194,32 +194,22 @@ impl RendererPageSharedWorkerClientEventProducer {
     }
 }
 
-#[derive(Clone, Debug)]
-struct RendererPageSharedWorkerClientEventReadySignal {
-    owner_wake: RendererOwnerWakeSender,
-}
-
-impl OwnerTaskReadySignal for RendererPageSharedWorkerClientEventReadySignal {
-    fn signal_ready(&self) {
-        self.owner_wake.signal_shared_worker_client_event();
-    }
-}
-
 /// Unique Page-lifetime consumer for SharedWorker client events.
 #[derive(Debug)]
 pub(crate) struct RendererPageSharedWorkerClientEventSource {
     source: OwnerReadyTaskSource<
         ReadyPageTask<RendererPageSharedWorkerClientEventTask>,
-        RendererPageSharedWorkerClientEventReadySignal,
+        RendererPageTaskReadySignal,
     >,
 }
 
 impl RendererPageSharedWorkerClientEventSource {
     pub(crate) fn new(owner_wake: RendererOwnerWakeSender) -> Self {
         Self {
-            source: OwnerReadyTaskSource::new(RendererPageSharedWorkerClientEventReadySignal {
+            source: OwnerReadyTaskSource::new(RendererPageTaskReadySignal::new(
                 owner_wake,
-            }),
+                RendererOwnerWakeSource::SharedWorkerClientEvent,
+            )),
         }
     }
 

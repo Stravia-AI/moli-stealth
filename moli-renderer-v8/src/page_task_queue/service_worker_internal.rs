@@ -1,4 +1,4 @@
-use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource, OwnerTaskReadySignal};
+use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource};
 
 use crate::{
     resource_ready::{ReadyPageTask, RendererPageTaskReadyMetadata},
@@ -12,7 +12,7 @@ use crate::{
     },
 };
 
-use super::RendererOwnerWakeSender;
+use super::{RendererOwnerWakeSender, RendererOwnerWakeSource, RendererPageTaskReadySignal};
 
 /// Browser-context ServiceWorker callback delivered to one exact PageVm.
 ///
@@ -100,7 +100,7 @@ impl RendererPageServiceWorkerInternalTask {
 pub(crate) struct RendererPageServiceWorkerInternalRoute {
     task_route: OwnerReadyTaskRoute<
         ReadyPageTask<RendererPageServiceWorkerInternalTask>,
-        RendererPageServiceWorkerInternalReadySignal,
+        RendererPageTaskReadySignal,
     >,
 }
 
@@ -124,7 +124,7 @@ impl RendererPageServiceWorkerInternalRoute {
 pub(crate) struct RendererPageServiceWorkerInternalSender {
     task_route: OwnerReadyTaskRoute<
         ReadyPageTask<RendererPageServiceWorkerInternalTask>,
-        RendererPageServiceWorkerInternalReadySignal,
+        RendererPageTaskReadySignal,
     >,
     root_document: RendererDocumentToken,
 }
@@ -145,31 +145,21 @@ impl RendererPageServiceWorkerInternalSender {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct RendererPageServiceWorkerInternalRouteClosed;
 
-#[derive(Clone, Debug)]
-struct RendererPageServiceWorkerInternalReadySignal {
-    owner_wake: RendererOwnerWakeSender,
-}
-
-impl OwnerTaskReadySignal for RendererPageServiceWorkerInternalReadySignal {
-    fn signal_ready(&self) {
-        self.owner_wake.signal_service_worker_internal_task();
-    }
-}
-
 #[derive(Debug)]
 pub(crate) struct RendererPageServiceWorkerInternalSource {
     source: OwnerReadyTaskSource<
         ReadyPageTask<RendererPageServiceWorkerInternalTask>,
-        RendererPageServiceWorkerInternalReadySignal,
+        RendererPageTaskReadySignal,
     >,
 }
 
 impl RendererPageServiceWorkerInternalSource {
     pub(crate) fn new(owner_wake: RendererOwnerWakeSender) -> Self {
         Self {
-            source: OwnerReadyTaskSource::new(RendererPageServiceWorkerInternalReadySignal {
+            source: OwnerReadyTaskSource::new(RendererPageTaskReadySignal::new(
                 owner_wake,
-            }),
+                RendererOwnerWakeSource::ServiceWorkerInternalTask,
+            )),
         }
     }
 

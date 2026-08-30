@@ -1,11 +1,11 @@
-use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource, OwnerTaskReadySignal};
+use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource};
 
 use crate::{
     resource_ready::{ReadyPageTask, RendererPageTaskReadyMetadata},
     runtime::{PageOwnerTurnOutcome, RendererPageToken},
 };
 
-use super::RendererOwnerWakeSender;
+use super::{RendererOwnerWakeSender, RendererOwnerWakeSource, RendererPageTaskReadySignal};
 
 /// Stable Page owner of a V8 foreground task.
 ///
@@ -56,7 +56,7 @@ pub(crate) struct RendererPageV8ForegroundTaskRouteClosed;
 pub(crate) struct RendererPageV8ForegroundTaskSender {
     task_route: OwnerReadyTaskRoute<
         ReadyPageTask<RendererPageV8ForegroundTask>,
-        RendererPageV8ForegroundTaskReadySignal,
+        RendererPageTaskReadySignal,
     >,
     owner: RendererPageV8ForegroundTaskOwner,
 }
@@ -78,23 +78,12 @@ impl RendererPageV8ForegroundTaskSender {
     }
 }
 
-#[derive(Clone, Debug)]
-struct RendererPageV8ForegroundTaskReadySignal {
-    owner_wake: RendererOwnerWakeSender,
-}
-
-impl OwnerTaskReadySignal for RendererPageV8ForegroundTaskReadySignal {
-    fn signal_ready(&self) {
-        self.owner_wake.signal_v8_foreground_task();
-    }
-}
-
 /// Unique Page-lifetime consumer for V8 foreground continuations.
 #[derive(Debug)]
 pub(crate) struct RendererPageV8ForegroundTaskSource {
     source: OwnerReadyTaskSource<
         ReadyPageTask<RendererPageV8ForegroundTask>,
-        RendererPageV8ForegroundTaskReadySignal,
+        RendererPageTaskReadySignal,
     >,
     owner: RendererPageV8ForegroundTaskOwner,
 }
@@ -103,9 +92,10 @@ impl RendererPageV8ForegroundTaskSource {
     pub(crate) fn new(owner_wake: RendererOwnerWakeSender) -> Self {
         let owner = RendererPageV8ForegroundTaskOwner::new(owner_wake.token());
         Self {
-            source: OwnerReadyTaskSource::new(RendererPageV8ForegroundTaskReadySignal {
+            source: OwnerReadyTaskSource::new(RendererPageTaskReadySignal::new(
                 owner_wake,
-            }),
+                RendererOwnerWakeSource::V8ForegroundTask,
+            )),
             owner,
         }
     }

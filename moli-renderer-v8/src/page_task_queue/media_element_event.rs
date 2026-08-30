@@ -95,7 +95,7 @@ mod tests {
         );
         let mut source = RendererPageMediaElementEventSource::new(
             owner_wake,
-            RendererOwnerWakeSender::signal_media_element_event_task,
+            RendererOwnerWakeSource::MediaElementEventTask,
         );
         let sender = source.route().sender(root_document());
 
@@ -138,7 +138,7 @@ mod tests {
                 wake_tx,
                 RendererPageToken::new_for_testing(root_document().page_id),
             ),
-            RendererOwnerWakeSender::signal_media_element_event_task,
+            RendererOwnerWakeSource::MediaElementEventTask,
         );
         let sender = source.route().sender(root_document());
         drop(source);

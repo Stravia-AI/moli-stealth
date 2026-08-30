@@ -1,4 +1,4 @@
-use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource, OwnerTaskReadySignal};
+use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource};
 
 use crate::{
     document_script_scheduler::MainParserAsyncModuleAdmission,
@@ -14,7 +14,8 @@ use super::{
     PageMainNativeModuleTargetEffect, PageNativeModuleOwnerEventTurnAction,
     PageParserAsyncModuleAdmissionTargetEffect, PageParserAsyncModuleAdmissionTurnAction,
     PageParserOwnedModuleContinuationTargetEffect, PageParserOwnedModuleContinuationTurnAction,
-    PostParsePageOwnedWork, RendererOwnerWakeSender,
+    PostParsePageOwnedWork, RendererOwnerWakeSender, RendererOwnerWakeSource,
+    RendererPageTaskReadySignal,
 };
 
 pub(crate) type RendererPageMainDocumentRuntimeOwner = super::RendererPageMainDocumentTaskOwner;
@@ -118,7 +119,7 @@ pub(crate) struct RendererPageMainDocumentRuntimeRouteClosed;
 pub(crate) struct RendererPageMainDocumentRuntimeRoute {
     task_route: OwnerReadyTaskRoute<
         ReadyPageTask<RendererPageMainDocumentRuntimeTask>,
-        RendererPageMainDocumentRuntimeReadySignal,
+        RendererPageTaskReadySignal,
     >,
 }
 
@@ -144,7 +145,7 @@ impl RendererPageMainDocumentRuntimeRoute {
 pub(crate) struct RendererPageMainDocumentRuntimeSender {
     task_route: OwnerReadyTaskRoute<
         ReadyPageTask<RendererPageMainDocumentRuntimeTask>,
-        RendererPageMainDocumentRuntimeReadySignal,
+        RendererPageTaskReadySignal,
     >,
     root_document: RendererDocumentToken,
 }
@@ -371,31 +372,21 @@ pub(crate) enum RendererPageMainDocumentRuntimeAdmissionError {
     TargetMismatch,
 }
 
-#[derive(Clone, Debug)]
-struct RendererPageMainDocumentRuntimeReadySignal {
-    owner_wake: RendererOwnerWakeSender,
-}
-
-impl OwnerTaskReadySignal for RendererPageMainDocumentRuntimeReadySignal {
-    fn signal_ready(&self) {
-        self.owner_wake.signal_main_document_runtime_task();
-    }
-}
-
 #[derive(Debug)]
 pub(crate) struct RendererPageMainDocumentRuntimeSource {
     source: OwnerReadyTaskSource<
         ReadyPageTask<RendererPageMainDocumentRuntimeTask>,
-        RendererPageMainDocumentRuntimeReadySignal,
+        RendererPageTaskReadySignal,
     >,
 }
 
 impl RendererPageMainDocumentRuntimeSource {
     pub(crate) fn new(owner_wake: RendererOwnerWakeSender) -> Self {
         Self {
-            source: OwnerReadyTaskSource::new(RendererPageMainDocumentRuntimeReadySignal {
+            source: OwnerReadyTaskSource::new(RendererPageTaskReadySignal::new(
                 owner_wake,
-            }),
+                RendererOwnerWakeSource::MainDocumentRuntimeTask,
+            )),
         }
     }
 

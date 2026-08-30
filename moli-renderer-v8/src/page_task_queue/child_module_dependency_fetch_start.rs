@@ -1,6 +1,6 @@
 use std::{collections::HashSet, sync::Arc};
 
-use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource, OwnerTaskReadySignal};
+use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource};
 use parking_lot::Mutex;
 
 use crate::{
@@ -13,7 +13,7 @@ use crate::{
     runtime::{PageOwnerTurnOutcome, RendererDocumentToken},
 };
 
-use super::RendererOwnerWakeSender;
+use super::{RendererOwnerWakeSender, RendererOwnerWakeSource, RendererPageTaskReadySignal};
 
 /// Stable Page namespace plus the exact child Document/realm that owns one
 /// static-module dependency fetch start.
@@ -131,7 +131,7 @@ impl RendererPageChildModuleDependencyFetchStartEnqueue {
 pub(crate) struct RendererPageChildModuleDependencyFetchStartRoute {
     task_route: OwnerReadyTaskRoute<
         ReadyPageTask<RendererPageChildModuleDependencyFetchStartTask>,
-        ChildModuleDependencyFetchStartReadySignal,
+        RendererPageTaskReadySignal,
     >,
     pending_keys: Arc<Mutex<HashSet<RendererPageChildModuleDependencyFetchStartPendingKey>>>,
 }
@@ -161,7 +161,7 @@ impl RendererPageChildModuleDependencyFetchStartRoute {
 pub(crate) struct RendererPageChildModuleDependencyFetchStartSender {
     task_route: OwnerReadyTaskRoute<
         ReadyPageTask<RendererPageChildModuleDependencyFetchStartTask>,
-        ChildModuleDependencyFetchStartReadySignal,
+        RendererPageTaskReadySignal,
     >,
     pending_keys: Arc<Mutex<HashSet<RendererPageChildModuleDependencyFetchStartPendingKey>>>,
     root_document: RendererDocumentToken,
@@ -197,23 +197,12 @@ impl RendererPageChildModuleDependencyFetchStartSender {
     }
 }
 
-#[derive(Clone, Debug)]
-struct ChildModuleDependencyFetchStartReadySignal {
-    owner_wake: RendererOwnerWakeSender,
-}
-
-impl OwnerTaskReadySignal for ChildModuleDependencyFetchStartReadySignal {
-    fn signal_ready(&self) {
-        self.owner_wake.signal_child_module_dependency_fetch_start();
-    }
-}
-
 /// Unique Page-lifetime consumer for child module dependency fetch starts.
 #[derive(Debug)]
 pub(crate) struct RendererPageChildModuleDependencyFetchStartSource {
     source: OwnerReadyTaskSource<
         ReadyPageTask<RendererPageChildModuleDependencyFetchStartTask>,
-        ChildModuleDependencyFetchStartReadySignal,
+        RendererPageTaskReadySignal,
     >,
     pending_keys: Arc<Mutex<HashSet<RendererPageChildModuleDependencyFetchStartPendingKey>>>,
 }
@@ -222,9 +211,10 @@ impl RendererPageChildModuleDependencyFetchStartSource {
     pub(crate) fn new(owner_wake: RendererOwnerWakeSender) -> Self {
         let pending_keys = Arc::new(Mutex::new(HashSet::new()));
         Self {
-            source: OwnerReadyTaskSource::new(ChildModuleDependencyFetchStartReadySignal {
+            source: OwnerReadyTaskSource::new(RendererPageTaskReadySignal::new(
                 owner_wake,
-            }),
+                RendererOwnerWakeSource::ChildModuleDependencyFetchStart,
+            )),
             pending_keys,
         }
     }

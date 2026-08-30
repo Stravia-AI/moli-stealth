@@ -1,4 +1,4 @@
-use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource, OwnerTaskReadySignal};
+use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource};
 
 use crate::{
     frame_owner_model::{
@@ -9,7 +9,7 @@ use crate::{
     runtime::{PageOwnerTurnOutcome, RendererDocumentToken},
 };
 
-use super::RendererOwnerWakeSender;
+use super::{RendererOwnerWakeSender, RendererOwnerWakeSource, RendererPageTaskReadySignal};
 
 /// Exact owner of one child dynamic-import owner action.
 ///
@@ -86,7 +86,7 @@ pub(crate) struct RendererPageDynamicImportOwnerActionRouteClosed;
 pub(crate) struct RendererPageDynamicImportOwnerActionRoute {
     task_route: OwnerReadyTaskRoute<
         ReadyPageTask<RendererPageDynamicImportOwnerActionTask>,
-        RendererPageDynamicImportOwnerActionReadySignal,
+        RendererPageTaskReadySignal,
     >,
 }
 
@@ -112,7 +112,7 @@ impl RendererPageDynamicImportOwnerActionRoute {
 pub(crate) struct RendererPageDynamicImportOwnerActionSender {
     task_route: OwnerReadyTaskRoute<
         ReadyPageTask<RendererPageDynamicImportOwnerActionTask>,
-        RendererPageDynamicImportOwnerActionReadySignal,
+        RendererPageTaskReadySignal,
     >,
     root_document: RendererDocumentToken,
 }
@@ -121,7 +121,7 @@ impl RendererPageDynamicImportOwnerActionSender {
     fn new(
         task_route: OwnerReadyTaskRoute<
             ReadyPageTask<RendererPageDynamicImportOwnerActionTask>,
-            RendererPageDynamicImportOwnerActionReadySignal,
+            RendererPageTaskReadySignal,
         >,
         root_document: RendererDocumentToken,
     ) -> Self {
@@ -152,31 +152,21 @@ impl RendererPageDynamicImportOwnerActionSender {
     }
 }
 
-#[derive(Clone, Debug)]
-struct RendererPageDynamicImportOwnerActionReadySignal {
-    owner_wake: RendererOwnerWakeSender,
-}
-
-impl OwnerTaskReadySignal for RendererPageDynamicImportOwnerActionReadySignal {
-    fn signal_ready(&self) {
-        self.owner_wake.signal_dynamic_import_owner_action();
-    }
-}
-
 #[derive(Debug)]
 pub(crate) struct RendererPageDynamicImportOwnerActionSource {
     source: OwnerReadyTaskSource<
         ReadyPageTask<RendererPageDynamicImportOwnerActionTask>,
-        RendererPageDynamicImportOwnerActionReadySignal,
+        RendererPageTaskReadySignal,
     >,
 }
 
 impl RendererPageDynamicImportOwnerActionSource {
     pub(crate) fn new(owner_wake: RendererOwnerWakeSender) -> Self {
         Self {
-            source: OwnerReadyTaskSource::new(RendererPageDynamicImportOwnerActionReadySignal {
+            source: OwnerReadyTaskSource::new(RendererPageTaskReadySignal::new(
                 owner_wake,
-            }),
+                RendererOwnerWakeSource::DynamicImportOwnerAction,
+            )),
         }
     }
 

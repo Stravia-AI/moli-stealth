@@ -37,6 +37,7 @@ mod parser_owned_module_continuation;
 mod popup_load_event;
 mod post_domcontentloaded_runtime;
 mod post_parse_owner_work;
+mod ready_signal;
 mod rendering_update;
 mod resource_completions;
 mod senders;
@@ -379,6 +380,7 @@ pub(crate) use self::post_parse_owner_work::{
     PostParseLifecycleQueueStats, PostParseLifecycleWork, PostParsePageOwnedWork,
     post_parse_lifecycle_queue_stats,
 };
+use self::ready_signal::RendererPageTaskReadySignal;
 #[cfg(test)]
 pub(crate) use self::rendering_update::RendererPageRenderingUpdateHead;
 pub(crate) use self::rendering_update::{

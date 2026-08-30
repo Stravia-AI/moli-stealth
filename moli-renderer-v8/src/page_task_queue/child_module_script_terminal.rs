@@ -1,4 +1,4 @@
-use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource, OwnerTaskReadySignal};
+use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource};
 
 use crate::{
     frame_owner_model::{
@@ -9,7 +9,7 @@ use crate::{
     runtime::{PageOwnerTurnOutcome, RendererDocumentToken},
 };
 
-use super::RendererOwnerWakeSender;
+use super::{RendererOwnerWakeSender, RendererOwnerWakeSource, RendererPageTaskReadySignal};
 
 /// Stable Page namespace plus the exact child Document/realm that owns one
 /// module-map terminal fanout action.
@@ -94,7 +94,7 @@ impl RendererPageChildModuleScriptTerminalRouteClosed {
 pub(crate) struct RendererPageChildModuleScriptTerminalRoute {
     task_route: OwnerReadyTaskRoute<
         ReadyPageTask<RendererPageChildModuleScriptTerminalTask>,
-        ChildModuleScriptTerminalReadySignal,
+        RendererPageTaskReadySignal,
     >,
 }
 
@@ -122,7 +122,7 @@ impl RendererPageChildModuleScriptTerminalRoute {
 pub(crate) struct RendererPageChildModuleScriptTerminalSender {
     task_route: OwnerReadyTaskRoute<
         ReadyPageTask<RendererPageChildModuleScriptTerminalTask>,
-        ChildModuleScriptTerminalReadySignal,
+        RendererPageTaskReadySignal,
     >,
     root_document: RendererDocumentToken,
 }
@@ -143,30 +143,22 @@ impl RendererPageChildModuleScriptTerminalSender {
     }
 }
 
-#[derive(Clone, Debug)]
-struct ChildModuleScriptTerminalReadySignal {
-    owner_wake: RendererOwnerWakeSender,
-}
-
-impl OwnerTaskReadySignal for ChildModuleScriptTerminalReadySignal {
-    fn signal_ready(&self) {
-        self.owner_wake.signal_child_module_script_terminal();
-    }
-}
-
 /// Unique Page-lifetime consumer for child module terminal fanout actions.
 #[derive(Debug)]
 pub(crate) struct RendererPageChildModuleScriptTerminalSource {
     source: OwnerReadyTaskSource<
         ReadyPageTask<RendererPageChildModuleScriptTerminalTask>,
-        ChildModuleScriptTerminalReadySignal,
+        RendererPageTaskReadySignal,
     >,
 }
 
 impl RendererPageChildModuleScriptTerminalSource {
     pub(crate) fn new(owner_wake: RendererOwnerWakeSender) -> Self {
         Self {
-            source: OwnerReadyTaskSource::new(ChildModuleScriptTerminalReadySignal { owner_wake }),
+            source: OwnerReadyTaskSource::new(RendererPageTaskReadySignal::new(
+                owner_wake,
+                RendererOwnerWakeSource::ChildModuleScriptTerminal,
+            )),
         }
     }
 

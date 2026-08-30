@@ -1,6 +1,6 @@
 use std::{fmt, num::NonZeroUsize};
 
-use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource, OwnerTaskReadySignal};
+use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource};
 
 use crate::{
     frame_owner_model::{FrameDocumentTaskOwner, FrameRealmId},
@@ -10,7 +10,7 @@ use crate::{
     types::ScriptErrorConstructorKind,
 };
 
-use super::RendererOwnerWakeSender;
+use super::{RendererOwnerWakeSender, RendererOwnerWakeSource, RendererPageTaskReadySignal};
 
 /// Exact PageVm-local target captured by a module Promise reaction callback.
 ///
@@ -197,7 +197,7 @@ pub(crate) struct RendererPageModuleReactionRouteClosed;
 pub(crate) struct RendererPageModuleReactionRoute {
     task_route: OwnerReadyTaskRoute<
         ReadyPageTask<RendererPageModuleReactionTask>,
-        RendererPageModuleReactionReadySignal,
+        RendererPageTaskReadySignal,
     >,
 }
 
@@ -223,7 +223,7 @@ impl RendererPageModuleReactionRoute {
 pub(crate) struct RendererPageModuleReactionSender {
     task_route: OwnerReadyTaskRoute<
         ReadyPageTask<RendererPageModuleReactionTask>,
-        RendererPageModuleReactionReadySignal,
+        RendererPageTaskReadySignal,
     >,
     root_document: RendererDocumentToken,
 }
@@ -241,30 +241,22 @@ impl RendererPageModuleReactionSender {
     }
 }
 
-#[derive(Clone, Debug)]
-struct RendererPageModuleReactionReadySignal {
-    owner_wake: RendererOwnerWakeSender,
-}
-
-impl OwnerTaskReadySignal for RendererPageModuleReactionReadySignal {
-    fn signal_ready(&self) {
-        self.owner_wake.signal_module_reaction();
-    }
-}
-
 /// Unique stable Page consumer for module reaction continuation records.
 #[derive(Debug)]
 pub(crate) struct RendererPageModuleReactionSource {
     source: OwnerReadyTaskSource<
         ReadyPageTask<RendererPageModuleReactionTask>,
-        RendererPageModuleReactionReadySignal,
+        RendererPageTaskReadySignal,
     >,
 }
 
 impl RendererPageModuleReactionSource {
     pub(crate) fn new(owner_wake: RendererOwnerWakeSender) -> Self {
         Self {
-            source: OwnerReadyTaskSource::new(RendererPageModuleReactionReadySignal { owner_wake }),
+            source: OwnerReadyTaskSource::new(RendererPageTaskReadySignal::new(
+                owner_wake,
+                RendererOwnerWakeSource::ModuleReaction,
+            )),
         }
     }
 

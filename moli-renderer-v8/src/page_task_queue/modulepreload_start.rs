@@ -1,4 +1,4 @@
-use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource, OwnerTaskReadySignal};
+use moli_owner_queue::{OwnerReadyTaskRoute, OwnerReadyTaskSource};
 
 use crate::{
     frame_owner_model::{
@@ -9,7 +9,7 @@ use crate::{
     runtime::{PageOwnerTurnOutcome, RendererDocumentToken},
 };
 
-use super::RendererOwnerWakeSender;
+use super::{RendererOwnerWakeSender, RendererOwnerWakeSource, RendererPageTaskReadySignal};
 
 /// Exact owner of one modulepreload start task in the stable Page source.
 ///
@@ -75,7 +75,7 @@ pub(crate) struct RendererPageModulepreloadStartRouteClosed;
 pub(crate) struct RendererPageModulepreloadStartRoute {
     task_route: OwnerReadyTaskRoute<
         ReadyPageTask<RendererPageModulepreloadStartTask>,
-        RendererPageModulepreloadStartReadySignal,
+        RendererPageTaskReadySignal,
     >,
 }
 
@@ -102,7 +102,7 @@ impl RendererPageModulepreloadStartRoute {
 pub(crate) struct RendererPageModulepreloadStartSender {
     task_route: OwnerReadyTaskRoute<
         ReadyPageTask<RendererPageModulepreloadStartTask>,
-        RendererPageModulepreloadStartReadySignal,
+        RendererPageTaskReadySignal,
     >,
     root_document: RendererDocumentToken,
 }
@@ -111,7 +111,7 @@ impl RendererPageModulepreloadStartSender {
     fn new(
         task_route: OwnerReadyTaskRoute<
             ReadyPageTask<RendererPageModulepreloadStartTask>,
-            RendererPageModulepreloadStartReadySignal,
+            RendererPageTaskReadySignal,
         >,
         root_document: RendererDocumentToken,
     ) -> Self {
@@ -138,32 +138,22 @@ impl RendererPageModulepreloadStartSender {
     }
 }
 
-#[derive(Clone, Debug)]
-struct RendererPageModulepreloadStartReadySignal {
-    owner_wake: RendererOwnerWakeSender,
-}
-
-impl OwnerTaskReadySignal for RendererPageModulepreloadStartReadySignal {
-    fn signal_ready(&self) {
-        self.owner_wake.signal_modulepreload_start();
-    }
-}
-
 /// Unique owner-side source shared by all PageVm generations of one Page.
 #[derive(Debug)]
 pub(crate) struct RendererPageModulepreloadStartSource {
     source: OwnerReadyTaskSource<
         ReadyPageTask<RendererPageModulepreloadStartTask>,
-        RendererPageModulepreloadStartReadySignal,
+        RendererPageTaskReadySignal,
     >,
 }
 
 impl RendererPageModulepreloadStartSource {
     pub(crate) fn new(owner_wake: RendererOwnerWakeSender) -> Self {
         Self {
-            source: OwnerReadyTaskSource::new(RendererPageModulepreloadStartReadySignal {
+            source: OwnerReadyTaskSource::new(RendererPageTaskReadySignal::new(
                 owner_wake,
-            }),
+                RendererOwnerWakeSource::ModulepreloadStart,
+            )),
         }
     }
 

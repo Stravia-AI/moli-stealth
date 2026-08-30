@@ -9,7 +9,7 @@ use super::{
     },
 };
 #[cfg(test)]
-use super::{RendererOwnerWakeSender, WindowDocumentTaskTarget};
+use super::{RendererOwnerWakeSender, RendererOwnerWakeSource, WindowDocumentTaskTarget};
 
 /// PageVm-local key for one pending Document rendering-update payload.
 ///
@@ -102,7 +102,7 @@ mod tests {
         );
         let mut source = RendererPageRenderingUpdateSource::new(
             owner_wake,
-            RendererOwnerWakeSender::signal_rendering_update_task,
+            RendererOwnerWakeSource::RenderingUpdateTask,
         );
         let sender = RendererPageRenderingUpdateSender::new(source.route(), root_document());
 
@@ -160,7 +160,7 @@ mod tests {
         );
         let source = RendererPageRenderingUpdateSource::new(
             owner_wake,
-            RendererOwnerWakeSender::signal_rendering_update_task,
+            RendererOwnerWakeSource::RenderingUpdateTask,
         );
         let sender = RendererPageRenderingUpdateSender::new(source.route(), root_document());
         drop(source);
