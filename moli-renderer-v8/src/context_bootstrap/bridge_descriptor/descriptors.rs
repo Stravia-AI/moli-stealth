@@ -125,6 +125,11 @@ const NODE_BRIDGE_DESCRIPTORS: &[BridgeDescriptor] = &[
     ),
     descriptor("SVGFilterElement", Some("SVGElement"), ELEMENT_GROUPS),
     descriptor(
+        "SVGFEConvolveMatrixElement",
+        Some("SVGElement"),
+        ELEMENT_GROUPS,
+    ),
+    descriptor(
         "SVGForeignObjectElement",
         Some("SVGGraphicsElement"),
         ELEMENT_GROUPS,

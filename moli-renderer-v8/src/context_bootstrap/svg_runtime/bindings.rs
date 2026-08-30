@@ -565,6 +565,25 @@ struct SvgAnimatedStringTemplateAccessorsDeclaration {
     anim_val: (),
 }
 
+#[derive(WebApiFunctionTemplate)]
+#[webapi(name = "SVGAnimatedBoolean", enumerable)]
+struct SvgAnimatedBooleanTemplateAccessorsDeclaration {
+    #[webapi(
+        accessor_property = "baseVal",
+        getter = svg_animated_boolean_getter,
+        setter = svg_animated_boolean_setter,
+        data = callback_data_index_value(scope, 0)
+    )]
+    base_val: (),
+
+    #[webapi(
+        accessor_property = "animVal",
+        getter = svg_animated_boolean_getter,
+        data = callback_data_index_value(scope, 1)
+    )]
+    anim_val: (),
+}
+
 #[allow(dead_code)]
 #[derive(WebApiFunctionTemplate)]
 #[webapi(name = "SVGAnimatedLength", enumerable)]
@@ -922,6 +941,16 @@ struct SvgFilterElementPrototypeAccessorsDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
+#[webapi(name = "SVGFEConvolveMatrixElement", enumerable)]
+struct SvgFeConvolveMatrixElementPrototypeAccessorsDeclaration {
+    #[webapi(
+        accessor_property = "preserveAlpha",
+        getter = svg_fe_convolve_matrix_preserve_alpha_getter
+    )]
+    preserve_alpha: (),
+}
+
+#[derive(WebApiFunctionTemplate)]
 #[webapi(name = "SVGMaskElement", enumerable)]
 struct SvgMaskElementPrototypeAccessorsDeclaration {
     #[webapi(
@@ -1077,6 +1106,14 @@ pub(super) fn install_svg_animated_string_bindings<'s>(
 ) {
     let proto = template.prototype_template(scope);
     SvgAnimatedStringTemplateAccessorsDeclaration::initialize_prototype_template(scope, proto);
+}
+
+pub(super) fn install_svg_animated_boolean_bindings<'s>(
+    scope: &mut v8::PinScope<'s, '_, ()>,
+    template: v8::Local<'s, v8::FunctionTemplate>,
+) {
+    let proto = template.prototype_template(scope);
+    SvgAnimatedBooleanTemplateAccessorsDeclaration::initialize_prototype_template(scope, proto);
 }
 
 pub(super) fn install_svg_animated_length_list_bindings<'s>(
@@ -1261,6 +1298,11 @@ pub(super) fn install_svg_element_accessor_bindings<'s>(
         }
         "SVGFilterElement" => {
             SvgFilterElementPrototypeAccessorsDeclaration::initialize_prototype_template(
+                scope, prototype,
+            );
+        }
+        "SVGFEConvolveMatrixElement" => {
+            SvgFeConvolveMatrixElementPrototypeAccessorsDeclaration::initialize_prototype_template(
                 scope, prototype,
             );
         }
