@@ -1739,6 +1739,52 @@ fn dom_rect_bounds_propagate_nan_components() {
 }
 
 #[test]
+fn dom_rect_from_rect_factories_create_their_declared_interface_in_the_function_realm() {
+    let mut vm = new_storage_test_vm("https://domrect-from-rect.test/");
+
+    vm.eval(
+        r#"
+(() => {
+  const root = document.documentElement ||
+    document.appendChild(document.createElement("html"));
+  const body = document.body || root.appendChild(document.createElement("body"));
+  const frame = document.createElement("iframe");
+  frame.id = "domrect-from-rect-realm";
+  body.appendChild(frame);
+})()
+"#,
+    )
+    .expect("DOMRect factory child frame should be created");
+    materialize_single_child_default_realm_for_test(&mut vm, "DOMRect factory child Realm");
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const other = document.getElementById("domrect-from-rect-realm").contentWindow;
+  const mutable = other.DOMRect.fromRect({x: "1", y: 2, width: 3, height: 4});
+  const readonly = other.DOMRectReadOnly.fromRect(mutable);
+  const empty = other.DOMRectReadOnly.fromRect(null);
+  return [
+    other.DOMRect.fromRect.length,
+    other.DOMRectReadOnly.fromRect.length,
+    mutable instanceof other.DOMRect,
+    mutable instanceof DOMRect,
+    readonly instanceof other.DOMRectReadOnly,
+    readonly instanceof other.DOMRect,
+    readonly instanceof DOMRectReadOnly,
+    [readonly.x, readonly.y, readonly.width, readonly.height].join(","),
+    [empty.x, empty.y, empty.width, empty.height].join(",")
+  ].join("|");
+})()
+"#,
+        )
+        .expect("DOMRect factories should evaluate");
+
+    assert_eq!(result, "0|0|true|false|true|false|false|1,2,3,4|0,0,0,0");
+}
+
+#[test]
 fn geometry_domrect_private_slots_ignore_reflection_and_spoofing() {
     let mut vm = new_storage_test_vm("https://geometry-domrect-private-slots.test/");
 
