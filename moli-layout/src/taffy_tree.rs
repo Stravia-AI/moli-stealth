@@ -17,8 +17,8 @@ use crate::{
     LAYOUT_SUBPIXELS_PER_CSS_PIXEL, LayoutBoxId, LayoutBoxKind, LayoutCapabilityDiagnostic,
     LayoutWorld, PaintRect, PaintViewport,
     inline::{
-        InlineFormattingContext, InlineFragments, InlineLinePlacement, InlineObjectRole,
-        break_inline_lines, build_inline_fragments, build_inline_line_placements,
+        InlineContentWidthsMemo, InlineFormattingContext, InlineFragments, InlineLinePlacement,
+        InlineObjectRole, break_inline_lines, build_inline_fragments, build_inline_line_placements,
         measure_inline_lines, relative_atomic_inset_offset, reset_inline_layout_for_probe,
     },
     positioned::resolve_absolute_axis_margins,
@@ -1881,7 +1881,8 @@ where
         if final_reuses_accepted_layout {
             text_layout = inline_context.laid_out.take();
         }
-        let mut measurement = None;
+        let mut content_widths = std::mem::take(&mut inline_context.content_widths);
+        let mut measurement: Option<InlineMeasurement> = None;
         let context = LeafLayoutContext::new(resolved_aspect_ratio, scrollbar_insets);
         let mut output = compute_leaf_layout_with_context(
             leaf_inputs,
@@ -1899,6 +1900,7 @@ where
                     alignment,
                     &inline_context,
                     text_layout,
+                    &mut content_widths,
                     is_floated,
                     block_context,
                 );
@@ -1996,6 +1998,7 @@ where
         } else {
             inline_context.measurement_layout = text_layout;
         }
+        inline_context.content_widths = content_widths;
 
         self.boxes[id.index()].inline_layout = Some(inline_context);
         output
@@ -2010,6 +2013,7 @@ where
         alignment: parley::Alignment,
         context: &InlineFormattingContext,
         layout: &mut parley::Layout<crate::stylo_to_parley::TextBrush>,
+        content_widths_memo: &mut InlineContentWidthsMemo,
         is_floated: bool,
         block_context: Option<&mut BlockContext<'_>>,
     ) -> InlineMeasurement {
@@ -2129,7 +2133,11 @@ where
             .style
             .text_indent(containing_width);
         layout.set_text_indent(indent, indent_options);
-        let content_widths = layout.calculate_content_widths();
+        // Inline-object dimensions can depend on the current Taffy probe. A
+        // pure-text IFC has no such mutable input, so its shaped cluster scan
+        // can be shared by all intrinsic and final probes in this fresh pass.
+        let content_widths =
+            content_widths_memo.content_widths_for_probe(layout, indent, indent_options);
         let has_definite_width = known_dimensions.width.is_some()
             || inputs.known_dimensions.width.is_some()
             || self.boxes[owner.index()]
@@ -2820,6 +2828,7 @@ fn empty_inline_context() -> InlineFormattingContext {
         root_style: LayoutBoxId::from_index(0),
         measurement_layout: Some(parley::Layout::default()),
         laid_out: None,
+        content_widths: InlineContentWidthsMemo::default(),
         text_units: Vec::new(),
         source_map: Vec::new(),
         selection: None,

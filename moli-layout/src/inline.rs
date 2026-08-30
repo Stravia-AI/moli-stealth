@@ -145,6 +145,11 @@ pub(crate) struct InlineFormattingContext {
     /// kept separate from the reusable measurement layout so a later intrinsic
     /// probe cannot overwrite the last accepted line layout.
     pub(crate) laid_out: Option<Layout<TextBrush>>,
+    /// Pass-local memo for intrinsic widths of a pure-text paragraph. Numeric
+    /// positioning buffers intentionally remain probe-local: retaining their
+    /// capacity on every IFC increases the peak footprint of the fresh layout
+    /// world more than it saves allocator traffic.
+    pub(crate) content_widths: InlineContentWidthsMemo,
     pub(crate) text_units: Vec<InlineTextUnit>,
     pub(crate) source_map: Vec<InlineSourceMapEntry>,
     pub(crate) selection: Option<InlineSelection>,
@@ -166,6 +171,70 @@ pub(crate) struct InlineFormattingContext {
     pub(crate) structural_boxes: Vec<InlineStructuralBox>,
     pub(crate) line_placements: Vec<InlineLinePlacement>,
     pub(crate) fragments: InlineFragments,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct InlineContentWidthsMemo {
+    entry: Option<InlineContentWidthsCache>,
+    #[cfg(test)]
+    hits: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct InlineContentWidthsCacheKey {
+    indent_bits: u32,
+    each_line: bool,
+    hanging: bool,
+}
+
+impl InlineContentWidthsCacheKey {
+    fn new(indent: f32, options: parley::IndentOptions) -> Self {
+        Self {
+            indent_bits: indent.to_bits(),
+            each_line: options.each_line,
+            hanging: options.hanging,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct InlineContentWidthsCache {
+    key: InlineContentWidthsCacheKey,
+    widths: parley::ContentWidths,
+}
+
+impl InlineContentWidthsMemo {
+    /// Reuses intrinsic widths only when the IFC contains shaped text and no
+    /// inline object whose width can change between Taffy probes.
+    ///
+    /// Parley deliberately recalculates content widths on every call. For a
+    /// pure-text IFC, however, the scanned items and cluster advances are
+    /// immutable for this fresh layout pass. The key includes text-indent so
+    /// this adapter remains correct if Parley starts incorporating indentation
+    /// into intrinsic widths in a future release.
+    pub(crate) fn content_widths_for_probe(
+        &mut self,
+        layout: &Layout<TextBrush>,
+        indent: f32,
+        options: parley::IndentOptions,
+    ) -> parley::ContentWidths {
+        if !layout.inline_boxes().is_empty() {
+            return layout.calculate_content_widths();
+        }
+
+        let key = InlineContentWidthsCacheKey::new(indent, options);
+        if let Some(cached) = self.entry.filter(|cached| cached.key == key) {
+            #[cfg(test)]
+            {
+                self.hits += 1;
+            }
+            return cached.widths;
+        }
+
+        let widths = layout.calculate_content_widths();
+        self.entry = Some(InlineContentWidthsCache { key, widths });
+        widths
+    }
 }
 
 /// Restores the reusable Parley paragraph to its shaped, unbroken state before
@@ -1688,6 +1757,7 @@ impl InlineBuildInput {
             root_style: self.root_style,
             measurement_layout: Some(layout),
             laid_out: None,
+            content_widths: InlineContentWidthsMemo::default(),
             text_units: self.units,
             source_map: self.source_map,
             selection,
@@ -2525,6 +2595,60 @@ mod tests {
     }
 
     #[test]
+    fn pure_text_content_width_cache_is_keyed_and_object_probes_bypass_it() {
+        let text = "alpha beta gamma delta";
+        let mut font_context = parley::FontContext::new();
+        let mut layout_context = parley::LayoutContext::<TextBrush>::new();
+        let mut builder = layout_context.style_run_builder(&mut font_context, text, 1.0, true);
+        let style = builder.push_style(TextStyle::default());
+        builder.push_style_run(style, ..);
+        let layout = builder.build(text);
+        let options = parley::IndentOptions::default();
+        let mut memo = InlineContentWidthsMemo::default();
+
+        let first = memo.content_widths_for_probe(&layout, 0.0, options);
+        let second = memo.content_widths_for_probe(&layout, 0.0, options);
+        assert_eq!(first.min, second.min);
+        assert_eq!(first.max, second.max);
+        assert_eq!(memo.hits, 1);
+
+        let changed_options = parley::IndentOptions {
+            each_line: true,
+            hanging: false,
+        };
+        memo.content_widths_for_probe(&layout, 12.0, changed_options);
+        assert_eq!(memo.hits, 1);
+        assert_eq!(
+            memo.entry.expect("cache must be populated").key,
+            InlineContentWidthsCacheKey::new(12.0, changed_options),
+        );
+
+        let cached = memo.entry;
+        let mut object_builder =
+            layout_context.style_run_builder(&mut font_context, text, 1.0, true);
+        let object_style = object_builder.push_style(TextStyle::default());
+        object_builder.push_style_run(object_style, ..);
+        object_builder.push_inline_box(InlineBox {
+            id: 0,
+            kind: InlineBoxKind::InFlow,
+            index: 5,
+            width: 20.0,
+            height: 10.0,
+        });
+        let mut object_layout = object_builder.build(text);
+        let object_first = memo.content_widths_for_probe(&object_layout, 12.0, changed_options);
+        object_layout.inline_boxes_mut()[0].width = 60.0;
+        let object_second = memo.content_widths_for_probe(&object_layout, 12.0, changed_options);
+        assert!(object_second.max > object_first.max);
+        assert_eq!(memo.hits, 1);
+        assert_eq!(
+            memo.entry.map(|entry| entry.key),
+            cached.map(|entry| entry.key),
+            "a dynamic inline-object probe must neither reuse nor replace the pure-text cache",
+        );
+    }
+
+    #[test]
     fn intrinsic_line_summary_matches_materialized_line_placements() {
         let root = LayoutBoxId::from_index(0);
         let text = "first line\nsecond line";
@@ -2540,6 +2664,7 @@ mod tests {
             root_style: root,
             measurement_layout: Some(layout.clone()),
             laid_out: None,
+            content_widths: InlineContentWidthsMemo::default(),
             text_units: Vec::new(),
             source_map: Vec::new(),
             selection: None,
