@@ -2382,7 +2382,7 @@ fn dom_matrix_css_text<'s>(
     object: v8::Local<'s, v8::Object>,
 ) -> Option<String> {
     let Some(css_text) = dom_matrix_components(scope, object)
-        .css_text_with_dimension(dom_matrix_is_2d(scope, object))
+        .dom_matrix_text_with_dimension(dom_matrix_is_2d(scope, object))
     else {
         throw_dom_exception(
             scope,

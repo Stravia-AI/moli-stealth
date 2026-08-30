@@ -502,6 +502,18 @@ impl DomMatrixComponents {
     }
 
     pub fn css_text_with_dimension(self, is_2d: bool) -> Option<String> {
+        self.text_with_dimension(is_2d, css_number)
+    }
+
+    pub fn dom_matrix_text_with_dimension(self, is_2d: bool) -> Option<String> {
+        self.text_with_dimension(is_2d, ecmascript_number)
+    }
+
+    fn text_with_dimension(
+        self,
+        is_2d: bool,
+        serialize_number: fn(f64) -> String,
+    ) -> Option<String> {
         if is_2d {
             let values = [self.m11, self.m12, self.m21, self.m22, self.m41, self.m42];
             if !values.iter().all(|value| value.is_finite()) {
@@ -509,12 +521,12 @@ impl DomMatrixComponents {
             }
             return Some(format!(
                 "matrix({}, {}, {}, {}, {}, {})",
-                css_number(self.m11),
-                css_number(self.m12),
-                css_number(self.m21),
-                css_number(self.m22),
-                css_number(self.m41),
-                css_number(self.m42)
+                serialize_number(self.m11),
+                serialize_number(self.m12),
+                serialize_number(self.m21),
+                serialize_number(self.m22),
+                serialize_number(self.m41),
+                serialize_number(self.m42)
             ));
         }
 
@@ -527,24 +539,30 @@ impl DomMatrixComponents {
         }
         Some(format!(
             "matrix3d({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
-            css_number(self.m11),
-            css_number(self.m12),
-            css_number(self.m13),
-            css_number(self.m14),
-            css_number(self.m21),
-            css_number(self.m22),
-            css_number(self.m23),
-            css_number(self.m24),
-            css_number(self.m31),
-            css_number(self.m32),
-            css_number(self.m33),
-            css_number(self.m34),
-            css_number(self.m41),
-            css_number(self.m42),
-            css_number(self.m43),
-            css_number(self.m44)
+            serialize_number(self.m11),
+            serialize_number(self.m12),
+            serialize_number(self.m13),
+            serialize_number(self.m14),
+            serialize_number(self.m21),
+            serialize_number(self.m22),
+            serialize_number(self.m23),
+            serialize_number(self.m24),
+            serialize_number(self.m31),
+            serialize_number(self.m32),
+            serialize_number(self.m33),
+            serialize_number(self.m34),
+            serialize_number(self.m41),
+            serialize_number(self.m42),
+            serialize_number(self.m43),
+            serialize_number(self.m44)
         ))
     }
+}
+
+fn ecmascript_number(value: f64) -> String {
+    dragonbox_ecma::Buffer::new()
+        .format_finite(value)
+        .to_owned()
 }
 
 fn css_number(value: f64) -> String {
