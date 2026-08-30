@@ -161,6 +161,7 @@ const NODE_BRIDGE_DESCRIPTORS: &[BridgeDescriptor] = &[
             svg_gradient_transform: true,
         },
     ),
+    descriptor("SVGMarkerElement", Some("SVGElement"), ELEMENT_GROUPS),
     descriptor("SVGMaskElement", Some("SVGElement"), ELEMENT_GROUPS),
     descriptor("SVGMetadataElement", Some("SVGElement"), ELEMENT_GROUPS),
     descriptor("SVGScriptElement", Some("SVGElement"), ELEMENT_GROUPS),
