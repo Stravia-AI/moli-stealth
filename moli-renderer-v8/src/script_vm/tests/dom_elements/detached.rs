@@ -7885,16 +7885,20 @@ fn detached_resource_template_accessors_use_owner_prototypes() {
     for (const name of ["sandbox", "allowFullscreen"]) {
       assert(!own(iframe, name), `iframe.${name} should not be own before set`);
     }
+    const sandbox = iframe.sandbox;
+    assert(Object.prototype.toString.call(sandbox) === "[object DOMTokenList]", "iframe sandbox type");
+    assert(sandbox === iframe.sandbox, "iframe sandbox SameObject");
     iframe.sandbox = "allow-scripts";
     iframe.allowFullscreen = true;
-    assert(iframe.sandbox === "allow-scripts" && iframe.getAttribute("sandbox") === "allow-scripts", "iframe sandbox");
+    assert(sandbox.value === "allow-scripts" && iframe.getAttribute("sandbox") === "allow-scripts", "iframe sandbox");
+    assert(sandbox.supports("ALLOW-SCRIPTS"), "iframe sandbox supported token");
     assert(iframe.allowFullscreen === true && iframe.getAttribute("allowfullscreen") === "", "iframe allowFullscreen");
     for (const name of ["sandbox", "allowFullscreen"]) {
       assert(!own(iframe, name), `iframe.${name} should stay inherited after set`);
       assert(delete iframe[name], `iframe.${name} delete`);
       assert(!own(iframe, name), `iframe.${name} should stay inherited after delete`);
     }
-    assert(iframe.sandbox === "allow-scripts", "iframe sandbox after delete");
+    assert(iframe.sandbox === sandbox && sandbox.value === "allow-scripts", "iframe sandbox after delete");
     assert(iframe.allowFullscreen === true, "iframe allowFullscreen after delete");
   }
 
