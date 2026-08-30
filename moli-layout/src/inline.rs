@@ -133,10 +133,17 @@ pub(crate) struct InlineStructuralBox {
     pub(crate) include_used_font_metrics: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct InlineFormattingContext {
     pub(crate) root_style: LayoutBoxId,
-    pub(crate) unbroken: Layout<TextBrush>,
+    /// Reusable Parley layout for intrinsic and final-width probes. Line
+    /// breaking replaces only Parley's line output while retaining the shaped
+    /// runs, clusters, glyphs, and their allocations, so probes must not clone
+    /// the complete shaped paragraph.
+    pub(crate) measurement_layout: Option<Layout<TextBrush>>,
+    /// The accepted `PerformLayout` result consumed by paint and CSSOM. This is
+    /// kept separate from the reusable measurement layout so a later intrinsic
+    /// probe cannot overwrite the last accepted line layout.
     pub(crate) laid_out: Option<Layout<TextBrush>>,
     pub(crate) text_units: Vec<InlineTextUnit>,
     pub(crate) source_map: Vec<InlineSourceMapEntry>,
@@ -159,6 +166,18 @@ pub(crate) struct InlineFormattingContext {
     pub(crate) structural_boxes: Vec<InlineStructuralBox>,
     pub(crate) line_placements: Vec<InlineLinePlacement>,
     pub(crate) fragments: InlineFragments,
+}
+
+/// Restores the reusable Parley paragraph to its shaped, unbroken state before
+/// another inline measurement probe.
+///
+/// `text-align: justify` mutates whitespace cluster advances. Parley undoes
+/// those adjustments when a new line breaker is created, so this reset must
+/// happen before intrinsic content widths are read for the next probe. Dropping
+/// the breaker immediately also clears the previous line output while retaining
+/// its vector capacity and all shaped runs, clusters, and glyphs.
+pub(crate) fn reset_inline_layout_for_probe(layout: &mut Layout<TextBrush>) {
+    drop(layout.break_lines());
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1667,7 +1686,7 @@ impl InlineBuildInput {
             .collect();
         InlineFormattingContext {
             root_style: self.root_style,
-            unbroken: layout,
+            measurement_layout: Some(layout),
             laid_out: None,
             text_units: self.units,
             source_map: self.source_map,
@@ -2437,6 +2456,75 @@ mod tests {
     }
 
     #[test]
+    fn parley_shaped_layout_can_be_rebroken_across_probe_widths() {
+        let text = "alpha beta gamma delta epsilon";
+        let mut font_context = parley::FontContext::new();
+        let mut layout_context = parley::LayoutContext::<TextBrush>::new();
+        let mut builder = layout_context.style_run_builder(&mut font_context, text, 1.0, true);
+        let style = builder.push_style(TextStyle::default());
+        builder.push_style_run(style, ..);
+        let shaped = builder.build(text);
+        let mut reused = shaped.clone();
+
+        let signature = |layout: &Layout<TextBrush>| {
+            (
+                layout.width(),
+                layout.full_width(),
+                layout.height(),
+                layout
+                    .lines()
+                    .map(|line| (line.text_range(), line.break_reason(), *line.metrics()))
+                    .collect::<Vec<_>>(),
+            )
+        };
+
+        // Exercise the same order used by Taffy: intrinsic constraints may
+        // alternate with definite widths, and a scrollbar correction may ask
+        // the accepted paragraph to break at another width later in the pass.
+        for width in [45.0, 160.0, 65.0, 160.0] {
+            reused.break_all_lines(Some(width));
+            let mut fresh = shaped.clone();
+            fresh.break_all_lines(Some(width));
+            assert_eq!(signature(&reused), signature(&fresh));
+        }
+    }
+
+    #[test]
+    fn parley_probe_reset_removes_justification_before_intrinsic_widths() {
+        let text = "alpha beta gamma delta epsilon zeta eta theta";
+        let mut font_context = parley::FontContext::new();
+        let mut layout_context = parley::LayoutContext::<TextBrush>::new();
+        let mut builder = layout_context.style_run_builder(&mut font_context, text, 1.0, true);
+        let style = builder.push_style(TextStyle::default());
+        builder.push_style_run(style, ..);
+        let shaped = builder.build(text);
+        let expected = shaped.calculate_content_widths();
+        let mut reused = shaped.clone();
+
+        reused.break_all_lines(Some(120.0));
+        reused.align(
+            parley::Alignment::Justify,
+            parley::AlignmentOptions {
+                align_when_overflowing: false,
+            },
+        );
+        let justified = reused.calculate_content_widths();
+        assert!(
+            justified.max > expected.max,
+            "the regression fixture must expose justification-mutated cluster advances"
+        );
+
+        reset_inline_layout_for_probe(&mut reused);
+        let restored = reused.calculate_content_widths();
+        assert_eq!(restored.min, expected.min);
+        assert_eq!(restored.max, expected.max);
+        assert!(
+            reused.is_empty(),
+            "a fresh probe must not retain the previous line output"
+        );
+    }
+
+    #[test]
     fn intrinsic_line_summary_matches_materialized_line_placements() {
         let root = LayoutBoxId::from_index(0);
         let text = "first line\nsecond line";
@@ -2450,7 +2538,7 @@ mod tests {
 
         let context = InlineFormattingContext {
             root_style: root,
-            unbroken: layout.clone(),
+            measurement_layout: Some(layout.clone()),
             laid_out: None,
             text_units: Vec::new(),
             source_map: Vec::new(),

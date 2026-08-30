@@ -19,7 +19,7 @@ use crate::{
     inline::{
         InlineFormattingContext, InlineFragments, InlineLinePlacement, InlineObjectRole,
         break_inline_lines, build_inline_fragments, build_inline_line_placements,
-        measure_inline_lines, relative_atomic_inset_offset,
+        measure_inline_lines, relative_atomic_inset_offset, reset_inline_layout_for_probe,
     },
     positioned::resolve_absolute_axis_margins,
     replaced::measure_replaced,
@@ -1871,6 +1871,16 @@ where
             .inline_layout
             .take()
             .unwrap_or_else(empty_inline_context);
+        let final_layout_requested = inputs.run_mode == RunMode::PerformLayout;
+        // Reuse one mutable Parley paragraph throughout the ordinary
+        // intrinsic -> final sequence. A later intrinsic probe clones lazily
+        // from the accepted result, and only if Taffy actually invokes the
+        // measure callback, so paint never observes probe line breaks.
+        let mut text_layout = inline_context.measurement_layout.take();
+        let final_reuses_accepted_layout = final_layout_requested && text_layout.is_none();
+        if final_reuses_accepted_layout {
+            text_layout = inline_context.laid_out.take();
+        }
         let mut measurement = None;
         let context = LeafLayoutContext::new(resolved_aspect_ratio, scrollbar_insets);
         let mut output = compute_leaf_layout_with_context(
@@ -1879,6 +1889,8 @@ where
             context,
             resolve_stylo_calc_value,
             |known_dimensions, available_space| {
+                let text_layout = text_layout
+                    .get_or_insert_with(|| inline_context.laid_out.clone().unwrap_or_default());
                 let result = self.measure_inline_context(
                     id,
                     inputs,
@@ -1886,6 +1898,7 @@ where
                     available_space,
                     alignment,
                     &inline_context,
+                    text_layout,
                     is_floated,
                     block_context,
                 );
@@ -1894,8 +1907,12 @@ where
                 size
             },
         );
+        let measurement_was_produced = measurement.is_some();
 
         if let Some(mut measurement) = measurement {
+            let text_layout = text_layout
+                .as_ref()
+                .expect("an inline measurement must retain its Parley layout");
             let padding = style
                 .padding
                 .resolve_or_zero(inputs.parent_size.width, resolve_stylo_calc_value);
@@ -1950,9 +1967,10 @@ where
                     .as_ref()
                     .expect("final inline layout must retain line placements");
                 let fragments =
-                    build_inline_fragments(&inline_context, &measurement.layout, line_placements);
+                    build_inline_fragments(&inline_context, text_layout, line_placements);
                 self.position_inline_objects(
                     &inline_context,
+                    text_layout,
                     &measurement,
                     Point {
                         x: padding.left + border.left + scrollbar_insets.left,
@@ -1966,8 +1984,17 @@ where
                     .line_placements
                     .take()
                     .expect("final inline layout lost its line placements");
-                inline_context.laid_out = Some(measurement.layout);
             }
+        }
+
+        if final_layout_requested && measurement_was_produced {
+            inline_context.laid_out = text_layout;
+        } else if final_reuses_accepted_layout {
+            // Preserve the previously accepted lines if a future Taffy leaf
+            // fast path can satisfy PerformLayout without invoking measure.
+            inline_context.laid_out = text_layout;
+        } else {
+            inline_context.measurement_layout = text_layout;
         }
 
         self.boxes[id.index()].inline_layout = Some(inline_context);
@@ -1982,9 +2009,17 @@ where
         available_space: Size<AvailableSpace>,
         alignment: parley::Alignment,
         context: &InlineFormattingContext,
+        layout: &mut parley::Layout<crate::stylo_to_parley::TextBrush>,
         is_floated: bool,
         block_context: Option<&mut BlockContext<'_>>,
     ) -> InlineMeasurement {
+        // A previous probe may have justified its accepted lines, which
+        // changes whitespace cluster advances in place. Start the next probe
+        // by asking Parley to undo that line-specific state before intrinsic
+        // widths inspect the shared shaped paragraph. This clears only line
+        // output and retains the expensive shaping allocations.
+        reset_inline_layout_for_probe(layout);
+
         let child_inputs = LayoutInput {
             run_mode: inputs.run_mode,
             sizing_mode: SizingMode::InherentSize,
@@ -2014,7 +2049,6 @@ where
         // actual basis here.
         let percentage_basis =
             inline_percentage_basis(available_space.width, inputs.sizing_purpose);
-        let mut layout = context.unbroken.clone();
         let mut atomic = vec![None; context.objects.len()];
         let mut atomic_baseline_ascents = vec![None; context.objects.len()];
         let mut structural_edge_contributions = vec![false; context.objects.len()];
@@ -2245,7 +2279,7 @@ where
                 );
                 self.break_inline_lines_with_floats(
                     context,
-                    &mut layout,
+                    layout,
                     width,
                     child_inputs,
                     &mut content_context,
@@ -2269,7 +2303,7 @@ where
                 );
                 self.break_inline_lines_with_floats(
                     context,
-                    &mut layout,
+                    layout,
                     width,
                     child_inputs,
                     &mut content_context,
@@ -2283,7 +2317,7 @@ where
                 float_height = Some(alignment_float_height);
             }
         } else {
-            break_inline_lines(context, &mut layout, max_advance);
+            break_inline_lines(context, layout, max_advance);
         }
         layout.align(
             alignment,
@@ -2295,7 +2329,7 @@ where
         let (line_metrics, line_placements) = if inputs.run_mode == RunMode::PerformLayout {
             let (placements, metrics) = build_inline_line_placements(
                 context,
-                &layout,
+                layout,
                 &atomic_baseline_ascents,
                 &structural_edge_contributions,
             );
@@ -2304,7 +2338,7 @@ where
             (
                 measure_inline_lines(
                     context,
-                    &layout,
+                    layout,
                     &atomic_baseline_ascents,
                     &structural_edge_contributions,
                 ),
@@ -2325,7 +2359,6 @@ where
             first_baseline: line_metrics.first_baseline,
             last_baseline: line_metrics.last_baseline,
             has_non_phantom_line: line_metrics.has_non_phantom_line,
-            layout,
             atomic,
             floats,
             percentage_basis,
@@ -2465,6 +2498,7 @@ where
     fn position_inline_objects(
         &mut self,
         context: &InlineFormattingContext,
+        layout: &parley::Layout<crate::stylo_to_parley::TextBrush>,
         measurement: &InlineMeasurement,
         content_offset: Point<f32>,
         containing_block_size: Size<f32>,
@@ -2479,7 +2513,7 @@ where
                 floated.parent_width,
             );
         }
-        for (line_index, line) in measurement.layout.lines().enumerate() {
+        for (line_index, line) in layout.lines().enumerate() {
             let line_placement = measurement
                 .line_placements
                 .as_ref()
@@ -2714,7 +2748,6 @@ struct InlineMeasurement {
     first_baseline: Option<f32>,
     last_baseline: Option<f32>,
     has_non_phantom_line: bool,
-    layout: parley::Layout<crate::stylo_to_parley::TextBrush>,
     atomic: Vec<Option<AtomicMeasurement>>,
     floats: Vec<InlineFloatPlacement>,
     percentage_basis: Option<f32>,
@@ -2785,7 +2818,7 @@ fn single_subject_block_alignment_offset(alignment: Option<AlignContent>, free_s
 fn empty_inline_context() -> InlineFormattingContext {
     InlineFormattingContext {
         root_style: LayoutBoxId::from_index(0),
-        unbroken: parley::Layout::default(),
+        measurement_layout: Some(parley::Layout::default()),
         laid_out: None,
         text_units: Vec::new(),
         source_map: Vec::new(),

@@ -767,6 +767,64 @@ fn auto_scrollbar_feedback_reveals_the_perpendicular_axis() {
 }
 
 #[test]
+fn scrollbar_feedback_rebreaks_the_reused_inline_layout_at_its_final_width() {
+    const TEXT: &str = "alpha beta gamma delta epsilon zeta eta theta iota kappa";
+    let source = Source(vec![
+        Node::element("root", vec![1]),
+        Node::element("scroller", vec![2]),
+        Node::text("text", TEXT),
+    ]);
+    let mut styles = Styles::default();
+    styles
+        .0
+        .insert(0, fixed_size(LayoutDisplay::Block, 320.0, 240.0));
+    styles.0.insert(
+        1,
+        resolved(
+            LayoutDisplay::Block,
+            Style {
+                size: Size {
+                    width: length(100.0),
+                    height: length(40.0),
+                },
+                overflow: Point {
+                    x: Overflow::Scroll,
+                    y: Overflow::Scroll,
+                },
+                ..Style::default()
+            },
+        ),
+    );
+
+    let feedback = build(&source, &mut styles);
+    assert_eq!(feedback.metrics.numeric_layout_pass_count, 2);
+    assert_eq!(
+        feedback.element_metrics_for_source(1).unwrap().client_size,
+        moli_layout::LayoutSize::new(85.0, 25.0),
+    );
+    let feedback_text = feedback.client_rects_for_source(2);
+
+    // Lay out the same paragraph directly at the converged 85px content
+    // width. Its line fragments must match the scrollbar-corrected result;
+    // otherwise paint retained the first pass's 100px Parley lines.
+    styles.0.insert(
+        1,
+        resolved(
+            LayoutDisplay::Block,
+            Style {
+                size: Size {
+                    width: length(85.0),
+                    height: Dimension::auto(),
+                },
+                ..Style::default()
+            },
+        ),
+    );
+    let direct = build(&source, &mut styles);
+    assert_eq!(feedback_text, direct.client_rects_for_source(2));
+}
+
+#[test]
 fn scrollbar_feedback_prepares_static_position_placeholders_once() {
     let source = Source(vec![
         Node::element("root", vec![1]),
