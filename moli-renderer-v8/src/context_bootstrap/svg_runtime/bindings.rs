@@ -483,6 +483,13 @@ struct SvgGradientElementTemplateConstantsDeclaration {
 #[webapi(name = "SVGSVGElement", enumerable)]
 struct SvgSvgElementTemplateMethodsDeclaration {
     #[webapi(
+        method = "deselectAll",
+        length = 0,
+        callback = svg_svg_element_deselect_all_callback
+    )]
+    deselect_all: (),
+
+    #[webapi(
         method = "createSVGMatrix",
         length = 0,
         callback = svg_svg_element_create_matrix_callback
