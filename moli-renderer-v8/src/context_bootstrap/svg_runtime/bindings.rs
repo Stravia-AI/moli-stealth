@@ -148,6 +148,51 @@ struct SvgNumberListTemplateMethodsDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
+#[webapi(name = "SVGStringList", enumerable)]
+struct SvgStringListTemplateMethodsDeclaration {
+    #[webapi(method = "clear", length = 0, callback = svg_string_list_clear_callback)]
+    clear: (),
+
+    #[webapi(
+        method = "initialize",
+        length = 1,
+        callback = svg_string_list_initialize_callback
+    )]
+    initialize: (),
+
+    #[webapi(method = "getItem", length = 1, callback = svg_string_list_get_item_callback)]
+    get_item: (),
+
+    #[webapi(
+        method = "insertItemBefore",
+        length = 2,
+        callback = svg_string_list_insert_item_before_callback
+    )]
+    insert_item_before: (),
+
+    #[webapi(
+        method = "replaceItem",
+        length = 2,
+        callback = svg_string_list_replace_item_callback
+    )]
+    replace_item: (),
+
+    #[webapi(
+        method = "removeItem",
+        length = 1,
+        callback = svg_string_list_remove_item_callback
+    )]
+    remove_item: (),
+
+    #[webapi(
+        method = "appendItem",
+        length = 1,
+        callback = svg_string_list_append_item_callback
+    )]
+    append_item: (),
+}
+
+#[derive(WebApiFunctionTemplate)]
 #[webapi(name = "SVGTransformList", enumerable)]
 struct SvgTransformListTemplateMethodsDeclaration {
     #[webapi(method = "clear", length = 0, callback = svg_transform_list_clear_callback)]
@@ -715,6 +760,19 @@ struct SvgNumberListTemplateAccessorsDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
+#[webapi(name = "SVGStringList", enumerable)]
+struct SvgStringListTemplateAccessorsDeclaration {
+    #[webapi(accessor_property = "length", getter = svg_string_list_length_getter)]
+    length: (),
+
+    #[webapi(
+        accessor_property = "numberOfItems",
+        getter = svg_string_list_length_getter
+    )]
+    number_of_items: (),
+}
+
+#[derive(WebApiFunctionTemplate)]
 #[webapi(name = "SVGAnimatedTransformList", enumerable)]
 struct SvgAnimatedTransformListTemplateAccessorsDeclaration {
     #[webapi(
@@ -827,6 +885,20 @@ struct SvgMatrixTemplateAccessorsDeclaration {
 struct SvgGraphicsElementPrototypeAccessorsDeclaration {
     #[webapi(accessor_property = "transform", getter = svg_graphics_transform_getter)]
     transform: (),
+
+    #[webapi(
+        accessor_property = "requiredExtensions",
+        getter = svg_graphics_test_string_list_getter,
+        data = callback_data_index_value(scope, 0)
+    )]
+    required_extensions: (),
+
+    #[webapi(
+        accessor_property = "systemLanguage",
+        getter = svg_graphics_test_string_list_getter,
+        data = callback_data_index_value(scope, 1)
+    )]
+    system_language: (),
 }
 
 #[derive(WebApiFunctionTemplate)]
@@ -1152,6 +1224,15 @@ pub(super) fn install_svg_number_list_bindings<'s>(
     template: v8::Local<'s, v8::FunctionTemplate>,
 ) {
     install_svg_value_list_bindings(scope, template, SvgListKind::Number);
+}
+
+pub(super) fn install_svg_string_list_bindings<'s>(
+    scope: &mut v8::PinScope<'s, '_, ()>,
+    template: v8::Local<'s, v8::FunctionTemplate>,
+) {
+    let proto = template.prototype_template(scope);
+    SvgStringListTemplateAccessorsDeclaration::initialize_prototype_template(scope, proto);
+    SvgStringListTemplateMethodsDeclaration::initialize_prototype_template(scope, proto);
 }
 
 pub(super) fn install_svg_animated_enumeration_bindings<'s>(
