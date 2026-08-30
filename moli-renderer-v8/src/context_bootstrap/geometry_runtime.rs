@@ -4,7 +4,7 @@ use crate::util::{callback_data_index_value, get_private_value, set_private_valu
 use crate::webidl;
 use moli_geometry::{
     DOM_MATRIX_COMPONENT_COUNT, DomMatrixComponents, dom_matrix_components_from_values,
-    parse_dom_matrix_value,
+    parse_dom_matrix_value_with_dimension,
 };
 use moli_webapi_declare::{WebApiFunctionTemplate, WebApiObject};
 
@@ -30,6 +30,7 @@ const DOM_MATRIX_M41_SLOT: &str = "__moliDomMatrixM41";
 const DOM_MATRIX_M42_SLOT: &str = "__moliDomMatrixM42";
 const DOM_MATRIX_M43_SLOT: &str = "__moliDomMatrixM43";
 const DOM_MATRIX_M44_SLOT: &str = "__moliDomMatrixM44";
+const DOM_MATRIX_IS_2D_SLOT: &str = "__moliDomMatrixIs2D";
 const DOM_MATRIX_READONLY_BRAND_SLOT: &str = "__moliDomMatrixReadOnlyBrand";
 const DOM_MATRIX_MUTABLE_BRAND_SLOT: &str = "__moliDomMatrixMutableBrand";
 const DOM_MATRIX_TYPED_ARRAY_LENGTH: usize = DOM_MATRIX_COMPONENT_COUNT;
@@ -128,10 +129,13 @@ macro_rules! dom_matrix_object_declaration {
             m43: f64,
             #[webapi(slot = DOM_MATRIX_M44_SLOT)]
             m44: f64,
+            #[webapi(slot = DOM_MATRIX_IS_2D_SLOT)]
+            is_2d: bool,
         }
 
         impl $name {
-            fn from_components(components: DomMatrixComponents) -> Self {
+            fn from_value(value: DomMatrixValue) -> Self {
+                let components = value.components;
                 Self {
                     readonly_brand: (),
                     $($extra_init)*
@@ -151,11 +155,12 @@ macro_rules! dom_matrix_object_declaration {
                     m42: components.m42,
                     m43: components.m43,
                     m44: components.m44,
+                    is_2d: value.is_2d,
                 }
             }
 
             fn identity() -> Self {
-                Self::from_components(DomMatrixComponents::identity())
+                Self::from_value(DomMatrixValue::identity())
             }
         }
     };
@@ -597,6 +602,21 @@ struct DomMatrixInit {
     m44: Option<f64>,
 }
 
+#[derive(Clone, Copy)]
+struct DomMatrixValue {
+    components: DomMatrixComponents,
+    is_2d: bool,
+}
+
+impl DomMatrixValue {
+    fn identity() -> Self {
+        Self {
+            components: DomMatrixComponents::identity(),
+            is_2d: true,
+        }
+    }
+}
+
 pub(super) fn dom_point_constructor_callback<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     args: v8::FunctionCallbackArguments<'s>,
@@ -878,6 +898,9 @@ fn dom_matrix_setter_callback<'s>(
         return;
     };
     set_dom_matrix_slot(scope, args.this(), slot, value);
+    if !dom_matrix_attribute_value_preserves_2d(slot, value) {
+        set_dom_matrix_is_2d(scope, args.this(), false);
+    }
     rv.set_undefined();
 }
 
@@ -913,9 +936,11 @@ fn dom_point_matrix_transform_callback<'s>(
         throw_type_error(scope, "Illegal invocation");
         return;
     }
-    let Some(matrix) = dom_matrix_init_arg(scope, &args, 0) else {
+    let Some(matrix) = dom_matrix_init_arg(scope, &args, 0, "DOMPointReadOnly.matrixTransform")
+    else {
         return;
     };
+    let matrix = matrix.components;
     let point = DomPointInit {
         x: dom_point_slot(scope, args.this(), DOM_POINT_X_SLOT, 0.0),
         y: dom_point_slot(scope, args.this(), DOM_POINT_Y_SLOT, 0.0),
@@ -950,14 +975,24 @@ fn dom_matrix_init_arg<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     args: &v8::FunctionCallbackArguments<'s>,
     index: i32,
-) -> Option<DomMatrixComponents> {
+    prefix: &'static str,
+) -> Option<DomMatrixValue> {
     if index >= args.length() || args.get(index).is_undefined() {
-        return Some(DomMatrixComponents::identity());
+        return Some(DomMatrixValue::identity());
     }
+    dom_matrix_init_value(scope, args.get(index), prefix, (index + 1) as usize)
+}
+
+fn dom_matrix_init_value<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    value: v8::Local<'s, v8::Value>,
+    prefix: &'static str,
+    argument_index: usize,
+) -> Option<DomMatrixValue> {
     let init = match webidl::parse_dictionary::<DomMatrixInit>(
         scope,
-        args.get(index),
-        webidl::Context::argument("DOMPointReadOnly.matrixTransform", (index + 1) as usize),
+        value,
+        webidl::Context::argument(prefix, argument_index),
     ) {
         Ok(Some(init)) => init,
         Ok(None) => DomMatrixInit::default(),
@@ -972,7 +1007,7 @@ fn dom_matrix_init_arg<'s>(
 fn validated_dom_matrix_init(
     scope: &mut v8::PinScope<'_, '_>,
     init: DomMatrixInit,
-) -> Option<DomMatrixComponents> {
+) -> Option<DomMatrixValue> {
     let m11 = validated_dom_matrix_alias(scope, "a", init.a, "m11", init.m11, 1.0)?;
     let m12 = validated_dom_matrix_alias(scope, "b", init.b, "m12", init.m12, 0.0)?;
     let m21 = validated_dom_matrix_alias(scope, "c", init.c, "m21", init.m21, 0.0)?;
@@ -997,14 +1032,18 @@ fn validated_dom_matrix_init(
         m43: init.m43.unwrap_or(0.0),
         m44: init.m44.unwrap_or(1.0),
     };
-    if init.is_2d == Some(true) && !components.is_2d() {
+    let components_are_2d = components.is_2d();
+    if init.is_2d == Some(true) && !components_are_2d {
         throw_type_error(
             scope,
             "DOMMatrixInit is2D is true, but the matrix contains 3D values.",
         );
         return None;
     }
-    Some(components)
+    Some(DomMatrixValue {
+        components,
+        is_2d: init.is_2d.unwrap_or(components_are_2d),
+    })
 }
 
 fn validated_dom_matrix_alias(
@@ -1036,13 +1075,11 @@ fn dom_matrix_from_matrix_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    let matrix = build_dom_matrix_identity_object(scope);
-    if args.length() > 0
-        && !args.get(0).is_undefined()
-        && !apply_dom_matrix_init(scope, matrix, args.get(0))
-    {
+    let Some(value) = dom_matrix_init_arg(scope, &args, 0, "DOMMatrix.fromMatrix") else {
         return;
-    }
+    };
+    let matrix = build_dom_matrix_identity_object(scope);
+    set_dom_matrix_value(scope, matrix, value);
     rv.set(matrix.into());
 }
 
@@ -1051,13 +1088,11 @@ fn dom_matrix_readonly_from_matrix_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    let matrix = build_dom_matrix_readonly_identity_object(scope);
-    if args.length() > 0
-        && !args.get(0).is_undefined()
-        && !apply_dom_matrix_init(scope, matrix, args.get(0))
-    {
+    let Some(value) = dom_matrix_init_arg(scope, &args, 0, "DOMMatrixReadOnly.fromMatrix") else {
         return;
-    }
+    };
+    let matrix = build_dom_matrix_readonly_identity_object(scope);
+    set_dom_matrix_value(scope, matrix, value);
     rv.set(matrix.into());
 }
 
@@ -1066,15 +1101,13 @@ fn dom_matrix_from_float32_array_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    let Some(components) = dom_matrix_components_from_typed_array(
-        scope,
-        args.get(0),
-        DomMatrixTypedArrayKind::Float32,
-    ) else {
+    let Some(value) =
+        dom_matrix_value_from_typed_array(scope, args.get(0), DomMatrixTypedArrayKind::Float32)
+    else {
         return;
     };
     let matrix = build_dom_matrix_identity_object(scope);
-    set_dom_matrix_components(scope, matrix, components);
+    set_dom_matrix_value(scope, matrix, value);
     rv.set(matrix.into());
 }
 
@@ -1083,15 +1116,13 @@ fn dom_matrix_from_float64_array_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    let Some(components) = dom_matrix_components_from_typed_array(
-        scope,
-        args.get(0),
-        DomMatrixTypedArrayKind::Float64,
-    ) else {
+    let Some(value) =
+        dom_matrix_value_from_typed_array(scope, args.get(0), DomMatrixTypedArrayKind::Float64)
+    else {
         return;
     };
     let matrix = build_dom_matrix_identity_object(scope);
-    set_dom_matrix_components(scope, matrix, components);
+    set_dom_matrix_value(scope, matrix, value);
     rv.set(matrix.into());
 }
 
@@ -1100,15 +1131,13 @@ fn dom_matrix_readonly_from_float32_array_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    let Some(components) = dom_matrix_components_from_typed_array(
-        scope,
-        args.get(0),
-        DomMatrixTypedArrayKind::Float32,
-    ) else {
+    let Some(value) =
+        dom_matrix_value_from_typed_array(scope, args.get(0), DomMatrixTypedArrayKind::Float32)
+    else {
         return;
     };
     let matrix = build_dom_matrix_readonly_identity_object(scope);
-    set_dom_matrix_components(scope, matrix, components);
+    set_dom_matrix_value(scope, matrix, value);
     rv.set(matrix.into());
 }
 
@@ -1117,15 +1146,13 @@ fn dom_matrix_readonly_from_float64_array_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    let Some(components) = dom_matrix_components_from_typed_array(
-        scope,
-        args.get(0),
-        DomMatrixTypedArrayKind::Float64,
-    ) else {
+    let Some(value) =
+        dom_matrix_value_from_typed_array(scope, args.get(0), DomMatrixTypedArrayKind::Float64)
+    else {
         return;
     };
     let matrix = build_dom_matrix_readonly_identity_object(scope);
-    set_dom_matrix_components(scope, matrix, components);
+    set_dom_matrix_value(scope, matrix, value);
     rv.set(matrix.into());
 }
 
@@ -1611,7 +1638,7 @@ fn dom_matrix_multiply_callback<'s>(
         return;
     }
     let matrix = copied_dom_matrix(scope, args.this());
-    let Some(other) = dom_matrix_argument_components(scope, &args, 0) else {
+    let Some(other) = dom_matrix_argument_value(scope, &args, 0) else {
         return;
     };
     apply_dom_matrix_multiply(scope, matrix, other);
@@ -1626,7 +1653,7 @@ fn dom_matrix_multiply_self_callback<'s>(
     if !dom_matrix_require_mutable_receiver(scope, args.this()) {
         return;
     }
-    let Some(other) = dom_matrix_argument_components(scope, &args, 0) else {
+    let Some(other) = dom_matrix_argument_value(scope, &args, 0) else {
         return;
     };
     apply_dom_matrix_multiply(scope, args.this(), other);
@@ -1641,11 +1668,18 @@ fn dom_matrix_pre_multiply_self_callback<'s>(
     if !dom_matrix_require_mutable_receiver(scope, args.this()) {
         return;
     }
-    let Some(other) = dom_matrix_argument_components(scope, &args, 0) else {
+    let Some(other) = dom_matrix_argument_value(scope, &args, 0) else {
         return;
     };
-    let current = dom_matrix_components(scope, args.this());
-    set_dom_matrix_components(scope, args.this(), other.multiply(current));
+    let current = dom_matrix_value(scope, args.this());
+    set_dom_matrix_value(
+        scope,
+        args.this(),
+        DomMatrixValue {
+            components: other.components.multiply(current.components),
+            is_2d: current.is_2d && other.is_2d,
+        },
+    );
     rv.set(args.this().into());
 }
 
@@ -1766,24 +1800,17 @@ fn copied_dom_matrix<'s>(
     source: v8::Local<'s, v8::Object>,
 ) -> v8::Local<'s, v8::Object> {
     let matrix = build_dom_matrix_identity_object(scope);
-    let components = dom_matrix_components(scope, source);
-    set_dom_matrix_components(scope, matrix, components);
+    let value = dom_matrix_value(scope, source);
+    set_dom_matrix_value(scope, matrix, value);
     matrix
 }
 
-fn dom_matrix_argument_components<'s>(
+fn dom_matrix_argument_value<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     args: &v8::FunctionCallbackArguments<'s>,
     index: i32,
-) -> Option<DomMatrixComponents> {
-    if index >= args.length() || args.get(index).is_undefined() {
-        return Some(DomMatrixComponents::identity());
-    }
-    let matrix = build_dom_matrix_identity_object(scope);
-    if !apply_dom_matrix_init(scope, matrix, args.get(index)) {
-        return None;
-    }
-    Some(dom_matrix_components(scope, matrix))
+) -> Option<DomMatrixValue> {
+    dom_matrix_init_arg(scope, args, index, "DOMMatrix")
 }
 
 fn dom_matrix_translate_args<'s>(
@@ -1845,8 +1872,15 @@ fn apply_dom_matrix_translate<'s>(
     matrix: v8::Local<'s, v8::Object>,
     (tx, ty, tz): (f64, f64, f64),
 ) {
-    let components = dom_matrix_components(scope, matrix).translated(tx, ty, tz);
-    set_dom_matrix_components(scope, matrix, components);
+    let current = dom_matrix_value(scope, matrix);
+    set_dom_matrix_value(
+        scope,
+        matrix,
+        DomMatrixValue {
+            components: current.components.translated(tx, ty, tz),
+            is_2d: current.is_2d && tz == 0.0,
+        },
+    );
 }
 
 fn apply_dom_matrix_scale<'s>(
@@ -1854,9 +1888,17 @@ fn apply_dom_matrix_scale<'s>(
     matrix: v8::Local<'s, v8::Object>,
     (scale_x, scale_y, scale_z, origin_x, origin_y, origin_z): (f64, f64, f64, f64, f64, f64),
 ) {
-    let components = dom_matrix_components(scope, matrix)
-        .scaled_with_origin(scale_x, scale_y, scale_z, origin_x, origin_y, origin_z);
-    set_dom_matrix_components(scope, matrix, components);
+    let current = dom_matrix_value(scope, matrix);
+    set_dom_matrix_value(
+        scope,
+        matrix,
+        DomMatrixValue {
+            components: current
+                .components
+                .scaled_with_origin(scale_x, scale_y, scale_z, origin_x, origin_y, origin_z),
+            is_2d: current.is_2d && scale_z == 1.0 && origin_z == 0.0,
+        },
+    );
 }
 
 fn apply_dom_matrix_scale_2d<'s>(
@@ -1865,8 +1907,15 @@ fn apply_dom_matrix_scale_2d<'s>(
     scale_x: f64,
     scale_y: f64,
 ) {
-    let components = dom_matrix_components(scope, matrix).scaled_2d(scale_x, scale_y);
-    set_dom_matrix_components(scope, matrix, components);
+    let current = dom_matrix_value(scope, matrix);
+    set_dom_matrix_value(
+        scope,
+        matrix,
+        DomMatrixValue {
+            components: current.components.scaled_2d(scale_x, scale_y),
+            is_2d: current.is_2d,
+        },
+    );
 }
 
 fn apply_dom_matrix_rotate<'s>(
@@ -1874,8 +1923,15 @@ fn apply_dom_matrix_rotate<'s>(
     matrix: v8::Local<'s, v8::Object>,
     (rot_x, rot_y, rot_z): (f64, f64, f64),
 ) {
-    let components = dom_matrix_components(scope, matrix).rotated(rot_x, rot_y, rot_z);
-    set_dom_matrix_components(scope, matrix, components);
+    let current = dom_matrix_value(scope, matrix);
+    set_dom_matrix_value(
+        scope,
+        matrix,
+        DomMatrixValue {
+            components: current.components.rotated(rot_x, rot_y, rot_z),
+            is_2d: current.is_2d && rot_x == 0.0 && rot_y == 0.0,
+        },
+    );
 }
 
 fn apply_dom_matrix_rotate_z<'s>(
@@ -1883,8 +1939,15 @@ fn apply_dom_matrix_rotate_z<'s>(
     matrix: v8::Local<'s, v8::Object>,
     degrees: f64,
 ) {
-    let components = dom_matrix_components(scope, matrix).rotated_z(degrees);
-    set_dom_matrix_components(scope, matrix, components);
+    let current = dom_matrix_value(scope, matrix);
+    set_dom_matrix_value(
+        scope,
+        matrix,
+        DomMatrixValue {
+            components: current.components.rotated_z(degrees),
+            is_2d: current.is_2d,
+        },
+    );
 }
 
 fn apply_dom_matrix_rotate_axis_angle<'s>(
@@ -1895,8 +1958,15 @@ fn apply_dom_matrix_rotate_axis_angle<'s>(
     z: f64,
     degrees: f64,
 ) {
-    let components = dom_matrix_components(scope, matrix).rotated_axis_angle(x, y, z, degrees);
-    set_dom_matrix_components(scope, matrix, components);
+    let current = dom_matrix_value(scope, matrix);
+    set_dom_matrix_value(
+        scope,
+        matrix,
+        DomMatrixValue {
+            components: current.components.rotated_axis_angle(x, y, z, degrees),
+            is_2d: current.is_2d && x == 0.0 && y == 0.0,
+        },
+    );
 }
 
 fn apply_dom_matrix_skew_x<'s>(
@@ -1904,8 +1974,15 @@ fn apply_dom_matrix_skew_x<'s>(
     matrix: v8::Local<'s, v8::Object>,
     degrees: f64,
 ) {
-    let components = dom_matrix_components(scope, matrix).skewed_x(degrees);
-    set_dom_matrix_components(scope, matrix, components);
+    let current = dom_matrix_value(scope, matrix);
+    set_dom_matrix_value(
+        scope,
+        matrix,
+        DomMatrixValue {
+            components: current.components.skewed_x(degrees),
+            is_2d: current.is_2d,
+        },
+    );
 }
 
 fn apply_dom_matrix_skew_y<'s>(
@@ -1913,17 +1990,31 @@ fn apply_dom_matrix_skew_y<'s>(
     matrix: v8::Local<'s, v8::Object>,
     degrees: f64,
 ) {
-    let components = dom_matrix_components(scope, matrix).skewed_y(degrees);
-    set_dom_matrix_components(scope, matrix, components);
+    let current = dom_matrix_value(scope, matrix);
+    set_dom_matrix_value(
+        scope,
+        matrix,
+        DomMatrixValue {
+            components: current.components.skewed_y(degrees),
+            is_2d: current.is_2d,
+        },
+    );
 }
 
 fn apply_dom_matrix_multiply<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     matrix: v8::Local<'s, v8::Object>,
-    other: DomMatrixComponents,
+    other: DomMatrixValue,
 ) {
-    let current = dom_matrix_components(scope, matrix);
-    set_dom_matrix_components(scope, matrix, current.multiply(other));
+    let current = dom_matrix_value(scope, matrix);
+    set_dom_matrix_value(
+        scope,
+        matrix,
+        DomMatrixValue {
+            components: current.components.multiply(other.components),
+            is_2d: current.is_2d && other.is_2d,
+        },
+    );
 }
 
 #[derive(Clone, Copy)]
@@ -1932,11 +2023,11 @@ enum DomMatrixTypedArrayKind {
     Float64,
 }
 
-fn dom_matrix_components_from_typed_array<'s>(
+fn dom_matrix_value_from_typed_array<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     value: v8::Local<'s, v8::Value>,
     kind: DomMatrixTypedArrayKind,
-) -> Option<DomMatrixComponents> {
+) -> Option<DomMatrixValue> {
     let expected = match kind {
         DomMatrixTypedArrayKind::Float32 => v8::Local::<v8::Float32Array>::try_from(value).is_ok(),
         DomMatrixTypedArrayKind::Float64 => v8::Local::<v8::Float64Array>::try_from(value).is_ok(),
@@ -1976,13 +2067,17 @@ fn dom_matrix_components_from_typed_array<'s>(
         };
         values.push(value);
     }
-    dom_matrix_components_from_values(&values)
+    let components = dom_matrix_components_from_values(&values)?;
+    Some(DomMatrixValue {
+        components,
+        is_2d: length == 6,
+    })
 }
 
-fn dom_matrix_components_from_sequence_array<'s>(
+fn dom_matrix_value_from_sequence_array<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     array: v8::Local<'s, v8::Array>,
-) -> Option<DomMatrixComponents> {
+) -> Option<DomMatrixValue> {
     let length = array.length();
     if length != 6 && length != DOM_MATRIX_TYPED_ARRAY_LENGTH as u32 {
         throw_type_error(scope, "DOMMatrix sequence length must be 6 or 16.");
@@ -1999,7 +2094,11 @@ fn dom_matrix_components_from_sequence_array<'s>(
         values.push(value);
     }
 
-    dom_matrix_components_from_values(&values)
+    let components = dom_matrix_components_from_values(&values)?;
+    Some(DomMatrixValue {
+        components,
+        is_2d: length == 6,
+    })
 }
 
 fn dom_matrix_components<'s>(
@@ -2026,6 +2125,16 @@ fn dom_matrix_components<'s>(
     }
 }
 
+fn dom_matrix_value<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    object: v8::Local<'s, v8::Object>,
+) -> DomMatrixValue {
+    DomMatrixValue {
+        components: dom_matrix_components(scope, object),
+        is_2d: dom_matrix_is_2d(scope, object),
+    }
+}
+
 fn dom_matrix_slot<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     object: v8::Local<'s, v8::Object>,
@@ -2042,6 +2151,16 @@ fn set_dom_matrix_components<'s>(
     object: v8::Local<'s, v8::Object>,
     components: DomMatrixComponents,
 ) {
+    let is_2d = dom_matrix_is_2d(scope, object) && components.is_2d();
+    set_dom_matrix_value(scope, object, DomMatrixValue { components, is_2d });
+}
+
+fn set_dom_matrix_value<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    object: v8::Local<'s, v8::Object>,
+    value: DomMatrixValue,
+) {
+    let components = value.components;
     for (slot, value) in [
         (DOM_MATRIX_M11_SLOT, components.m11),
         (DOM_MATRIX_M12_SLOT, components.m12),
@@ -2062,6 +2181,7 @@ fn set_dom_matrix_components<'s>(
     ] {
         set_dom_matrix_slot(scope, object, slot, value);
     }
+    set_dom_matrix_is_2d(scope, object, value.is_2d);
 }
 
 fn set_dom_matrix_slot<'s>(
@@ -2071,6 +2191,30 @@ fn set_dom_matrix_slot<'s>(
     value: f64,
 ) {
     set_private_value(scope, object, slot, v8::Number::new(scope, value).into());
+}
+
+fn set_dom_matrix_is_2d<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    object: v8::Local<'s, v8::Object>,
+    is_2d: bool,
+) {
+    set_private_value(
+        scope,
+        object,
+        DOM_MATRIX_IS_2D_SLOT,
+        v8::Boolean::new(scope, is_2d).into(),
+    );
+}
+
+fn dom_matrix_attribute_value_preserves_2d(slot: &'static str, value: f64) -> bool {
+    match slot {
+        DOM_MATRIX_M13_SLOT | DOM_MATRIX_M14_SLOT | DOM_MATRIX_M23_SLOT | DOM_MATRIX_M24_SLOT
+        | DOM_MATRIX_M31_SLOT | DOM_MATRIX_M32_SLOT | DOM_MATRIX_M34_SLOT | DOM_MATRIX_M43_SLOT => {
+            value == 0.0
+        }
+        DOM_MATRIX_M33_SLOT | DOM_MATRIX_M44_SLOT => value == 1.0,
+        _ => true,
+    }
 }
 
 fn dom_matrix_array_values(
@@ -2142,40 +2286,35 @@ fn apply_dom_matrix_init<'s>(
         );
     }
     if v8::Local::<v8::Float32Array>::try_from(init).is_ok() {
-        if let Some(components) =
-            dom_matrix_components_from_typed_array(scope, init, DomMatrixTypedArrayKind::Float32)
+        if let Some(value) =
+            dom_matrix_value_from_typed_array(scope, init, DomMatrixTypedArrayKind::Float32)
         {
-            set_dom_matrix_components(scope, matrix, components);
+            set_dom_matrix_value(scope, matrix, value);
+            return true;
         }
-        return true;
+        return false;
     }
     if v8::Local::<v8::Float64Array>::try_from(init).is_ok() {
-        if let Some(components) =
-            dom_matrix_components_from_typed_array(scope, init, DomMatrixTypedArrayKind::Float64)
+        if let Some(value) =
+            dom_matrix_value_from_typed_array(scope, init, DomMatrixTypedArrayKind::Float64)
         {
-            set_dom_matrix_components(scope, matrix, components);
+            set_dom_matrix_value(scope, matrix, value);
+            return true;
         }
-        return true;
+        return false;
     }
     if let Ok(array) = v8::Local::<v8::Array>::try_from(init) {
-        let Some(components) = dom_matrix_components_from_sequence_array(scope, array) else {
+        let Some(value) = dom_matrix_value_from_sequence_array(scope, array) else {
             return false;
         };
-        set_dom_matrix_components(scope, matrix, components);
+        set_dom_matrix_value(scope, matrix, value);
         return true;
     }
-    if let Ok(object) = v8::Local::<v8::Object>::try_from(init) {
-        for attribute in DOM_MATRIX_MUTABLE_ATTRIBUTES {
-            if let DomMatrixAttributeKind::Number(slot) = attribute.kind {
-                match property_number(scope, object, attribute.name, "DOMMatrixInit") {
-                    Some(Some(value)) => {
-                        set_dom_matrix_slot(scope, matrix, slot, value);
-                    }
-                    Some(None) => {}
-                    None => return false,
-                }
-            }
-        }
+    if init.is_object() {
+        let Some(value) = dom_matrix_init_value(scope, init, "DOMMatrix", 1) else {
+            return false;
+        };
+        set_dom_matrix_value(scope, matrix, value);
         return true;
     }
 
@@ -2200,7 +2339,7 @@ fn apply_dom_matrix_transform_list_string<'s>(
     matrix: v8::Local<'s, v8::Object>,
     text: &str,
 ) -> bool {
-    let Some(components) = parse_dom_matrix_value(text) else {
+    let Some((components, is_2d)) = parse_dom_matrix_value_with_dimension(text) else {
         throw_dom_exception(
             scope,
             "SyntaxError",
@@ -2209,7 +2348,7 @@ fn apply_dom_matrix_transform_list_string<'s>(
         );
         return false;
     };
-    set_dom_matrix_components(scope, matrix, components);
+    set_dom_matrix_value(scope, matrix, DomMatrixValue { components, is_2d });
     true
 }
 
@@ -2226,7 +2365,9 @@ fn dom_matrix_is_2d<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     object: v8::Local<'s, v8::Object>,
 ) -> bool {
-    dom_matrix_components(scope, object).is_2d()
+    get_private_value(scope, object, DOM_MATRIX_IS_2D_SLOT)
+        .map(|value| value.boolean_value(scope))
+        .unwrap_or_else(|| dom_matrix_components(scope, object).is_2d())
 }
 
 fn dom_matrix_is_identity<'s>(
@@ -2240,7 +2381,9 @@ fn dom_matrix_css_text<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     object: v8::Local<'s, v8::Object>,
 ) -> Option<String> {
-    let Some(css_text) = dom_matrix_components(scope, object).css_text() else {
+    let Some(css_text) = dom_matrix_components(scope, object)
+        .css_text_with_dimension(dom_matrix_is_2d(scope, object))
+    else {
         throw_dom_exception(
             scope,
             "InvalidStateError",
@@ -2298,20 +2441,6 @@ pub(super) fn dom_point_init_value<'s>(
             None
         }
     }
-}
-
-fn property_number<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    object: v8::Local<'s, v8::Object>,
-    name: &'static str,
-    prefix: &'static str,
-) -> Option<Option<f64>> {
-    let key = v8_string(scope, name)?;
-    let value = object.get(scope, key.into())?;
-    if value.is_undefined() {
-        return Some(None);
-    }
-    geometry_number_value(scope, value, webidl::Context::member(prefix, name)).map(Some)
 }
 
 fn geometry_number_value<'s>(

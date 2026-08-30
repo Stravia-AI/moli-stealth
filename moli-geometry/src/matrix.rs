@@ -389,7 +389,11 @@ impl DomMatrixComponents {
     }
 
     pub fn css_text(self) -> Option<String> {
-        if self.is_2d() {
+        self.css_text_with_dimension(self.is_2d())
+    }
+
+    pub fn css_text_with_dimension(self, is_2d: bool) -> Option<String> {
+        if is_2d {
             let values = [self.m11, self.m12, self.m21, self.m22, self.m41, self.m42];
             if !values.iter().all(|value| value.is_finite()) {
                 return None;
