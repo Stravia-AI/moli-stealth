@@ -763,7 +763,14 @@ impl DocumentRuntime {
             .node(target)
             .map(|node| node.child_ids(self.dom_host().dom()).collect::<Vec<_>>())
             .unwrap_or_default();
-        if html.is_empty() && existing_children.is_empty() {
+        let empty_html_context_creates_document_wrappers = self
+            .dom_host()
+            .node(context)
+            .is_some_and(|node| node.is_html_element_named("html"));
+        if html.is_empty()
+            && existing_children.is_empty()
+            && !empty_html_context_creates_document_wrappers
+        {
             return false;
         }
         let Some(fragment) = self.build_fragment_from_html(

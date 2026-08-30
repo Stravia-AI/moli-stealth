@@ -7664,6 +7664,27 @@ fn document_element_inner_html_fragment_preserves_html_context_wrappers() {
 }
 
 #[test]
+fn empty_detached_html_inner_html_creates_head_and_body() {
+    let mut vm = new_storage_test_vm("https://example.com/");
+
+    let result = vm
+        .eval(
+            r#"
+            (() => {
+              const html = document.createElement("html");
+              html.innerHTML = "";
+              return Array.from(html.childNodes)
+                .map(node => node.nodeName)
+                .join("|");
+            })()
+            "#,
+        )
+        .expect("empty detached HTML innerHTML probe should evaluate");
+
+    assert_eq!(result, "HEAD|BODY");
+}
+
+#[test]
 fn child_window_text_replacement_setters_dispatch_disconnected_callbacks() {
     let mut vm = new_storage_test_vm("https://example.com/");
 
