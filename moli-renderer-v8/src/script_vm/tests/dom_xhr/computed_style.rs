@@ -11874,6 +11874,48 @@ fn computed_style_uses_stylo_owned_extended_longhands() {
 }
 
 #[test]
+fn computed_font_variant_serializes_from_computed_longhands() {
+    let mut vm = new_parsed_test_vm(
+        "https://font-variant-computed-shorthand.test/",
+        r#"<html><head><style>
+          #target { font-variant: small-caps; }
+        </style></head><body>
+          <div id="target"></div>
+          <svg><text id="svg-target" font-variant="small-caps"></text></svg>
+        </body></html>"#,
+    );
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const target = document.getElementById('target');
+  const computed = getComputedStyle(target);
+  const values = [computed.fontVariant];
+
+  target.style.fontVariant = 'common-ligatures small-caps oldstyle-nums';
+  values.push(computed.fontVariant);
+  target.style.fontVariant = 'none';
+  values.push(computed.fontVariant);
+  target.style.fontVariant = 'normal';
+  target.style.fontVariantNumeric = 'tabular-nums diagonal-fractions';
+  values.push(computed.fontVariant);
+  target.style.fontVariantNumeric = 'normal';
+  values.push(computed.fontVariant);
+  values.push(getComputedStyle(document.getElementById('svg-target')).fontVariant);
+  return values.join('|');
+})()
+"#,
+        )
+        .expect("computed font-variant shorthand should evaluate");
+
+    assert_eq!(
+        result,
+        "small-caps|common-ligatures small-caps oldstyle-nums|none|tabular-nums diagonal-fractions|normal|small-caps"
+    );
+}
+
+#[test]
 fn computed_style_resolves_zoom() {
     let mut vm = new_parsed_test_vm(
         "https://css-zoom-computed.test/",

@@ -2374,6 +2374,9 @@ fn computed_style_property_value_after_style_update(
     if property == "text-emphasis" {
         return computed_text_emphasis_shorthand_value(runtime, handle, context);
     }
+    if property == "font-variant" {
+        return computed_font_variant_shorthand_value(runtime, handle, resolution);
+    }
     if property == "border" {
         return computed_border_shorthand_value(runtime, handle, context);
     }
@@ -2628,6 +2631,18 @@ fn computed_text_emphasis_shorthand_value(
     let color =
         computed_style_property_value_with_context(runtime, handle, "text-emphasis-color", context);
     format!("{style} {color}")
+}
+
+fn computed_font_variant_shorthand_value(
+    runtime: &JsContextHost,
+    handle: DomHandle,
+    resolution: StyleResolutionContext<'_>,
+) -> String {
+    let values = font_variant_longhands()
+        .iter()
+        .map(|property| resolution.computed_property(runtime, handle, property))
+        .collect::<Vec<_>>();
+    serialize_font_variant_shorthand_values(&values).unwrap_or_default()
 }
 
 fn computed_webkit_text_stroke_shorthand_value(
