@@ -4,7 +4,11 @@
 //! operation, but it delegates the actual V8 call to a renderer adapter. It
 //! must not grow a hidden invocation, scheduler, or browser-owner policy.
 
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+};
 
 #[test]
 fn callback_kernel_raw_function_boundary_is_frozen() {
@@ -24,7 +28,18 @@ fn callback_kernel_contains_no_direct_v8_call() {
 }
 
 fn production_source_inventory(count: fn(&str) -> usize) -> BTreeMap<String, usize> {
-    let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    // Do not embed CARGO_MANIFEST_DIR: a shared target directory may reuse this
+    // binary across worktrees after its build-time worktree has been removed.
+    // Nextest starts package-selected runs from the package root and workspace
+    // runs from the workspace root, so resolve both shapes at runtime.
+    let current_dir = std::env::current_dir()
+        .expect("callback crate package or workspace directory should be available");
+    let source_root = callback_source_root_from(&current_dir).unwrap_or_else(|| {
+        panic!(
+            "callback crate source directory should be discoverable from {}",
+            current_dir.display()
+        )
+    });
     fs::read_dir(&source_root)
         .expect("callback crate source directory should exist")
         .map(|entry| entry.expect("callback crate source entry should be readable"))
@@ -43,6 +58,39 @@ fn production_source_inventory(count: fn(&str) -> usize) -> BTreeMap<String, usi
             (matches > 0).then(|| (file_name.to_owned(), matches))
         })
         .collect()
+}
+
+fn callback_source_root_from(start: &Path) -> Option<PathBuf> {
+    start.ancestors().find_map(|ancestor| {
+        [
+            ancestor.join("src"),
+            ancestor.join("moli-webidl-callback").join("src"),
+        ]
+        .into_iter()
+        .find(|candidate| {
+            candidate.join("lib.rs").is_file() && candidate.join("invocation.rs").is_file()
+        })
+    })
+}
+
+#[test]
+fn callback_source_root_resolves_package_and_workspace_invocations() {
+    let current_dir = std::env::current_dir()
+        .expect("callback crate package or workspace directory should be available");
+    let source_root = callback_source_root_from(&current_dir)
+        .expect("callback crate source directory should be discoverable");
+    let package_root = source_root
+        .parent()
+        .expect("callback source directory should have a package root");
+    let workspace_root = package_root
+        .parent()
+        .expect("callback package directory should have a workspace root");
+
+    assert_eq!(
+        callback_source_root_from(package_root),
+        Some(source_root.clone())
+    );
+    assert_eq!(callback_source_root_from(workspace_root), Some(source_root));
 }
 
 fn compact_source(source: &str) -> String {
