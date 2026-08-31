@@ -10,7 +10,6 @@ use moli_webapi_declare::WebApiObject;
 use super::{
     document_runtime::DomHandle,
     native_bridge::JsContextHost,
-    reflector::ReflectorId,
     util::{callback_arg_string, serialize_v8_array, v8_string, v8str},
 };
 use crate::{context_bootstrap::CHILD_BROWSING_CONTEXT_HANDLE_SLOT, util::get_private_value};
@@ -164,19 +163,8 @@ fn callback_value_dom_handle(
         return default_document.then(|| host.document_handle());
     }
 
-    if let Ok(object) = v8::Local::<v8::Object>::try_from(value)
-        && let Some(handle_value) = object.get_internal_field(scope, 1)
-        && let Ok(handle_value) = v8::Local::<v8::Value>::try_from(handle_value)
-        && let Some(handle_number) = handle_value.number_value(scope)
-        && handle_number.is_finite()
-        && handle_number.fract() == 0.0
-        && handle_number > 0.0
-        && let Some(handle) =
-            host.resolve_node_wrapper_handle(ReflectorId::from_raw(handle_number as u64))
-    {
-        return Some(handle);
-    }
-    None
+    let handle = crate::native_bridge::callback_value_dom_handle(scope, value)?;
+    host.dom_host().node(handle).map(|_| handle)
 }
 
 fn callback_arg_dom_handle(

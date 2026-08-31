@@ -1,6 +1,4 @@
-use super::super::{
-    BridgeHandle, ComputedStyleDescriptor, DomTokenListKind, JsContextHost, ReflectorId,
-};
+use super::super::{BridgeHandle, ComputedStyleDescriptor, DomTokenListKind, JsContextHost};
 use super::NativeDomBridge;
 use crate::document_runtime::DomHandle;
 
@@ -155,21 +153,7 @@ impl NativeDomBridge {
         self.wrap_bridge_handle(
             scope,
             runtime_ptr,
-            BridgeHandle::ComputedStyle(handle, descriptor),
+            BridgeHandle::ComputedStyle(handle, std::rc::Rc::new(descriptor)),
         )
-    }
-
-    pub(crate) fn resolve_node_handle(&self, reflector_id: ReflectorId) -> Option<DomHandle> {
-        match self.bridge_handle(reflector_id) {
-            Some(BridgeHandle::Node(handle)) => Some(handle),
-            Some(
-                BridgeHandle::Window
-                | BridgeHandle::ClassList(_, _)
-                | BridgeHandle::Dataset(_)
-                | BridgeHandle::Style(_)
-                | BridgeHandle::ComputedStyle(_, _),
-            )
-            | None => None,
-        }
     }
 }

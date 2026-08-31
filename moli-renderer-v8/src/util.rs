@@ -338,7 +338,7 @@ pub(super) fn call_global_bridge_method<'s>(
 /// The returned pointer is valid for the duration of the V8 callback because the
 /// owning ScriptVm page state keeps a Rust-side `Rc`, and each live V8 context
 /// owns an additional bridge-ref token for the ref-count stored in the native
-/// bridge's second internal field. All document V8 callbacks run on the render
+/// bridge object. All document V8 callbacks run on the render
 /// owner thread, so there is no data race. Callers must not hold a Rust `&mut`
 /// reference across a V8 API call that could trigger re-entrant JavaScript
 /// execution.

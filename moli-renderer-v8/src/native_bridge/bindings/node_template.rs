@@ -13,7 +13,7 @@ pub(super) fn build_node_wrapper_template<'s, 'i>(
     descriptor: &BridgeDescriptor,
 ) -> v8::Local<'s, v8::ObjectTemplate> {
     let template = v8::ObjectTemplate::new(scope);
-    let _ = template.set_internal_field_count(2);
+    let _ = template.set_internal_field_count(1);
 
     node_accessors::install_node_accessors(scope, template, descriptor);
     document_accessors::install_document_accessors(scope, template, descriptor);

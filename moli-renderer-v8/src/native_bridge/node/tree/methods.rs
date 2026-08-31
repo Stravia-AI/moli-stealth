@@ -127,8 +127,8 @@ pub(in crate::native_bridge) fn node_compare_document_position_callback<'s>(
     // We must NOT take this branch for arbitrary JS objects (`{}`, Arrays,
     // etc.) — WebIDL requires throwing TypeError when the argument isn't a
     // Node. is_node_like_object below is the discriminator: it accepts
-    // either a live Node wrapper (internal field 0 == Node-shaped
-    // BridgeHandle) or a detached-doc node wrapper (has the
+    // either a live Node wrapper (one internal reflector-id field) or a
+    // detached-doc node wrapper (has the
     // __moliDetachedState private slot, which only detached node
     // builders set).
     let other_value = args.get(0);
@@ -164,7 +164,7 @@ fn is_node_like_object<'s>(
     object: v8::Local<'s, v8::Object>,
 ) -> bool {
     use crate::util::get_private_object;
-    // Live wrapper: internal field 0 is a Node-shaped BridgeHandle. The
+    // Live wrapper: its sole internal field is a reflector identity. The
     // existing helper distinguishes Node wrappers from Window / ClassList /
     // Style / etc., so we only need to know that it succeeds.
     if node_runtime_and_handle_from_object(scope, object).is_ok() {

@@ -7,6 +7,10 @@ pub(super) fn build_window_wrapper_template<'s, 'i>(
     scope: &mut v8::PinScope<'s, 'i, ()>,
 ) -> v8::Local<'s, v8::ObjectTemplate> {
     let template = v8::ObjectTemplate::new(scope);
+    // Unlike the high-cardinality Node wrappers, Window wrappers retain an
+    // object-local host pointer for cross-realm WebIDL brand checks. Field 1
+    // distinguishes a reflected Window (positive id) from a synthetic shell
+    // (zero).
     let _ = template.set_internal_field_count(2);
     // Synthetic same-origin Window wrappers (for example the lightweight
     // popup shell) are concrete Window objects too. They cannot inherit the

@@ -37,7 +37,6 @@ use super::{
         enter_active_child_window_scope, enter_top_level_lightweight_popup_scope,
         node_runtime_and_handle_from_object, throw_dom_exception,
     },
-    reflector::ReflectorId,
     script_provenance::CompiledStringProvenance,
     util::{
         callback_arg_string, context_host_from_global_bridge, context_host_ptr_from_global_bridge,
@@ -1982,6 +1981,9 @@ fn event_target_handle_from_this<'s>(
     if this.strict_equals(global.into()) {
         return Some(EventTargetHandle::Window);
     }
+    if context_host_ptr_from_window_object(scope, this) == Some(host_ptr) {
+        return Some(EventTargetHandle::Window);
+    }
 
     if let Some(handle) =
         crate::native_bridge::document::detached_native_handle_for_runtime(scope, host_ptr, this)
@@ -1995,17 +1997,7 @@ fn event_target_handle_from_this<'s>(
         return Some(EventTargetHandle::Node(handle));
     }
 
-    let handle_value = this.get_internal_field(scope, 1)?;
-    let handle_value = v8::Local::<v8::Value>::try_from(handle_value).ok()?;
-    let handle_number = handle_value.number_value(scope)?;
-    if !handle_number.is_finite() || handle_number.fract() != 0.0 || handle_number <= 0.0 {
-        return None;
-    }
-
-    let reflector_id = ReflectorId::from_raw(handle_number as u64);
-    let handle = host.resolve_node_wrapper_handle(reflector_id)?;
-    host.dom_host().node(handle)?;
-    Some(EventTargetHandle::Node(handle))
+    None
 }
 
 fn child_window_handle<'s>(

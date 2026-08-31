@@ -900,7 +900,7 @@ pub(in crate::native_bridge) fn build_style_wrapper_template<'s, 'i>(
     scope: &mut v8::PinScope<'s, 'i, ()>,
 ) -> v8::Local<'s, v8::ObjectTemplate> {
     let template = v8::ObjectTemplate::new(scope);
-    let _ = template.set_internal_field_count(2);
+    let _ = template.set_internal_field_count(1);
     template.set_indexed_property_handler(
         v8::IndexedPropertyHandlerConfiguration::new()
             .getter(style_indexed_getter)

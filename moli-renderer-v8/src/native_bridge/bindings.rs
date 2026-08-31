@@ -239,16 +239,32 @@ impl NativeBridgeBindings {
         let wrapper = template
             .new_instance(scope)
             .unwrap_or_else(|| panic!("failed to instantiate `{prototype_name}` wrapper"));
-        let host_external = v8::External::new(scope, host_ptr as *mut c_void);
-        assert!(
-            wrapper.set_internal_field(0, host_external.into()),
-            "`{prototype_name}` wrapper must expose its runtime field"
-        );
-        // Field 1 stores a reflector-backed identity id rather than the raw DomHandle.
-        assert!(
-            wrapper.set_internal_field(1, v8::Number::new(scope, reflector_id.raw() as f64).into()),
-            "`{prototype_name}` wrapper must expose its reflector identity field"
-        );
+        if matches!(wrapper_kind, WrapperKind::Window) {
+            // Window brand checks can cross realm boundaries, so the small
+            // number of Window wrappers retain their object-local host marker.
+            let host_external = v8::External::new(scope, host_ptr as *mut c_void);
+            assert!(
+                wrapper.set_internal_field(0, host_external.into()),
+                "Window wrapper must expose its runtime field"
+            );
+            assert!(
+                wrapper.set_internal_field(
+                    1,
+                    v8::Number::new(scope, reflector_id.raw() as f64).into(),
+                ),
+                "Window wrapper must expose its reflector identity field"
+            );
+        } else {
+            // The owning host is already installed in every live V8 context.
+            // High-cardinality DOM wrappers therefore keep only their identity.
+            assert!(
+                wrapper.set_internal_field(
+                    0,
+                    v8::Number::new(scope, reflector_id.raw() as f64).into(),
+                ),
+                "`{prototype_name}` wrapper must expose its reflector identity field"
+            );
+        }
         set_named_constructor_prototype(scope, wrapper, prototype_name);
         self.sync_wrapper_owner_realm_prototype(scope, host_ptr, &handle, wrapper);
         if matches!(wrapper_kind, WrapperKind::Node) {
@@ -325,7 +341,7 @@ impl NativeBridgeBindings {
         );
         assert!(
             wrapper.set_internal_field(1, v8::Number::new(scope, 0.0).into()),
-            "synthetic Window wrapper must expose its identity field"
+            "synthetic Window wrapper must expose its shell marker"
         );
         set_named_constructor_prototype(scope, wrapper, "Window");
         wrapper

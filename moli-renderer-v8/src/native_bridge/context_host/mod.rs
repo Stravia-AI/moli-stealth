@@ -26,7 +26,6 @@ use crate::{
         native_bridge::{bindings::NativeBridgeBindings, element::ClientRect},
         observer_runtime::{ObserverStore, ObserverStoreAccessToken},
         page_task_queue::RendererResourceCompletionSender,
-        reflector::ReflectorId,
         renderer_resource_scheduler::RendererResourceScheduler,
         runtime::{
             RendererBrowserContextRuntime, RendererDocumentLifecycleJournalHandle,

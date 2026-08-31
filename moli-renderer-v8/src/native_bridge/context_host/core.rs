@@ -2347,13 +2347,6 @@ impl JsContextHost {
         &mut self.text_codecs
     }
 
-    pub(crate) fn resolve_node_wrapper_handle(
-        &self,
-        reflector_id: ReflectorId,
-    ) -> Option<DomHandle> {
-        self.bridge.resolve_node_handle(reflector_id)
-    }
-
     pub(crate) fn renderer_backend_node_id_for_live_handle(
         &mut self,
         handle: DomHandle,
