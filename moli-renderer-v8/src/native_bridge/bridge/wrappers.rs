@@ -23,7 +23,7 @@ impl NativeDomBridge {
     ) -> Option<v8::Local<'s, v8::Object>> {
         let reflector_id = self
             .identity
-            .existing_reflector_id(BridgeHandle::Node(handle))?;
+            .existing_reflector_id(&BridgeHandle::Node(handle))?;
         self.identity.cached_wrapper(scope, reflector_id)
     }
 
@@ -49,7 +49,7 @@ impl NativeDomBridge {
         host_ptr: *mut JsContextHost,
         handle: BridgeHandle,
     ) -> Option<v8::Local<'s, v8::Object>> {
-        let reflector_id = self.identity.reflector_id(handle.clone());
+        let reflector_id = self.identity.reflector_id(&handle);
         if let Some(wrapper) = self.identity.cached_wrapper(scope, reflector_id) {
             if !matches!(&handle, BridgeHandle::Window) {
                 self.bindings

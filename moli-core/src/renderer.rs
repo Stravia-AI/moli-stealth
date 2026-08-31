@@ -77,6 +77,4 @@ pub(crate) fn materialize_page_created_reply_with_side_effect(
 }
 
 #[cfg(test)]
-pub(crate) use moli_renderer_v8::ReflectorRegistry;
-#[cfg(test)]
 pub(crate) use moli_renderer_v8::{PageId, RendererPageTestingHandle, RendererPageView};

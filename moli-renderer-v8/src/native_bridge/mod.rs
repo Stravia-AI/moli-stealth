@@ -26,7 +26,6 @@ mod window;
 
 use super::{
     document_runtime::DomHandle,
-    reflector::ReflectorId,
     util::{callback_arg_string, v8_string},
 };
 
@@ -36,7 +35,7 @@ pub(crate) use history_queue::{
     PendingHistoryTraversalAction, PendingNavigationApiTaskAction, PendingNavigationFinishedResult,
     PendingNavigationResult,
 };
-use identity::{BridgeHandle, BridgeIdentityStore, DomTokenListKind};
+use identity::{BridgeHandle, BridgeIdentityStore, DomTokenListKind, ReflectorId};
 use identity::{CollectionKind, LiveCollectionDescriptor, LiveCollectionQueryKind};
 pub(crate) use identity::{
     ComputedStyleDescriptor, ComputedStylePseudoKey, ComputedStyleTargetKey,

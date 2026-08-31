@@ -6,12 +6,39 @@ use std::{
     rc::Rc,
 };
 
-use super::super::{
-    document_runtime::DomHandle,
-    reflector::{DomPtr, ReflectorId, ReflectorRegistry},
-};
+use indexmap::IndexSet;
+
+use super::super::document_runtime::DomHandle;
 use super::element::{control_label_handles, form_control_elements};
 use super::{JsContextHost, RuntimeObservableContextToken};
+use dense_reflector_map::DenseReflectorMap;
+
+mod dense_reflector_map;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) struct ReflectorId(u64);
+
+impl ReflectorId {
+    pub(super) fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    fn from_index(index: usize) -> Self {
+        let raw = u64::try_from(index)
+            .ok()
+            .and_then(|index| index.checked_add(1))
+            .expect("reflector id overflow");
+        Self(raw)
+    }
+
+    fn index(self) -> Option<usize> {
+        usize::try_from(self.0.checked_sub(1)?).ok()
+    }
+
+    pub(super) fn raw(self) -> u64 {
+        self.0
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) enum BridgeHandle {
@@ -394,105 +421,6 @@ struct BridgeContextWrapperCache {
     live_collection_wrappers: HashMap<LiveCollectionDescriptor, BridgeCachedWrapper>,
 }
 
-const MAX_DENSE_REFLECTOR_ID_GAP: u64 = 64;
-
-#[derive(Debug)]
-struct DenseReflectorMap<V> {
-    dense_base: Option<u64>,
-    dense: Vec<Option<V>>,
-    sparse: HashMap<ReflectorId, V>,
-}
-
-impl<V> Default for DenseReflectorMap<V> {
-    fn default() -> Self {
-        Self {
-            dense_base: None,
-            dense: Vec::new(),
-            sparse: HashMap::new(),
-        }
-    }
-}
-
-impl<V> DenseReflectorMap<V> {
-    fn dense_index(&self, id: ReflectorId) -> Option<usize> {
-        let offset = id.raw().checked_sub(self.dense_base?)?;
-        let index = usize::try_from(offset).ok()?;
-        (index < self.dense.len()).then_some(index)
-    }
-
-    fn get(&self, id: &ReflectorId) -> Option<&V> {
-        self.dense_index(*id)
-            .and_then(|index| self.dense[index].as_ref())
-            .or_else(|| self.sparse.get(id))
-    }
-
-    fn insert(&mut self, id: ReflectorId, value: V) -> Option<V> {
-        let raw = id.raw();
-        let base = self.dense_base.get_or_insert(raw);
-        let dense_end = base.saturating_add(self.dense.len() as u64);
-        if raw >= *base && raw <= dense_end.saturating_add(MAX_DENSE_REFLECTOR_ID_GAP) {
-            let index = usize::try_from(raw - *base).expect("dense reflector index overflow");
-            if index >= self.dense.len() {
-                self.dense.resize_with(index + 1, || None);
-            }
-            let sparse = self.sparse.remove(&id);
-            return self.dense[index].replace(value).or(sparse);
-        }
-        self.sparse.insert(id, value)
-    }
-
-    fn clear(&mut self) {
-        self.dense_base = None;
-        self.dense.clear();
-        self.sparse.clear();
-    }
-
-    fn retain(&mut self, mut keep: impl FnMut(ReflectorId, &mut V) -> bool) {
-        if let Some(base) = self.dense_base {
-            for (index, slot) in self.dense.iter_mut().enumerate() {
-                let Some(value) = slot.as_mut() else {
-                    continue;
-                };
-                let raw = base
-                    .checked_add(index as u64)
-                    .expect("dense reflector id overflow");
-                if !keep(ReflectorId::from_raw(raw), value) {
-                    *slot = None;
-                }
-            }
-            if let Some(first_live) = self.dense.iter().position(Option::is_some) {
-                if first_live != 0 {
-                    self.dense.drain(..first_live);
-                    self.dense_base = Some(
-                        base.checked_add(first_live as u64)
-                            .expect("dense reflector id overflow"),
-                    );
-                }
-                let retained_len = self
-                    .dense
-                    .iter()
-                    .rposition(Option::is_some)
-                    .map_or(0, |index| index + 1);
-                self.dense.truncate(retained_len);
-            } else {
-                self.dense.clear();
-                self.dense_base = None;
-            }
-        }
-        self.sparse.retain(|id, value| keep(*id, value));
-    }
-
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.dense.iter().flatten().count() + self.sparse.len()
-    }
-
-    #[cfg(test)]
-    fn values(&self) -> impl Iterator<Item = &V> {
-        self.dense.iter().flatten().chain(self.sparse.values())
-    }
-}
-
 #[derive(Debug)]
 struct SharedDefaultWorldWrapperCache;
 
@@ -607,7 +535,7 @@ pub(crate) fn clear_context_wrapper_cache_for_teardown(
 
 #[derive(Debug, Default)]
 pub(super) struct BridgeIdentityStore {
-    reflectors: ReflectorRegistry<BridgeHandle>,
+    reflector_handles: IndexSet<BridgeHandle>,
     live_collections: LiveCollectionStore,
     static_handle_collections: StaticHandleCollectionStore,
     default_world_wrapper_cache: Rc<RefCell<BridgeContextWrapperCache>>,
@@ -619,22 +547,26 @@ impl BridgeIdentityStore {
         let _ = context.set_slot(Rc::new(SharedDefaultWorldWrapperCache));
     }
 
-    fn reflector_id_for(&mut self, handle: BridgeHandle) -> ReflectorId {
-        self.reflectors.root(DomPtr::new(handle)).reflector_id()
+    pub(super) fn reflector_id(&mut self, handle: &BridgeHandle) -> ReflectorId {
+        if let Some(id) = self.existing_reflector_id(handle) {
+            return id;
+        }
+
+        let (index, inserted) = self.reflector_handles.insert_full(handle.clone());
+        debug_assert!(inserted);
+        ReflectorId::from_index(index)
     }
 
-    pub(super) fn reflector_id(&mut self, handle: BridgeHandle) -> ReflectorId {
-        self.reflector_id_for(handle)
-    }
-
-    pub(super) fn existing_reflector_id(&self, handle: BridgeHandle) -> Option<ReflectorId> {
-        self.reflectors
-            .existing(handle)
-            .map(|reflector| reflector.id())
+    pub(super) fn existing_reflector_id(&self, handle: &BridgeHandle) -> Option<ReflectorId> {
+        self.reflector_handles
+            .get_index_of(handle)
+            .map(ReflectorId::from_index)
     }
 
     pub(super) fn bridge_handle(&self, reflector_id: ReflectorId) -> Option<BridgeHandle> {
-        self.reflectors.key_for_id(reflector_id)
+        self.reflector_handles
+            .get_index(reflector_id.index()?)
+            .cloned()
     }
 
     pub(super) fn cached_wrapper<'s>(
@@ -738,7 +670,7 @@ impl BridgeIdentityStore {
 mod tests {
     use std::mem::size_of;
 
-    use super::{BridgeCachedWrapper, BridgeHandle, DenseReflectorMap, ReflectorId};
+    use super::{BridgeCachedWrapper, BridgeHandle, BridgeIdentityStore, ReflectorId};
 
     #[test]
     fn bridge_handle_stays_compact_for_per_wrapper_identity_tables() {
@@ -755,25 +687,15 @@ mod tests {
     }
 
     #[test]
-    fn dense_reflector_map_keeps_sequential_ids_dense_and_large_gaps_sparse() {
-        let mut entries = DenseReflectorMap::default();
-        assert_eq!(entries.insert(ReflectorId::from_raw(50_000), 1_u32), None);
-        assert_eq!(entries.insert(ReflectorId::from_raw(50_001), 2_u32), None);
-        assert_eq!(entries.insert(ReflectorId::from_raw(100_000), 3_u32), None);
+    fn bridge_identity_store_reuses_and_resolves_reflector_ids() {
+        let mut identities = BridgeIdentityStore::default();
 
-        assert_eq!(entries.dense_base, Some(50_000));
-        assert_eq!(entries.dense.len(), 2);
-        assert_eq!(entries.sparse.len(), 1);
-        assert_eq!(entries.get(&ReflectorId::from_raw(50_001)), Some(&2));
-        assert_eq!(entries.get(&ReflectorId::from_raw(100_000)), Some(&3));
-        assert_eq!(entries.len(), 3);
+        let first = identities.reflector_id(&BridgeHandle::Window);
+        let second = identities.reflector_id(&BridgeHandle::Window);
 
-        entries.retain(|id, _| id.raw() != 50_000);
-        assert_eq!(entries.dense_base, Some(50_001));
-        assert_eq!(entries.values().copied().collect::<Vec<_>>(), vec![2, 3]);
-
-        entries.clear();
-        assert_eq!(entries.len(), 0);
-        assert_eq!(entries.dense_base, None);
+        assert_eq!(first, second);
+        assert_eq!(first.raw(), 1);
+        assert_eq!(identities.bridge_handle(first), Some(BridgeHandle::Window));
+        assert_eq!(identities.bridge_handle(ReflectorId::from_raw(0)), None);
     }
 }

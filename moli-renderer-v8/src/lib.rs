@@ -82,7 +82,6 @@ mod parser_script;
 mod queue_microtask;
 mod range_boundary;
 mod referrer_policy;
-pub(crate) mod reflector;
 mod render_runtime;
 mod renderer_resource_scheduler;
 mod resource_owner;
@@ -214,7 +213,6 @@ pub use host::{
 };
 pub use local_executor::is_on_js_local_executor;
 pub use native_bridge::element::ClientRect as RendererClientRect;
-pub use reflector::ReflectorRegistry;
 pub use runtime::RendererRuntimeInspectorMessageResponseOrder;
 pub use runtime::{
     DetachedParserScriptFetchContinuation, DevToolsSessionKey, ExternalRawDocumentBodyStream,

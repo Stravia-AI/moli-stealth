@@ -6,8 +6,9 @@ use moli_webapi_declare::WebApiObject;
 use super::super::context_bootstrap::bridge_descriptor::{
     WrapperKind, node_bridge_descriptor, node_bridge_descriptors,
 };
-use super::super::reflector::ReflectorId;
-use super::{BridgeHandle, JsContextHost, collections, document, element, traversal, window};
+use super::{
+    BridgeHandle, JsContextHost, ReflectorId, collections, document, element, traversal, window,
+};
 
 mod native_template;
 mod node_template;

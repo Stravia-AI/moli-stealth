@@ -1,6 +1,6 @@
 use url::Url;
 
-use crate::{parser::HtmlParser, renderer::ReflectorRegistry};
+use crate::parser::HtmlParser;
 
 use super::native::{NativeDom, NodeType};
 
@@ -185,19 +185,6 @@ fn native_dom_treats_noscript_contents_as_raw_text_when_scripting_is_enabled() {
         native_dom.outer_html(noscript).as_deref(),
         Some("<noscript id=\"ns\"><h1>Hello</h1><p>World</p></noscript>")
     );
-}
-
-#[test]
-fn native_dom_node_ids_can_be_interned_by_reflector_registry() {
-    let native_dom = parse_fixture("<!doctype html><html><body><p>ok</p></body></html>");
-    let body_node_id = native_dom.body_node_id().expect("body should exist");
-
-    let mut registry = ReflectorRegistry::default();
-    let first = registry.intern(body_node_id);
-    let second = registry.intern(body_node_id);
-
-    assert_eq!(first.id(), second.id());
-    assert_eq!(registry.len(), 1);
 }
 
 #[test]
