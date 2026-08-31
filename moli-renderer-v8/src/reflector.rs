@@ -57,7 +57,7 @@ impl<K: Clone> DomRoot<K> {
 pub struct ReflectorRegistry<K> {
     next_id: u64,
     ids_by_key: HashMap<K, ReflectorId>,
-    keys_by_id: HashMap<ReflectorId, K>,
+    keys_by_id: Vec<K>,
 }
 
 impl<K> Default for ReflectorRegistry<K> {
@@ -65,7 +65,7 @@ impl<K> Default for ReflectorRegistry<K> {
         Self {
             next_id: 0,
             ids_by_key: HashMap::new(),
-            keys_by_id: HashMap::new(),
+            keys_by_id: Vec::new(),
         }
     }
 }
@@ -82,7 +82,7 @@ where
         self.next_id = self.next_id.checked_add(1).expect("reflector id overflow");
         let id = ReflectorId(self.next_id);
         self.ids_by_key.insert(key.clone(), id);
-        self.keys_by_id.insert(id, key.clone());
+        self.keys_by_id.push(key.clone());
         Reflector { id, key }
     }
 
@@ -100,7 +100,8 @@ where
     }
 
     pub fn key_for_id(&self, id: ReflectorId) -> Option<K> {
-        self.keys_by_id.get(&id).cloned()
+        let index = usize::try_from(id.raw().checked_sub(1)?).ok()?;
+        self.keys_by_id.get(index).cloned()
     }
 
     pub fn len(&self) -> usize {
