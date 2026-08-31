@@ -12,8 +12,10 @@ impl DocumentRuntime {
         insertion_plan: &TreeInsertionPlan<'_>,
     ) {
         let runtime = unsafe { &mut *host_ptr };
-        for &root in insertion_plan.adoption.roots_with_owner_document_change() {
-            runtime.migrate_inline_style_metadata_in_subtree(root);
+        if insertion_plan.adoption.crosses_documents() {
+            for &root in insertion_plan.insertion_roots {
+                runtime.migrate_inline_style_metadata_in_subtree(root);
+            }
         }
         for &root in insertion_plan.insertion_roots {
             runtime.clear_disconnected_shadow_roots_in_subtree(root);

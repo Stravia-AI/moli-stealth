@@ -2,81 +2,101 @@ use super::insertion_plan::TreeInsertionPlan;
 use crate::{
     custom_elements,
     document_runtime::{DocumentRuntime, DomHandle},
-    dom::native::{DomHost, Node},
+    dom::native::DomHost,
     native_bridge::JsContextHost,
 };
 
 #[derive(Clone, Debug, Default)]
 pub(in crate::document_runtime) struct TreeAdoptionPlan {
-    root: Option<DomHandle>,
-    previous_owner_document: Option<DomHandle>,
-    new_document: Option<DomHandle>,
-    roots_with_owner_document_change: Vec<DomHandle>,
+    transition: Option<TreeDocumentTransition>,
     custom_elements: custom_elements::CustomElementAdoptionPlan,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TreeDocumentTransition {
+    previous_document: DomHandle,
+    new_document: DomHandle,
+}
+
+impl TreeDocumentTransition {
+    fn documents(self) -> (DomHandle, DomHandle) {
+        (self.previous_document, self.new_document)
+    }
+
+    fn crosses_documents(self) -> bool {
+        self.previous_document != self.new_document
+    }
+
+    fn cross_document(self) -> Option<(DomHandle, DomHandle)> {
+        self.crosses_documents().then_some(self.documents())
+    }
+
+    fn for_root(dom_host: &DomHost, root: DomHandle, new_document: DomHandle) -> Option<Self> {
+        Some(Self {
+            previous_document: dom_host.owner_document_handle(root)?,
+            new_document,
+        })
+    }
+}
+
 impl TreeAdoptionPlan {
-    pub(in crate::document_runtime) fn before_adoption(
+    pub(in crate::document_runtime) fn before_standalone_adoption(
+        dom_host: &DomHost,
+        host_ptr: *mut JsContextHost,
+        root: DomHandle,
+        new_document: DomHandle,
+    ) -> Self {
+        Self::before_adoption(
+            dom_host,
+            host_ptr,
+            std::slice::from_ref(&root),
+            new_document,
+        )
+    }
+
+    fn before_adoption(
         dom_host: &DomHost,
         host_ptr: *mut JsContextHost,
         roots: &[DomHandle],
         new_document: DomHandle,
-        collect_custom_elements: bool,
     ) -> Self {
-        let root = roots.first().copied();
-        let previous_owner_document =
-            root.and_then(|root| dom_host.node(root).and_then(Node::owner_document));
-        let roots_with_owner_document_change = roots
-            .iter()
-            .copied()
-            .filter(|root| {
-                dom_host
-                    .node(*root)
-                    .and_then(Node::owner_document)
-                    .is_some_and(|previous| previous != new_document)
-            })
-            .collect();
-        let custom_elements = if collect_custom_elements {
-            custom_elements::adoption_plan_for_roots_before_adoption(host_ptr, roots, new_document)
-        } else {
-            custom_elements::CustomElementAdoptionPlan::default()
-        };
+        // The roots of one DOM insertion share a node document, including
+        // children hoisted from a DocumentFragment. One lookup classifies the
+        // whole batch.
+        let transition = roots
+            .first()
+            .and_then(|root| TreeDocumentTransition::for_root(dom_host, *root, new_document));
+        let custom_elements = transition.map_or_else(Default::default, |transition| {
+            custom_elements::adoption_plan_for_roots_before_adoption(
+                host_ptr,
+                roots,
+                new_document,
+                transition.crosses_documents(),
+            )
+        });
         Self {
-            root,
-            previous_owner_document,
-            new_document: Some(new_document),
-            roots_with_owner_document_change,
+            transition,
             custom_elements,
         }
     }
 
-    pub(in crate::document_runtime) fn root_with_previous_owner_document(
-        &self,
-    ) -> Option<(DomHandle, Option<DomHandle>)> {
-        self.root.map(|root| (root, self.previous_owner_document))
+    pub(in crate::document_runtime) fn documents(&self) -> Option<(DomHandle, DomHandle)> {
+        self.transition.map(TreeDocumentTransition::documents)
     }
 
-    pub(super) fn has_targets(&self) -> bool {
-        self.custom_elements.has_targets()
+    pub(super) fn crosses_documents(&self) -> bool {
+        self.transition
+            .is_some_and(TreeDocumentTransition::crosses_documents)
     }
 
-    pub(super) fn has_registry_retargets_without_adoption(&self) -> bool {
-        self.custom_elements
-            .has_registry_retargets_without_adoption()
+    fn cross_document(&self) -> Option<(DomHandle, DomHandle)> {
+        self.transition?.cross_document()
     }
 
     pub(in crate::document_runtime) fn custom_elements(
         &self,
     ) -> &custom_elements::CustomElementAdoptionPlan {
         &self.custom_elements
-    }
-
-    pub(in crate::document_runtime) fn roots_with_owner_document_change(&self) -> &[DomHandle] {
-        &self.roots_with_owner_document_change
-    }
-
-    pub(in crate::document_runtime) fn new_document(&self) -> Option<DomHandle> {
-        self.new_document
     }
 }
 
@@ -87,17 +107,10 @@ impl DocumentRuntime {
         roots: &[DomHandle],
         parent: DomHandle,
     ) -> TreeAdoptionPlan {
-        let Some(new_document) = self.document_for_insertion_parent(parent) else {
+        let Some(new_document) = self.dom_host.owner_document_handle(parent) else {
             return TreeAdoptionPlan::default();
         };
-        TreeAdoptionPlan::before_adoption(&self.dom_host, host_ptr, roots, new_document, true)
-    }
-
-    fn document_for_insertion_parent(&self, parent: DomHandle) -> Option<DomHandle> {
-        if self.dom_host.node(parent).is_some_and(Node::is_document) {
-            return Some(parent);
-        }
-        self.dom_host.owner_document_handle(parent)
+        TreeAdoptionPlan::before_adoption(&self.dom_host, host_ptr, roots, new_document)
     }
 
     pub(super) fn sync_shadow_root_adopted_style_sheets_after_insertion_adoption(
@@ -106,7 +119,7 @@ impl DocumentRuntime {
         host_ptr: *mut JsContextHost,
         insertion_plan: &TreeInsertionPlan<'_>,
     ) {
-        let Some(new_document) = insertion_plan.adoption.new_document() else {
+        let Some((_, new_document)) = insertion_plan.adoption.cross_document() else {
             return;
         };
         if unsafe { &*host_ptr }
@@ -116,7 +129,7 @@ impl DocumentRuntime {
             return;
         }
         let runtime = unsafe { &mut *host_ptr };
-        for &root in insertion_plan.adoption.roots_with_owner_document_change() {
+        for &root in insertion_plan.insertion_roots {
             for shadow_root in runtime.shadow_roots_in_subtree(root) {
                 crate::native_bridge::element::clear_shadow_root_adopted_style_sheets(
                     scope,
@@ -136,40 +149,51 @@ mod tests {
     use url::Url;
 
     #[test]
-    fn adoption_plan_records_only_roots_that_change_owner_document() {
+    fn fragment_insertion_roots_share_one_document_transition() {
         let mut dom_host = DomHost::from_dom(NativeDom::new(
             Url::parse("https://example.test/").expect("test URL parses"),
         ));
         let target_document = dom_host.document_handle();
         let other_document = dom_host.create_detached_html_document();
-        let same_document_root = dom_host.create_parser_element_without_attributes_for_document(
-            target_document,
+        let foreign_fragment = dom_host.create_document_fragment_for_document(other_document);
+        let first_root = dom_host.create_parser_element_without_attributes_for_document(
+            other_document,
             "div".to_owned(),
             "http://www.w3.org/1999/xhtml".to_owned(),
             None,
         );
-        let other_document_root = dom_host.create_parser_element_without_attributes_for_document(
+        let second_root = dom_host.create_parser_element_without_attributes_for_document(
             other_document,
             "span".to_owned(),
             "http://www.w3.org/1999/xhtml".to_owned(),
             None,
         );
-
-        let plan = TreeAdoptionPlan::before_adoption(
-            &dom_host,
-            std::ptr::null_mut(),
-            &[same_document_root, other_document_root],
-            target_document,
-            false,
-        );
-
+        assert!(dom_host.append_child(foreign_fragment, first_root));
+        assert!(dom_host.append_child(foreign_fragment, second_root));
         assert_eq!(
-            plan.root_with_previous_owner_document(),
-            Some((same_document_root, Some(target_document)))
+            dom_host.owner_document_handle(first_root),
+            Some(other_document)
         );
         assert_eq!(
-            plan.roots_with_owner_document_change(),
-            &[other_document_root]
+            dom_host.owner_document_handle(second_root),
+            Some(other_document)
+        );
+
+        // A DocumentFragment adopts each appended child into its own node
+        // document, so either root classifies the whole insertion batch.
+        assert_eq!(
+            TreeDocumentTransition::for_root(&dom_host, first_root, target_document),
+            Some(TreeDocumentTransition {
+                previous_document: other_document,
+                new_document: target_document,
+            })
+        );
+        assert_eq!(
+            TreeDocumentTransition::for_root(&dom_host, first_root, other_document),
+            Some(TreeDocumentTransition {
+                previous_document: other_document,
+                new_document: other_document,
+            })
         );
     }
 }

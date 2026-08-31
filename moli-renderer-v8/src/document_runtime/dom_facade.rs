@@ -712,33 +712,23 @@ impl DocumentRuntime {
         document_handle: DomHandle,
         handle: DomHandle,
     ) -> Option<DomHandle> {
-        let plan = self.tree_adoption_plan(host_ptr, document_handle, handle);
-        self.apply_native_adoption_plan(scope, host_ptr, &plan)
-    }
-
-    fn tree_adoption_plan(
-        &self,
-        host_ptr: *mut JsContextHost,
-        document_handle: DomHandle,
-        handle: DomHandle,
-    ) -> TreeAdoptionPlan {
-        TreeAdoptionPlan::before_adoption(
+        let plan = TreeAdoptionPlan::before_standalone_adoption(
             &self.dom_host,
             host_ptr,
-            std::slice::from_ref(&handle),
+            handle,
             document_handle,
-            true,
-        )
+        );
+        self.apply_native_adoption_plan(scope, host_ptr, handle, &plan)
     }
 
     fn apply_native_adoption_plan(
         &mut self,
         scope: &mut v8::PinScope<'_, '_>,
         host_ptr: *mut JsContextHost,
+        root: DomHandle,
         plan: &TreeAdoptionPlan,
     ) -> Option<DomHandle> {
-        let (root, previous_owner_document) = plan.root_with_previous_owner_document()?;
-        let new_document = plan.new_document()?;
+        let (previous_owner_document, new_document) = plan.documents()?;
         let (adopted, stylesheet_owner_changes) = self
             .dom_host
             .adopt_node_with_stylesheet_owner_changes(new_document, root)?;
@@ -746,7 +736,7 @@ impl DocumentRuntime {
             host_ptr,
             &plan.custom_elements().registry_retargets,
         );
-        if previous_owner_document.is_some_and(|owner| owner != new_document) {
+        if previous_owner_document != new_document {
             self.queue_image_loads_after_owner_document_change(scope, host_ptr, root);
         }
         custom_elements::enqueue_adopted_callbacks(
@@ -770,11 +760,11 @@ impl DocumentRuntime {
         scope: &mut v8::PinScope<'_, '_>,
         host_ptr: *mut JsContextHost,
         handle: DomHandle,
-        previous_owner_document: Option<DomHandle>,
+        previous_owner_document: DomHandle,
         document_handle: DomHandle,
         stylesheet_owner_changes: &[crate::dom::native::DomStylesheetOwnerChange],
     ) {
-        if !previous_owner_document.is_some_and(|owner| owner != document_handle) {
+        if previous_owner_document == document_handle {
             return;
         }
         let runtime = unsafe { &mut *host_ptr };

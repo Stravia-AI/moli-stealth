@@ -1034,6 +1034,10 @@ impl JsContextHost {
             .message_port_delivery()
     }
 
+    pub(crate) fn has_explicit_custom_element_registry_associations(&self) -> bool {
+        !self.custom_element_registry_associations.is_empty()
+    }
+
     #[cfg(test)]
     pub(crate) fn bridge_ref_count_for_test(&self) -> usize {
         self.bridge_ref_count.get()

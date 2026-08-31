@@ -195,10 +195,7 @@ impl DocumentRuntime {
             insertion_plan,
             profile.subresource_request_initiator_type(),
         );
-        if insertion_plan
-            .adoption
-            .has_registry_retargets_without_adoption()
-        {
+        if !insertion_plan.adoption.crosses_documents() {
             custom_elements::apply_registry_association_retargets(
                 host_ptr,
                 &insertion_plan.adoption.custom_elements().registry_retargets,
@@ -227,7 +224,7 @@ impl DocumentRuntime {
     ) {
         let lifecycle_quiescent =
             unsafe { &*host_ptr }.custom_elements_subtree_lifecycle_quiescent();
-        let adopted_across_documents = insertion_plan.adoption.has_targets();
+        let adopted_across_documents = insertion_plan.adoption.crosses_documents();
         let mut connected_roots = Vec::new();
         let mut removed_from_lifecycle_roots = Vec::new();
         let mut form_state_roots = Vec::new();

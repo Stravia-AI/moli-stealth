@@ -8,32 +8,37 @@ use super::{
 };
 use crate::{document_runtime::DomHandle, dom::native::Node, native_bridge::JsContextHost};
 
-fn adoption_plan_before_adoption(
-    host_ptr: *mut JsContextHost,
-    root: DomHandle,
-    new_document: DomHandle,
-) -> CustomElementAdoptionPlan {
-    let host = unsafe { &*host_ptr };
-    CustomElementAdoptionPlan {
-        targets: adoption_callback_targets(host.dom_host(), root, new_document),
-        registry_retargets: registry_association_retargets_before_adoption(
-            host_ptr,
-            root,
-            new_document,
-        ),
-    }
-}
-
 pub(crate) fn adoption_plan_for_roots_before_adoption(
     host_ptr: *mut JsContextHost,
     roots: &[DomHandle],
     new_document: DomHandle,
+    crosses_documents: bool,
 ) -> CustomElementAdoptionPlan {
-    let mut plan = CustomElementAdoptionPlan::default();
-    for &root in roots {
-        plan.extend(adoption_plan_before_adoption(host_ptr, root, new_document));
+    let host = unsafe { &*host_ptr };
+    if !crosses_documents && !host.has_explicit_custom_element_registry_associations() {
+        return CustomElementAdoptionPlan::default();
     }
-    plan
+
+    let mut targets = Vec::new();
+    let mut registry_retargets = Vec::new();
+    for &root in roots {
+        if crosses_documents {
+            targets.extend(adoption_callback_targets(
+                host.dom_host(),
+                root,
+                new_document,
+            ));
+        }
+        registry_retargets.extend(registry_association_retargets_before_adoption(
+            host_ptr,
+            root,
+            new_document,
+        ));
+    }
+    CustomElementAdoptionPlan {
+        targets,
+        registry_retargets,
+    }
 }
 
 fn registry_association_retargets_before_adoption(

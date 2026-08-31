@@ -152,7 +152,7 @@ impl DocumentRuntime {
         sync_upgrade_connected_subtrees: bool,
     ) {
         let was_connected = insertion_plan.was_lifecycle_connected_before_insert();
-        let adopted_across_documents = insertion_plan.adopted_across_documents();
+        let adopted_across_documents = insertion_plan.adoption.crosses_documents();
         if was_connected && adopted_across_documents && !insertion_plan.inserting_fragment_children
         {
             self.enqueue_adoption_disconnected_callbacks_in_subtrees_unless_pending(

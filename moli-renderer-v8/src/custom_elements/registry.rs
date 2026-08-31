@@ -56,21 +56,6 @@ pub(crate) struct CustomElementAdoptionPlan {
     pub(crate) registry_retargets: Vec<RegistryAssociationRetarget>,
 }
 
-impl CustomElementAdoptionPlan {
-    pub(crate) fn has_targets(&self) -> bool {
-        !self.targets.is_empty()
-    }
-
-    pub(crate) fn has_registry_retargets_without_adoption(&self) -> bool {
-        self.targets.is_empty() && !self.registry_retargets.is_empty()
-    }
-
-    pub(crate) fn extend(&mut self, other: Self) {
-        self.targets.extend(other.targets);
-        self.registry_retargets.extend(other.registry_retargets);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{CustomElementRegistryAssociation, CustomElementRegistryKey};

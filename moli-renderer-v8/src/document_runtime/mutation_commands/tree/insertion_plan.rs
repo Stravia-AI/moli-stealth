@@ -48,10 +48,6 @@ impl TreeInsertionPlan<'_> {
     pub(super) fn was_lifecycle_connected_before_insert(&self) -> bool {
         !self.lifecycle_connected_roots_before_insert.is_empty()
     }
-
-    pub(super) fn adopted_across_documents(&self) -> bool {
-        self.adoption.has_targets()
-    }
 }
 
 impl TreeInsertionLiveRangeMode {
