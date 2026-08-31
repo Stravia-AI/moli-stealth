@@ -17,7 +17,7 @@ pub(super) fn mutation_effects_have_source_scope(effects: &[StyleMutationEffect]
     !effects.is_empty()
         && effects
             .iter()
-            .any(|effect| !matches!(effect, StyleMutationEffect::DisconnectedSubtree { .. }))
+            .any(|effect| !matches!(effect, StyleMutationEffect::DisconnectedSubtrees { .. }))
 }
 
 pub(super) fn source_scope_for_element_state_change(
@@ -52,10 +52,12 @@ pub(super) fn style_source_scope_for_mutation_effects(
             StyleMutationEffect::Attribute { element, .. } => {
                 handles.push(*element);
             }
-            StyleMutationEffect::ConnectedSubtree { root }
-            | StyleMutationEffect::DisconnectedSubtree { root }
-            | StyleMutationEffect::CharacterData { node: root } => {
-                handles.push(*root);
+            StyleMutationEffect::ConnectedSubtrees { roots }
+            | StyleMutationEffect::DisconnectedSubtrees { roots } => {
+                handles.extend(roots.iter().copied());
+            }
+            StyleMutationEffect::CharacterData { node } => {
+                handles.push(*node);
             }
             StyleMutationEffect::SlotAssignment { slot, .. } => {
                 handles.push(*slot);

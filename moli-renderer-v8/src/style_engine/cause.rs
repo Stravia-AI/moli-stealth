@@ -191,20 +191,28 @@ fn cause_default_fallback_roots(
     let PendingStyleInvalidationCause::Mutation(effects) = cause else {
         return IndexSet::new();
     };
-    stylo_runtime_fallback_roots_for_mutation_inputs(
+    let mut roots = IndexSet::new();
+    for effect in effects {
+        if let StyleMutationEffect::ConnectedSubtrees {
+            roots: connected_roots,
+        } = effect
+        {
+            roots.extend(connected_roots.iter().copied());
+        }
+    }
+    roots.extend(stylo_runtime_fallback_roots_for_mutation_inputs(
         host,
         effects
             .iter()
-            .map(runtime_fallback_root_input_for_mutation_effect),
-    )
-    .into_iter()
-    .collect()
+            .filter_map(runtime_fallback_root_input_for_mutation_effect),
+    ));
+    roots
 }
 
 fn runtime_fallback_root_input_for_mutation_effect(
     effect: &StyleMutationEffect,
-) -> StyloRuntimeFallbackRootInput<'_> {
-    match effect {
+) -> Option<StyloRuntimeFallbackRootInput<'_>> {
+    Some(match effect {
         StyleMutationEffect::Attribute { element, name, .. } => {
             StyloRuntimeFallbackRootInput::Attribute {
                 element: *element,
@@ -227,12 +235,52 @@ fn runtime_fallback_root_input_for_mutation_effect(
                 .zip(assigned_nodes.as_ref())
                 .is_some(),
         },
-        StyleMutationEffect::ConnectedSubtree { root } => {
-            StyloRuntimeFallbackRootInput::ConnectedSubtree { root: *root }
+        StyleMutationEffect::ConnectedSubtrees { roots } => {
+            StyloRuntimeFallbackRootInput::ConnectedSubtree {
+                root: *roots.first()?,
+            }
         }
         StyleMutationEffect::CharacterData { .. }
-        | StyleMutationEffect::DisconnectedSubtree { .. } => {
+        | StyleMutationEffect::DisconnectedSubtrees { .. } => {
             StyloRuntimeFallbackRootInput::OtherMutation
         }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dom::native::NativeDom;
+
+    #[test]
+    fn batched_connected_subtrees_keep_every_runtime_fallback_root() {
+        let mut host = DomHost::from_dom(NativeDom::new_html(
+            url::Url::parse("https://example.test/").expect("valid test url"),
+        ));
+        let document = host.document_handle();
+        let first = host.create_element("div");
+        let second = host.create_element("span");
+        assert!(host.append_child(document, first));
+        assert!(host.append_child(document, second));
+        let cause = PendingStyleInvalidationCause::Mutation(vec![
+            StyleMutationEffect::ConnectedSubtrees {
+                roots: vec![first, second].into(),
+            },
+            StyleMutationEffect::ChildList {
+                parent: document,
+                added_nodes: vec![first, second],
+                removed_nodes: Vec::new(),
+                removed_element_snapshots: Vec::new(),
+                previous_sibling: None,
+                next_sibling: None,
+            },
+        ]);
+
+        assert_eq!(
+            cause_default_fallback_roots(&host, &cause)
+                .into_iter()
+                .collect::<Vec<_>>(),
+            [first, second]
+        );
     }
 }

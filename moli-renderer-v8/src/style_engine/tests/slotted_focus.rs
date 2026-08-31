@@ -423,7 +423,7 @@ fn shadow_slot_insertion_uses_retargeted_assignment_snapshots() {
                 assigned_nodes: Some(_),
                 ..
             } | StyleMutationEffect::ChildList { .. }
-                | StyleMutationEffect::ConnectedSubtree { .. }
+                | StyleMutationEffect::ConnectedSubtrees { .. }
         )
     }));
     let media = crate::protocol_types::EmulatedMediaOverrides::default();

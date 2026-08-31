@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use indexmap::IndexSet;
 use moli_selector::{
     StyloElementDependencySnapshot as StyleElementDependencySnapshot,
@@ -19,11 +21,11 @@ pub(crate) enum StyleMutationEffect {
         old_value: Option<String>,
         new_value: Option<String>,
     },
-    ConnectedSubtree {
-        root: DomHandle,
+    ConnectedSubtrees {
+        roots: Arc<[DomHandle]>,
     },
-    DisconnectedSubtree {
-        root: DomHandle,
+    DisconnectedSubtrees {
+        roots: Arc<[DomHandle]>,
     },
     SlotAssignment {
         slot: DomHandle,
@@ -70,14 +72,48 @@ impl StyleMutationEffect {
         effects: &DomMutationEffects,
     ) -> Vec<Self> {
         let mut style_effects = IndexSet::new();
-        for &root in effects.tree().connected_roots() {
-            style_effects.insert(Self::ConnectedSubtree { root });
+        let connected_roots = effects.tree().connected_roots();
+        #[cfg(debug_assertions)]
+        {
+            let connected_root_set = connected_roots
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>();
+            debug_assert!(
+                effects
+                    .scripts()
+                    .connected_roots()
+                    .iter()
+                    .all(|root| connected_root_set.contains(root)),
+                "script connection roots must also be tree connection roots"
+            );
         }
-        for &root in effects.scripts().connected_roots() {
-            style_effects.insert(Self::ConnectedSubtree { root });
+        if !connected_roots.is_empty() {
+            style_effects.insert(Self::ConnectedSubtrees {
+                roots: shared_tree_roots(
+                    connected_roots,
+                    effects
+                        .style()
+                        .child_list_mutations()
+                        .iter()
+                        .map(|mutation| (mutation.added_nodes(), mutation.shared_added_nodes())),
+                ),
+            });
         }
-        for &root in effects.tree().disconnected_roots() {
-            style_effects.insert(Self::DisconnectedSubtree { root });
+        let disconnected_roots = effects.tree().disconnected_roots();
+        if !disconnected_roots.is_empty() {
+            style_effects.insert(Self::DisconnectedSubtrees {
+                roots: shared_tree_roots(
+                    disconnected_roots,
+                    effects
+                        .style()
+                        .child_list_mutations()
+                        .iter()
+                        .map(|mutation| {
+                            (mutation.removed_nodes(), mutation.shared_removed_nodes())
+                        }),
+                ),
+            });
         }
         let detailed_slot_assignment_slots = effects
             .slots()
@@ -152,6 +188,16 @@ impl StyleMutationEffect {
     }
 }
 
+fn shared_tree_roots<'a>(
+    roots: &[DomHandle],
+    child_list_roots: impl Iterator<Item = (&'a [DomHandle], Arc<[DomHandle]>)>,
+) -> Arc<[DomHandle]> {
+    child_list_roots
+        .filter_map(|(candidate, shared)| (candidate == roots).then_some(shared))
+        .next()
+        .unwrap_or_else(|| Arc::from(roots))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StyleAttributeImpact {
     None,
@@ -218,14 +264,16 @@ pub(super) fn detached_style_subtree_roots_for_mutations(
     let mut roots = IndexSet::new();
     for effect in effects {
         match effect {
-            StyleMutationEffect::DisconnectedSubtree { root } => {
-                roots.insert(*root);
+            StyleMutationEffect::DisconnectedSubtrees {
+                roots: disconnected_roots,
+            } => {
+                roots.extend(disconnected_roots.iter().copied());
             }
             StyleMutationEffect::ChildList { removed_nodes, .. } => {
                 roots.extend(removed_nodes.iter().copied());
             }
             StyleMutationEffect::Attribute { .. }
-            | StyleMutationEffect::ConnectedSubtree { .. }
+            | StyleMutationEffect::ConnectedSubtrees { .. }
             | StyleMutationEffect::SlotAssignment { .. }
             | StyleMutationEffect::CharacterData { .. } => {}
         }
@@ -282,7 +330,7 @@ pub(super) fn style_mutation_effects_are_child_list_structural(
             matches!(
                 effect,
                 StyleMutationEffect::ChildList { .. }
-                    | StyleMutationEffect::ConnectedSubtree { .. }
+                    | StyleMutationEffect::ConnectedSubtrees { .. }
                     | StyleMutationEffect::SlotAssignment { .. }
             )
         })
@@ -382,4 +430,50 @@ fn changed_identifier(
             .filter(|value| !value.is_empty())
             .map(str::to_owned),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dom::native::NativeDom;
+
+    fn test_host() -> DomHost {
+        DomHost::from_dom(NativeDom::new_html(
+            url::Url::parse("https://example.test/").expect("valid test url"),
+        ))
+    }
+
+    #[test]
+    fn fragment_connection_roots_share_one_batched_child_list_payload() {
+        let mut host = test_host();
+        let document = host.document_handle();
+        let parent = host.create_element("main");
+        let fragment = host.create_document_fragment();
+        let first = host.create_element("div");
+        let second = host.create_element("span");
+        assert!(host.append_child(document, parent));
+        assert!(host.append_child(fragment, first));
+        assert!(host.append_child(fragment, second));
+
+        let effects = host.append_child_effects(parent, fragment);
+        let child_list = effects
+            .style()
+            .child_list_mutations()
+            .iter()
+            .find(|mutation| mutation.target() == parent)
+            .expect("fragment insertion should record one child-list mutation");
+        let shared_added_nodes = child_list.shared_added_nodes();
+        let style_effects = StyleMutationEffect::from_dom_mutation_effects(&host, &effects);
+        let connected_batches = style_effects
+            .iter()
+            .filter_map(|effect| match effect {
+                StyleMutationEffect::ConnectedSubtrees { roots } => Some(roots),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(connected_batches.len(), 1);
+        assert_eq!(connected_batches[0].as_ref(), [first, second]);
+        assert!(Arc::ptr_eq(connected_batches[0], &shared_added_nodes));
+    }
 }

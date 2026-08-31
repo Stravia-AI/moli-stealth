@@ -718,8 +718,8 @@ fn pending_cause_default_roots_do_not_get_source_scope_reason() {
 
     let target_queries = PendingCauseFallback::from_cause(
         &host,
-        &PendingStyleInvalidationCause::Mutation(vec![StyleMutationEffect::ConnectedSubtree {
-            root: document,
+        &PendingStyleInvalidationCause::Mutation(vec![StyleMutationEffect::ConnectedSubtrees {
+            roots: vec![document].into(),
         }]),
     )
     .target_queries_for_source_scope(&host, &source_scope);

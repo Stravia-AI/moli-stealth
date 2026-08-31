@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use dom::ElementState as StyloElementState;
 use moli_selector::StyloStyleSourceScope as StyleSourceScope;
@@ -158,7 +158,7 @@ impl MoliStyleEngine {
         let pending_effects_started = profile_enabled.then(std::time::Instant::now);
         let pending_effects = effects
             .iter()
-            .filter(|effect| !matches!(effect, StyleMutationEffect::DisconnectedSubtree { .. }))
+            .filter(|effect| !matches!(effect, StyleMutationEffect::DisconnectedSubtrees { .. }))
             .cloned()
             .collect();
         let pending_effects_us = pending_effects_started
@@ -608,19 +608,79 @@ fn style_mutation_effects_by_owner_document(
 ) -> Vec<(DomHandle, Vec<StyleMutationEffect>)> {
     let mut groups = Vec::<(DomHandle, Vec<StyleMutationEffect>)>::new();
     for effect in effects {
+        match effect {
+            StyleMutationEffect::ConnectedSubtrees { roots } => {
+                push_subtree_effects_by_owner_document(host, &mut groups, roots, |roots| {
+                    StyleMutationEffect::ConnectedSubtrees { roots }
+                });
+                continue;
+            }
+            StyleMutationEffect::DisconnectedSubtrees { roots } => {
+                push_subtree_effects_by_owner_document(host, &mut groups, roots, |roots| {
+                    StyleMutationEffect::DisconnectedSubtrees { roots }
+                });
+                continue;
+            }
+            _ => {}
+        }
         let Some(document) = owner_document_for_mutation_effect(host, effect) else {
             continue;
         };
-        if let Some((_, group_effects)) = groups
-            .iter_mut()
-            .find(|(group_document, _)| *group_document == document)
-        {
-            group_effects.push(effect.clone());
-        } else {
-            groups.push((document, vec![effect.clone()]));
-        }
+        push_document_effect(&mut groups, document, effect.clone());
     }
     groups
+}
+
+fn push_subtree_effects_by_owner_document(
+    host: &DomHost,
+    groups: &mut Vec<(DomHandle, Vec<StyleMutationEffect>)>,
+    roots: &Arc<[DomHandle]>,
+    make_effect: impl Fn(Arc<[DomHandle]>) -> StyleMutationEffect,
+) {
+    let Some((&first_root, remaining_roots)) = roots.split_first() else {
+        return;
+    };
+    if let Some(document) = owner_document_for_handle(host, first_root)
+        && remaining_roots
+            .iter()
+            .all(|root| owner_document_for_handle(host, *root) == Some(document))
+    {
+        push_document_effect(groups, document, make_effect(Arc::clone(roots)));
+        return;
+    }
+
+    let mut document_roots = Vec::<(DomHandle, Vec<DomHandle>)>::new();
+    for &root in roots.iter() {
+        let Some(document) = owner_document_for_handle(host, root) else {
+            continue;
+        };
+        if let Some((_, roots)) = document_roots
+            .iter_mut()
+            .find(|(candidate, _)| *candidate == document)
+        {
+            roots.push(root);
+        } else {
+            document_roots.push((document, vec![root]));
+        }
+    }
+    for (document, roots) in document_roots {
+        push_document_effect(groups, document, make_effect(roots.into()));
+    }
+}
+
+fn push_document_effect(
+    groups: &mut Vec<(DomHandle, Vec<StyleMutationEffect>)>,
+    document: DomHandle,
+    effect: StyleMutationEffect,
+) {
+    if let Some((_, group_effects)) = groups
+        .iter_mut()
+        .find(|(group_document, _)| *group_document == document)
+    {
+        group_effects.push(effect);
+    } else {
+        groups.push((document, vec![effect]));
+    }
 }
 
 fn owner_document_for_mutation_effect(
@@ -629,13 +689,11 @@ fn owner_document_for_mutation_effect(
 ) -> Option<DomHandle> {
     match effect {
         StyleMutationEffect::Attribute { element, .. } => owner_document_for_handle(host, *element),
-        StyleMutationEffect::ConnectedSubtree { root }
-        | StyleMutationEffect::DisconnectedSubtree { root }
-        | StyleMutationEffect::CharacterData { node: root } => {
-            owner_document_for_handle(host, *root)
-        }
+        StyleMutationEffect::CharacterData { node } => owner_document_for_handle(host, *node),
         StyleMutationEffect::SlotAssignment { slot, .. } => owner_document_for_handle(host, *slot),
         StyleMutationEffect::ChildList { parent, .. } => owner_document_for_handle(host, *parent),
+        StyleMutationEffect::ConnectedSubtrees { .. }
+        | StyleMutationEffect::DisconnectedSubtrees { .. } => None,
     }
 }
 
@@ -765,5 +823,43 @@ fn non_empty_vec(handles: Vec<DomHandle>) -> Option<Vec<DomHandle>> {
         None
     } else {
         Some(handles)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dom::native::NativeDom;
+
+    #[test]
+    fn batched_subtrees_are_split_by_owner_document() {
+        let mut host = DomHost::from_dom(NativeDom::new_html(
+            url::Url::parse("https://example.test/").expect("valid test url"),
+        ));
+        let document = host.document_handle();
+        let detached_document = host.create_detached_html_document();
+        let active_root = host.create_element("main");
+        let detached_root = host.create_element("aside");
+        assert!(host.append_child(document, active_root));
+        assert!(host.append_child(detached_document, detached_root));
+        let effects = [StyleMutationEffect::ConnectedSubtrees {
+            roots: vec![active_root, detached_root].into(),
+        }];
+
+        let groups = style_mutation_effects_by_owner_document(&host, &effects);
+        assert_eq!(groups.len(), 2);
+        for (expected_document, expected_root) in
+            [(document, active_root), (detached_document, detached_root)]
+        {
+            let (_, effects) = groups
+                .iter()
+                .find(|(candidate, _)| *candidate == expected_document)
+                .expect("each owner document should have a mutation group");
+            assert!(matches!(
+                effects.as_slice(),
+                [StyleMutationEffect::ConnectedSubtrees { roots }]
+                    if roots.as_ref() == [expected_root]
+            ));
+        }
     }
 }

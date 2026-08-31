@@ -39,8 +39,8 @@ pub(in crate::native_bridge) fn clear_detached_iframe_cached_context<'s>(
             detached_iframe_current_content_document_handle(scope, runtime_ptr, iframe_handle)
     {
         let effects = [
-            crate::style_engine::StyleMutationEffect::DisconnectedSubtree {
-                root: document_handle,
+            crate::style_engine::StyleMutationEffect::DisconnectedSubtrees {
+                roots: vec![document_handle].into(),
             },
         ];
         unsafe { &mut *runtime_ptr }.note_style_mutation_effects(&effects);

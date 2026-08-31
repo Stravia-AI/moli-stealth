@@ -7214,8 +7214,8 @@ fn detached_subtree_invalidation_clears_only_affected_shadow_cascade_data() {
     let media = crate::protocol_types::EmulatedMediaOverrides::default();
     engine.invalidate_for_mutations(
         &host,
-        &[StyleMutationEffect::DisconnectedSubtree {
-            root: first_shadow_host,
+        &[StyleMutationEffect::DisconnectedSubtrees {
+            roots: vec![first_shadow_host].into(),
         }],
         &media,
     );

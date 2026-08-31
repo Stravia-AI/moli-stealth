@@ -103,7 +103,9 @@ fn standalone_subtree_context_invalidation_preserves_unrelated_cache_entries() {
     let generation = engine.computed_cache_generation_for_document_for_test(document);
     let rebuilds = engine.retained_style_system_rebuild_count_for_document_for_test(document);
 
-    let effects = [StyleMutationEffect::ConnectedSubtree { root: target }];
+    let effects = [StyleMutationEffect::ConnectedSubtrees {
+        roots: vec![target].into(),
+    }];
 
     let media = crate::protocol_types::EmulatedMediaOverrides::default();
     engine.invalidate_for_mutations(&host, &effects, &media);
@@ -169,7 +171,9 @@ fn pending_mutation_invalidations_drain_before_computed_style_read() {
         2
     );
 
-    let effects = [StyleMutationEffect::ConnectedSubtree { root: target }];
+    let effects = [StyleMutationEffect::ConnectedSubtrees {
+        roots: vec![target].into(),
+    }];
     let media = crate::protocol_types::EmulatedMediaOverrides::default();
     engine.invalidate_for_mutations(&host, &effects, &media);
     assert_eq!(
@@ -245,13 +249,15 @@ fn pending_mutation_invalidations_keep_separate_work_items_until_drain() {
     let media = crate::protocol_types::EmulatedMediaOverrides::default();
     engine.invalidate_for_mutations(
         &host,
-        &[StyleMutationEffect::ConnectedSubtree { root: first_target }],
+        &[StyleMutationEffect::ConnectedSubtrees {
+            roots: vec![first_target].into(),
+        }],
         &media,
     );
     engine.invalidate_for_mutations(
         &host,
-        &[StyleMutationEffect::ConnectedSubtree {
-            root: second_target,
+        &[StyleMutationEffect::ConnectedSubtrees {
+            roots: vec![second_target].into(),
         }],
         &media,
     );

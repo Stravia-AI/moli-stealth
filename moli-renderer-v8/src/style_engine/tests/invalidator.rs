@@ -67,12 +67,16 @@ fn mutation_source_scope_presence_uses_cheap_effect_classification() {
             "empty effects should not have a source scope",
         ),
         (
-            vec![StyleMutationEffect::DisconnectedSubtree { root: detached }],
+            vec![StyleMutationEffect::DisconnectedSubtrees {
+                roots: vec![detached].into(),
+            }],
             false,
             "only disconnected subtree effects should not have a source scope",
         ),
         (
-            vec![StyleMutationEffect::ConnectedSubtree { root: connected }],
+            vec![StyleMutationEffect::ConnectedSubtrees {
+                roots: vec![connected].into(),
+            }],
             true,
             "connected subtree effects should have a source scope",
         ),

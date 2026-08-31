@@ -2515,8 +2515,8 @@ fn style_mutation_effects_affect_layout_metric(effects: &[StyleMutationEffect]) 
         StyleMutationEffect::Attribute { name, .. } => {
             StyleAttributeImpact::for_attribute_name(name).affects_layout_metric()
         }
-        StyleMutationEffect::ConnectedSubtree { .. }
-        | StyleMutationEffect::DisconnectedSubtree { .. }
+        StyleMutationEffect::ConnectedSubtrees { .. }
+        | StyleMutationEffect::DisconnectedSubtrees { .. }
         | StyleMutationEffect::SlotAssignment { .. }
         | StyleMutationEffect::CharacterData { .. }
         | StyleMutationEffect::ChildList { .. } => true,
