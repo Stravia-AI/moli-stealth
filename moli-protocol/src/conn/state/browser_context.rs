@@ -1413,6 +1413,7 @@ impl BrowserContext {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn clear_document_navigation_state_for_active_target(&mut self) {
         self.active_target
             .runtime_slot
@@ -1854,10 +1855,12 @@ impl BrowserContext {
         self.target_identity.set_url(url);
     }
 
+    #[cfg(test)]
     pub(crate) fn set_target_security_origin(&mut self, security_origin: String) {
         self.target_identity.set_security_origin(security_origin);
     }
 
+    #[cfg(test)]
     pub(crate) fn set_target_secure_context_type(&mut self, secure_context_type: String) {
         self.target_identity
             .set_secure_context_type(secure_context_type);

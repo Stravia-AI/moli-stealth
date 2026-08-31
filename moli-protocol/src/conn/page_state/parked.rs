@@ -609,6 +609,7 @@ impl BrowserContext {
         Some(target_id)
     }
 
+    #[cfg(test)]
     pub(crate) fn enable_auxiliary_network_events(&mut self, session_id: &str) {
         if self.auxiliary_target_id_for_session(session_id).is_some() {
             self.active_target
@@ -617,77 +618,11 @@ impl BrowserContext {
         }
     }
 
-    pub(crate) fn disable_auxiliary_network_events(&mut self, session_id: &str) -> bool {
-        self.active_target
-            .runtime_slot
-            .disable_auxiliary_network_events(session_id)
-    }
-
+    #[cfg(test)]
     pub(crate) fn has_network_event_listeners(&self) -> bool {
         self.active_target
             .runtime_slot
             .has_network_event_listeners()
-    }
-
-    pub(crate) fn network_enabled_for_session(&self, session_id: Option<&str>) -> bool {
-        if let Some(session_id) = session_id
-            && self.auxiliary_target_id_for_session(session_id).is_some()
-        {
-            return self
-                .active_target
-                .runtime_slot
-                .auxiliary_network_events_enabled_for_session(session_id);
-        }
-        self.active_target
-            .runtime_slot
-            .primary_network_events_enabled()
-    }
-
-    pub(crate) fn enable_network_event_listener_for_session(
-        &mut self,
-        session_id: Option<&str>,
-        is_auxiliary_target_session: bool,
-    ) -> bool {
-        let adding_network_event_listener = !self.network_enabled_for_session(session_id);
-        if is_auxiliary_target_session && let Some(session_id) = session_id {
-            self.enable_auxiliary_network_events(session_id);
-        } else {
-            self.active_target
-                .runtime_slot
-                .enable_primary_network_events();
-        }
-        if adding_network_event_listener {
-            self.initialize_network_listener_observation_cursor(session_id);
-        }
-        adding_network_event_listener
-    }
-
-    pub(crate) fn disable_network_event_listener_for_session(
-        &mut self,
-        session_id: Option<&str>,
-        is_auxiliary_target_session: bool,
-    ) {
-        let listener_session_id =
-            if is_auxiliary_target_session && let Some(session_id) = session_id {
-                self.disable_auxiliary_network_events(session_id);
-                Some(session_id)
-            } else {
-                self.active_target
-                    .runtime_slot
-                    .disable_primary_network_events();
-                session_id
-            };
-        self.remove_network_listener_observation_cursor(listener_session_id);
-        self.remove_captured_response_body_visibility_for_session(listener_session_id);
-        self.clear_network_observation_artifacts_if_unobserved();
-    }
-
-    pub(crate) fn clear_network_observation_artifacts_if_unobserved(&mut self) {
-        if self.has_network_event_listeners() {
-            return;
-        }
-        self.clear_captured_response_bodies();
-        self.clear_websocket_network_request_ids();
     }
 
     #[cfg(test)]
@@ -1003,6 +938,7 @@ impl BrowserContext {
         );
     }
 
+    #[cfg(test)]
     pub(crate) fn mark_target_initial_empty_document_materialized(&mut self, target_id: &str) {
         self.mutate_target_owner_state_by_target_id(target_id, |owner_state| {
             owner_state.mark_initial_empty_document_materialized();

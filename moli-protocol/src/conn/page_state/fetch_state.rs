@@ -1,10 +1,10 @@
+use super::super::{BrowserContext, ConnectionNetworkRequestIdAllocator, PageTargetHost};
+#[cfg(test)]
 use super::super::{
-    BrowserContext, ConnectionNetworkRequestIdAllocator, PageTargetHost, PausedDocumentTransfer,
+    DocumentBodySource, DocumentNavigationToken, NavigationDispatchState, PausedDocumentTransfer,
     PendingFetchAuthNavigation, PendingFetchNavigation, PendingSubresourceFetchAuthRequest,
     PendingSubresourceFetchRequest, PendingSubresourceFetchResponseRequest,
 };
-#[cfg(test)]
-use super::super::{DocumentBodySource, DocumentNavigationToken, NavigationDispatchState};
 
 fn document_navigation_loader_id(sequence: u64) -> String {
     format!("LID-{sequence:010}")
@@ -72,6 +72,7 @@ impl BrowserContext {
         self.page_targets.insert(host)
     }
 
+    #[cfg(test)]
     pub(crate) fn take_active_target_pending_fetch_state(
         &mut self,
     ) -> (
@@ -83,10 +84,6 @@ impl BrowserContext {
         Vec<(String, PendingSubresourceFetchResponseRequest)>,
     ) {
         self.active_target.fetch_owner.drain_pending_requests()
-    }
-
-    pub(crate) fn clear_pending_fetch_state(&mut self) {
-        self.active_target.fetch_owner.clear_pending();
     }
 
     #[cfg(test)]
@@ -213,25 +210,10 @@ impl BrowserContext {
             .captured_response_body(request_id)
     }
 
-    pub(crate) fn clear_captured_response_bodies(&mut self) {
-        self.active_target
-            .runtime_slot
-            .clear_captured_response_bodies();
-    }
-
     pub(crate) fn clear_network_body_artifacts(&mut self) {
         for target in self.page_targets.iter_mut() {
             target.runtime_slot.clear_network_body_artifacts();
         }
-    }
-
-    pub(crate) fn remove_captured_response_body_visibility_for_session(
-        &mut self,
-        session_id: Option<&str>,
-    ) {
-        self.active_target
-            .runtime_slot
-            .remove_captured_response_body_visibility_for_session(session_id);
     }
 
     #[cfg(test)]
@@ -256,41 +238,6 @@ impl BrowserContext {
         self.active_target
             .runtime_slot
             .read_io_stream(handle, offset, size)
-    }
-
-    pub(crate) fn reset_subresource_network_cursor(&mut self) {
-        self.active_target.runtime_slot.reset_subresource_cursor();
-    }
-
-    pub(crate) fn clear_websocket_network_request_ids(&mut self) {
-        self.active_target
-            .runtime_slot
-            .clear_websocket_request_ids();
-    }
-
-    pub(crate) fn clear_websocket_network_artifacts(&mut self) {
-        self.active_target.runtime_slot.clear_websocket_artifacts();
-    }
-
-    pub(crate) fn initialize_network_listener_observation_cursor(
-        &mut self,
-        session_id: Option<&str>,
-    ) {
-        self.active_target
-            .runtime_slot
-            .initialize_network_session_observation_cursor_at_output_tail(session_id);
-    }
-
-    pub(crate) fn remove_network_listener_observation_cursor(&mut self, session_id: Option<&str>) {
-        self.active_target
-            .runtime_slot
-            .remove_network_session_observation_cursor(session_id);
-    }
-
-    pub(crate) fn clear_session_scoped_network_observation_artifacts(&mut self) {
-        self.active_target
-            .runtime_slot
-            .clear_session_scoped_network_observation_artifacts();
     }
 
     #[cfg(test)]
@@ -352,29 +299,6 @@ impl BrowserContext {
         self.active_target
             .runtime_slot
             .subresource_emitted_record_count_for_test()
-    }
-
-    pub(crate) fn prepare_document_navigation_request_ids(
-        &mut self,
-        network_request_id_allocator: &mut ConnectionNetworkRequestIdAllocator,
-        clear_captured_response_bodies: bool,
-        observes_document_request: bool,
-        needs_fetch_navigation_request_id: bool,
-    ) -> (String, Option<String>, Option<String>) {
-        if clear_captured_response_bodies {
-            self.clear_captured_response_bodies();
-        }
-        let mut allocator = self.active_target.runtime_slot.request_id_allocator();
-        let document_loader_id =
-            document_navigation_loader_id(network_request_id_allocator.allocate_sequence());
-        let document_request_id = observes_document_request.then(|| document_loader_id.clone());
-        let fetch_navigation_request_id = needs_fetch_navigation_request_id
-            .then(|| allocator.allocate_fetch_navigation_request_id());
-        (
-            document_loader_id,
-            document_request_id,
-            fetch_navigation_request_id,
-        )
     }
 }
 

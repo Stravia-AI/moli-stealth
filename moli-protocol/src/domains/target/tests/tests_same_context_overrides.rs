@@ -854,12 +854,12 @@ async fn same_context_targets_restore_their_own_loader_overrides_after_switching
     ctx.take_all();
 
     ctx.process_async(json!({
-        "id": 1041741,
+        "id": 1041740,
         "method": "Target.activateTarget",
-        "params": { "targetId": second_target_id }
+        "params": { "targetId": "TID-000000000UA" }
     }))
     .await;
-    ctx.expect_result(1041741, json!({}), None);
+    ctx.expect_result(1041740, json!({}), None);
 
     ctx.process_async(json!({
         "id": 104175,
@@ -878,6 +878,43 @@ async fn same_context_targets_restore_their_own_loader_overrides_after_switching
     }))
     .await;
     ctx.expect_result(104176, json!({}), Some(&second_session_id));
+
+    {
+        let browser_context = ctx
+            .conn
+            .browser_context
+            .as_ref()
+            .expect("active browser context");
+        assert_ne!(
+            browser_context.active_target_id(),
+            Some(second_target_id.as_str()),
+            "the second target must still be in the background"
+        );
+        let background = browser_context
+            .page_target(&second_target_id)
+            .expect("background target");
+        assert_eq!(
+            background.network_policy.user_agent_override(),
+            Some("Moli/Target-B")
+        );
+        assert_eq!(background.tls_verify_host_override, Some(true));
+        assert!(
+            background
+                .navigation_engine()
+                .expect("background navigation engine")
+                .fetch_config()
+                .tls_verify_host(),
+            "the exact background engine must be rebuilt before activation"
+        );
+    }
+
+    ctx.process_async(json!({
+        "id": 1041741,
+        "method": "Target.activateTarget",
+        "params": { "targetId": second_target_id }
+    }))
+    .await;
+    ctx.expect_result(1041741, json!({}), None);
 
     {
         let active = ctx
