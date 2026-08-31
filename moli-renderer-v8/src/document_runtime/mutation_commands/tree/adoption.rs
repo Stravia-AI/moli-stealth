@@ -8,9 +8,10 @@ use crate::{
 
 #[derive(Clone, Debug, Default)]
 pub(in crate::document_runtime) struct TreeAdoptionPlan {
-    roots: Vec<DomHandle>,
+    root: Option<DomHandle>,
+    previous_owner_document: Option<DomHandle>,
     new_document: Option<DomHandle>,
-    previous_owner_documents: Vec<(DomHandle, Option<DomHandle>)>,
+    roots_with_owner_document_change: Vec<DomHandle>,
     custom_elements: custom_elements::CustomElementAdoptionPlan,
 }
 
@@ -22,10 +23,18 @@ impl TreeAdoptionPlan {
         new_document: DomHandle,
         collect_custom_elements: bool,
     ) -> Self {
-        let previous_owner_documents = roots
+        let root = roots.first().copied();
+        let previous_owner_document =
+            root.and_then(|root| dom_host.node(root).and_then(Node::owner_document));
+        let roots_with_owner_document_change = roots
             .iter()
             .copied()
-            .map(|root| (root, dom_host.node(root).and_then(Node::owner_document)))
+            .filter(|root| {
+                dom_host
+                    .node(*root)
+                    .and_then(Node::owner_document)
+                    .is_some_and(|previous| previous != new_document)
+            })
             .collect();
         let custom_elements = if collect_custom_elements {
             custom_elements::adoption_plan_for_roots_before_adoption(host_ptr, roots, new_document)
@@ -33,15 +42,18 @@ impl TreeAdoptionPlan {
             custom_elements::CustomElementAdoptionPlan::default()
         };
         Self {
-            roots: roots.to_vec(),
+            root,
+            previous_owner_document,
             new_document: Some(new_document),
-            previous_owner_documents,
+            roots_with_owner_document_change,
             custom_elements,
         }
     }
 
-    pub(in crate::document_runtime) fn root(&self) -> Option<DomHandle> {
-        self.roots.first().copied()
+    pub(in crate::document_runtime) fn root_with_previous_owner_document(
+        &self,
+    ) -> Option<(DomHandle, Option<DomHandle>)> {
+        self.root.map(|root| (root, self.previous_owner_document))
     }
 
     pub(super) fn has_targets(&self) -> bool {
@@ -59,14 +71,8 @@ impl TreeAdoptionPlan {
         &self.custom_elements
     }
 
-    pub(in crate::document_runtime) fn previous_owner_document_for(
-        &self,
-        root: DomHandle,
-    ) -> Option<DomHandle> {
-        self.previous_owner_documents
-            .iter()
-            .find_map(|(candidate, previous)| (*candidate == root).then_some(*previous))
-            .flatten()
+    pub(in crate::document_runtime) fn roots_with_owner_document_change(&self) -> &[DomHandle] {
+        &self.roots_with_owner_document_change
     }
 
     pub(in crate::document_runtime) fn new_document(&self) -> Option<DomHandle> {
@@ -110,14 +116,7 @@ impl DocumentRuntime {
             return;
         }
         let runtime = unsafe { &mut *host_ptr };
-        for &root in insertion_plan.insertion_roots {
-            if !insertion_plan
-                .adoption
-                .previous_owner_document_for(root)
-                .is_some_and(|previous| previous != new_document)
-            {
-                continue;
-            }
+        for &root in insertion_plan.adoption.roots_with_owner_document_change() {
             for shadow_root in runtime.shadow_roots_in_subtree(root) {
                 crate::native_bridge::element::clear_shadow_root_adopted_style_sheets(
                     scope,
@@ -127,5 +126,50 @@ impl DocumentRuntime {
             }
             runtime.note_style_subtree_context_change(root);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dom::native::NativeDom;
+    use url::Url;
+
+    #[test]
+    fn adoption_plan_records_only_roots_that_change_owner_document() {
+        let mut dom_host = DomHost::from_dom(NativeDom::new(
+            Url::parse("https://example.test/").expect("test URL parses"),
+        ));
+        let target_document = dom_host.document_handle();
+        let other_document = dom_host.create_detached_html_document();
+        let same_document_root = dom_host.create_parser_element_without_attributes_for_document(
+            target_document,
+            "div".to_owned(),
+            "http://www.w3.org/1999/xhtml".to_owned(),
+            None,
+        );
+        let other_document_root = dom_host.create_parser_element_without_attributes_for_document(
+            other_document,
+            "span".to_owned(),
+            "http://www.w3.org/1999/xhtml".to_owned(),
+            None,
+        );
+
+        let plan = TreeAdoptionPlan::before_adoption(
+            &dom_host,
+            std::ptr::null_mut(),
+            &[same_document_root, other_document_root],
+            target_document,
+            false,
+        );
+
+        assert_eq!(
+            plan.root_with_previous_owner_document(),
+            Some((same_document_root, Some(target_document)))
+        );
+        assert_eq!(
+            plan.roots_with_owner_document_change(),
+            &[other_document_root]
+        );
     }
 }

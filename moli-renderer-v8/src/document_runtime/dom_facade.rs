@@ -737,7 +737,7 @@ impl DocumentRuntime {
         host_ptr: *mut JsContextHost,
         plan: &TreeAdoptionPlan,
     ) -> Option<DomHandle> {
-        let root = plan.root()?;
+        let (root, previous_owner_document) = plan.root_with_previous_owner_document()?;
         let new_document = plan.new_document()?;
         let (adopted, stylesheet_owner_changes) = self
             .dom_host
@@ -746,7 +746,6 @@ impl DocumentRuntime {
             host_ptr,
             &plan.custom_elements().registry_retargets,
         );
-        let previous_owner_document = plan.previous_owner_document_for(root);
         if previous_owner_document.is_some_and(|owner| owner != new_document) {
             self.queue_image_loads_after_owner_document_change(scope, host_ptr, root);
         }

@@ -12,15 +12,10 @@ impl DocumentRuntime {
         insertion_plan: &TreeInsertionPlan<'_>,
     ) {
         let runtime = unsafe { &mut *host_ptr };
+        for &root in insertion_plan.adoption.roots_with_owner_document_change() {
+            runtime.migrate_inline_style_metadata_in_subtree(root);
+        }
         for &root in insertion_plan.insertion_roots {
-            if let Some(new_document) = insertion_plan.adoption.new_document()
-                && insertion_plan
-                    .adoption
-                    .previous_owner_document_for(root)
-                    .is_some_and(|previous| previous != new_document)
-            {
-                runtime.migrate_inline_style_metadata_in_subtree(root);
-            }
             runtime.clear_disconnected_shadow_roots_in_subtree(root);
             runtime.drop_child_browsing_contexts_moved_into_own_document_subtree(scope, root);
             runtime.sync_child_browsing_context_subtree_and_initial_history_floor(scope, root);
