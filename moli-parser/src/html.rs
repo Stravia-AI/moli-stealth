@@ -27,7 +27,7 @@ use super::live_target::{
     ParserDomMutationConsumer, ParserDomReadConsumer, ParserElementCreationConsumer,
     ParserMutationEffectConsumer, ParserMutationEffectDelivery, ParserRuntimeDomSinks,
     ParserStreamHtmlTreeSinkTarget, new_live_document_root_html_tree_sink_stream,
-    new_parser_stream_html_tree_sink_stream, new_parser_stream_html_tree_sink_target,
+    new_parser_stream_html_tree_sink_stream,
 };
 use super::{
     ParserSourcePosition, html_chunks,
@@ -424,23 +424,6 @@ impl HtmlParser {
         DocumentStream::new_live_document_root(final_url, document_handle, self.scripting_enabled)
     }
 
-    pub fn parse_fragment(
-        &self,
-        final_url: Url,
-        context_namespace: &str,
-        context_local_name: &str,
-        html: String,
-    ) -> NativeDom {
-        self.parse_fragment_with_declarative_shadow_roots(
-            final_url,
-            context_namespace,
-            context_local_name,
-            html,
-            true,
-            self.scripting_enabled,
-        )
-    }
-
     pub fn parse_fragment_without_declarative_shadow_roots(
         &self,
         final_url: Url,
@@ -489,34 +472,6 @@ impl HtmlParser {
             parser.process(StrTendril::from(chunk));
         }
         parser.finish().finish_document(html)
-    }
-
-    pub fn parse_fragment_dom_host(
-        &self,
-        final_url: Url,
-        context_namespace: &str,
-        context_local_name: &str,
-        html: String,
-    ) -> DomHost {
-        let target = new_parser_stream_html_tree_sink_target(final_url);
-        let context = QualName::new(
-            None,
-            Namespace::from(context_namespace),
-            LocalName::from(context_local_name),
-        );
-        let context_handle = ParseHandle::new_synthetic_fragment_context(Rc::new(context));
-        let sink = DocumentSink::new(target);
-        let mut parser = HtmlParserSession::new_fragment(
-            sink,
-            html_parse_opts_with_scripting(self.scripting_enabled),
-            context_handle,
-            self.scripting_enabled,
-        );
-
-        for chunk in html_chunks(&html) {
-            parser.process(StrTendril::from(chunk));
-        }
-        parser.finish().finish_dom_host()
     }
 
     /// Parses an inert HTML fragment directly into a runtime-owned detached
