@@ -3496,6 +3496,45 @@ fn frame_owner_content_document_getter_function<'s>(
     }
 }
 
+fn frame_owner_content_document_getter_for<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    rv: v8::ReturnValue<'_, v8::Value>,
+    interface: &'static str,
+    local_name: &'static str,
+) {
+    if html_element_getter_receiver(scope, args.this(), interface, "contentDocument", local_name)
+        .is_none()
+    {
+        return;
+    }
+    frame_owner_content_document_getter_function(scope, args, rv);
+}
+
+fn frame_content_document_getter_function<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    rv: v8::ReturnValue<'_, v8::Value>,
+) {
+    frame_owner_content_document_getter_for(scope, args, rv, "HTMLFrameElement", "frame");
+}
+
+fn iframe_content_document_getter_function<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    rv: v8::ReturnValue<'_, v8::Value>,
+) {
+    frame_owner_content_document_getter_for(scope, args, rv, "HTMLIFrameElement", "iframe");
+}
+
+fn object_content_document_getter_function<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    rv: v8::ReturnValue<'_, v8::Value>,
+) {
+    frame_owner_content_document_getter_for(scope, args, rv, "HTMLObjectElement", "object");
+}
+
 fn frame_owner_get_svg_document_callback<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     args: v8::FunctionCallbackArguments<'s>,
@@ -3587,6 +3626,45 @@ fn frame_owner_content_window_getter_function<'s>(
         Some(window) => rv.set(window.into()),
         None => rv.set_null(),
     }
+}
+
+fn frame_owner_content_window_getter_for<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    rv: v8::ReturnValue<'_, v8::Value>,
+    interface: &'static str,
+    local_name: &'static str,
+) {
+    if html_element_getter_receiver(scope, args.this(), interface, "contentWindow", local_name)
+        .is_none()
+    {
+        return;
+    }
+    frame_owner_content_window_getter_function(scope, args, rv);
+}
+
+fn frame_content_window_getter_function<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    rv: v8::ReturnValue<'_, v8::Value>,
+) {
+    frame_owner_content_window_getter_for(scope, args, rv, "HTMLFrameElement", "frame");
+}
+
+fn iframe_content_window_getter_function<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    rv: v8::ReturnValue<'_, v8::Value>,
+) {
+    frame_owner_content_window_getter_for(scope, args, rv, "HTMLIFrameElement", "iframe");
+}
+
+fn object_content_window_getter_function<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    rv: v8::ReturnValue<'_, v8::Value>,
+) {
+    frame_owner_content_window_getter_for(scope, args, rv, "HTMLObjectElement", "object");
 }
 
 #[derive(WebApiFunctionTemplate)]
@@ -4130,6 +4208,16 @@ struct HtmlFrameElementLegacyPrototypeDeclaration {
         setter_data = NullToEmptyDomStringReflection::FrameMarginWidth
     )]
     margin_width: (),
+    #[webapi(
+        accessor_property,
+        getter = frame_content_document_getter_function
+    )]
+    content_document: (),
+    #[webapi(
+        accessor_property,
+        getter = frame_content_window_getter_function
+    )]
+    content_window: (),
 }
 
 #[derive(WebApiFunctionTemplate)]
@@ -4237,12 +4325,12 @@ struct HtmlIFrameElementPrototypeDeclaration {
     margin_width: (),
     #[webapi(
         accessor_property,
-        getter = frame_owner_content_document_getter_function
+        getter = iframe_content_document_getter_function
     )]
     content_document: (),
     #[webapi(
         accessor_property,
-        getter = frame_owner_content_window_getter_function
+        getter = iframe_content_window_getter_function
     )]
     content_window: (),
     #[webapi(
@@ -5545,12 +5633,12 @@ struct HtmlObjectElementPrototypeDeclaration {
     height: (),
     #[webapi(
         accessor_property,
-        getter = frame_owner_content_document_getter_function
+        getter = object_content_document_getter_function
     )]
     content_document: (),
     #[webapi(
         accessor_property,
-        getter = frame_owner_content_window_getter_function
+        getter = object_content_window_getter_function
     )]
     content_window: (),
     #[webapi(
