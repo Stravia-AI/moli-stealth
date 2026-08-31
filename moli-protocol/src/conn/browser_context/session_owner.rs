@@ -1,4 +1,6 @@
-use crate::conn::{BrowserContext, CdpConnection, CdpSessionRoute, TargetPageState};
+#[cfg(test)]
+use crate::conn::BrowserContext;
+use crate::conn::{CdpConnection, CdpSessionRoute, TargetPageState};
 
 pub(super) enum TargetSessionOwner {
     PageTarget {
@@ -10,6 +12,7 @@ pub(super) enum TargetSessionOwner {
 }
 
 impl CdpConnection {
+    #[cfg(test)]
     pub(crate) fn with_background_target_session<R>(
         &mut self,
         session_id: Option<&str>,
@@ -20,15 +23,14 @@ impl CdpConnection {
         Some(f(browser_context, &target_id))
     }
 
-    pub(crate) fn mutate_background_target_page_session_state(
+    pub(crate) fn mutate_target_page_state_for_session(
         &mut self,
         session_id: Option<&str>,
         f: impl FnOnce(&mut TargetPageState),
     ) -> bool {
-        self.with_background_target_session(session_id, |browser_context, target_id| {
-            browser_context.mutate_parked_page_session_state(target_id, f);
-        })
-        .is_some()
+        self.target_session_owner_mut(session_id)
+            .and_then(|mut owner| owner.mutate_page_state(|state, _, _| f(state)))
+            .is_some()
     }
 
     pub(super) fn target_session_owner(

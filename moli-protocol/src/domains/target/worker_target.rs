@@ -3712,6 +3712,7 @@ mod tests {
         let mut context = BrowserContext::new("BID-1".to_owned());
         context.set_active_target_id("TID-page");
         let page_attachment_id = context
+            .active_page_state_mut()
             .active_target
             .runtime_slot
             .set_page_attachment_id_for_test(1);
@@ -4693,6 +4694,7 @@ mod tests {
         conn.browser_context
             .as_mut()
             .unwrap()
+            .active_page_state_mut()
             .active_target
             .runtime_slot
             .replace_page_attachment_id_for_test();

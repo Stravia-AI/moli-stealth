@@ -195,16 +195,17 @@ fn remove_network_intercept_from_browser_context(
     browser_context: &mut BrowserContext,
     intercept_id: &str,
 ) -> Result<Option<Option<moli_core::page::PendingPageCommand>>, String> {
-    if browser_context
+    let target = browser_context.active_page_target_mut();
+    if target
         .active_target
         .fetch_owner
         .remove_network_intercept(intercept_id)
     {
-        let (subresource_enabled, subresource_resource_type) = browser_context
+        let (subresource_enabled, subresource_resource_type) = target
             .active_target
             .fetch_owner
             .subresource_interception_config();
-        let Some(page) = browser_context.active_target.runtime_slot.loaded_page_mut() else {
+        let Some(page) = target.active_target.runtime_slot.loaded_page_mut() else {
             return Ok(Some(None));
         };
         return page

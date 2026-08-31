@@ -903,10 +903,12 @@ impl CdpConnection {
         if is_browser_session && let Some(browser_context) = self.browser_context.as_mut() {
             if let Some(browser_identity) = browser_identity {
                 browser_context
+                    .active_page_target_mut()
                     .network_policy
                     .set_browser_identity_override(browser_identity);
             } else {
                 browser_context
+                    .active_page_target_mut()
                     .network_policy
                     .clear_browser_identity_override();
             }
@@ -1075,14 +1077,20 @@ mod tests {
     fn target_session_state_mut_applies_active_and_parked_network_fields() {
         let mut active = BrowserContext::new_with_page_for_test("BID-active", "TID-active");
         {
-            let network = &mut active.devtools_sessions.primary_mut().network_session_state;
+            let network = &mut active
+                .active_page_state_mut()
+                .devtools_sessions
+                .primary_mut()
+                .network_session_state;
             network.network_enabled = true;
             network.cache_disabled = true;
             network.bypass_service_worker = true;
             network.blocked_url_patterns = vec!["*://blocked.test/*".to_owned()];
             network.extra_headers = vec![("X-Test".to_owned(), "active".to_owned())];
         }
-        active.refresh_devtools_network_policy();
+        active
+            .active_page_state_mut()
+            .refresh_devtools_network_policy();
         let active_offline = active_session_state_mut(&mut active).set_emulated_network_conditions(
             true,
             25.0,
@@ -1091,23 +1099,52 @@ mod tests {
             Some("cellular3g".to_owned()),
         );
 
-        assert!(active.network_policy.cache_disabled());
-        assert!(active.network_policy.bypass_service_worker());
+        assert!(active.active_page_state().network_policy.cache_disabled());
+        assert!(
+            active
+                .active_page_state()
+                .network_policy
+                .bypass_service_worker()
+        );
         assert_eq!(
-            active.network_policy.blocked_url_patterns(),
+            active
+                .active_page_state()
+                .network_policy
+                .blocked_url_patterns(),
             vec!["*://blocked.test/*"]
         );
         assert_eq!(
-            active.network_policy.extra_headers(),
+            active.active_page_state().network_policy.extra_headers(),
             vec![("X-Test".to_owned(), "active".to_owned())]
         );
         assert_eq!(active_offline, Some(true));
-        assert!(active.network_policy.network_offline());
-        assert_eq!(active.network_policy.emulated_network_latency(), 25.0);
-        assert_eq!(active.network_policy.emulated_download_throughput(), 1024.0);
-        assert_eq!(active.network_policy.emulated_upload_throughput(), 256.0);
+        assert!(active.active_page_state().network_policy.network_offline());
         assert_eq!(
-            active.network_policy.emulated_connection_type(),
+            active
+                .active_page_state()
+                .network_policy
+                .emulated_network_latency(),
+            25.0
+        );
+        assert_eq!(
+            active
+                .active_page_state()
+                .network_policy
+                .emulated_download_throughput(),
+            1024.0
+        );
+        assert_eq!(
+            active
+                .active_page_state()
+                .network_policy
+                .emulated_upload_throughput(),
+            256.0
+        );
+        assert_eq!(
+            active
+                .active_page_state()
+                .network_policy
+                .emulated_connection_type(),
             Some("cellular3g")
         );
 

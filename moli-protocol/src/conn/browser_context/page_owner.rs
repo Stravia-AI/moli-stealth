@@ -523,6 +523,7 @@ fn devtools_session_page_domain_enabled(state: &DevToolsSessionState) -> bool {
 
 fn browser_context_has_page_domain_enabled_session(browser_context: &BrowserContext) -> bool {
     browser_context
+        .active_page_target()
         .devtools_sessions
         .states()
         .any(devtools_session_page_domain_enabled)
@@ -1019,38 +1020,45 @@ mod tests {
         );
 
         assert!(
-            active.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+            active.active_page_state().devtools_sessions
+                [moli_page_types::DevToolsSessionKey::Primary]
                 .console_output_session_state
                 .console_enabled
         );
         assert!(
-            active.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+            active.active_page_state().devtools_sessions
+                [moli_page_types::DevToolsSessionKey::Primary]
                 .page_session_state
                 .log_enabled
         );
         assert!(
-            active.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+            active.active_page_state().devtools_sessions
+                [moli_page_types::DevToolsSessionKey::Primary]
                 .page_session_state
                 .page_file_chooser_opened_event_enabled
         );
         assert!(
-            active.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+            active.active_page_state().devtools_sessions
+                [moli_page_types::DevToolsSessionKey::Primary]
                 .page_session_state
                 .page_bypass_csp_enabled
         );
         assert_eq!(
-            active.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+            active.active_page_state().devtools_sessions
+                [moli_page_types::DevToolsSessionKey::Primary]
                 .page_session_state
                 .page_font_families,
             font_families
         );
         assert!(
-            active.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+            active.active_page_state().devtools_sessions
+                [moli_page_types::DevToolsSessionKey::Primary]
                 .page_session_state
                 .page_intercept_file_chooser_dialog_enabled
         );
         assert!(
-            active.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+            active.active_page_state().devtools_sessions
+                [moli_page_types::DevToolsSessionKey::Primary]
                 .page_session_state
                 .performance
                 .enabled()
@@ -1172,6 +1180,7 @@ mod tests {
             conn.browser_context
                 .as_ref()
                 .expect("browser context")
+                .active_page_state()
                 .devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
                 .page_session_state
                 .page_file_chooser_opened_event_enabled
@@ -1183,6 +1192,7 @@ mod tests {
                 .browser_context
                 .as_ref()
                 .expect("browser context")
+                .active_page_state()
                 .devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
                 .page_session_state
                 .page_file_chooser_opened_event_enabled

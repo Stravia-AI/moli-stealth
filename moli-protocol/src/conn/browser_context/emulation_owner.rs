@@ -186,7 +186,8 @@ impl CdpConnection {
 
 impl BrowserContext {
     pub(crate) fn effective_active_emulated_device_metrics(&self) -> Option<EmulatedDeviceMetrics> {
-        self.emulated_device_metrics
+        self.active_page_target()
+            .emulated_device_metrics
             .clone()
             .or_else(|| self.default_emulated_device_metrics.clone())
     }

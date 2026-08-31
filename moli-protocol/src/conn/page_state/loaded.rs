@@ -48,7 +48,7 @@ impl BrowserContext {
 
     #[cfg(test)]
     fn clear_active_target_loaded_document_session_state(&mut self) {
-        for session in self.devtools_sessions.states_mut() {
+        for session in self.active_page_state_mut().devtools_sessions.states_mut() {
             session
                 .page_session_state
                 .clear_loaded_document_context_state();
@@ -57,9 +57,14 @@ impl BrowserContext {
 
     #[cfg(test)]
     pub(crate) fn replace_loaded_page(&mut self, page: Option<Page>) -> Option<Page> {
-        let previous = self.active_target.runtime_slot.replace_loaded_page(page);
+        let previous = self
+            .active_page_state_mut()
+            .active_target
+            .runtime_slot
+            .replace_loaded_page(page);
         self.ingest_active_target_output_updates();
-        self.active_target
+        self.active_page_state_mut()
+            .active_target
             .owner_state
             .clear_loaded_document_context_state();
         self.clear_active_target_loaded_document_session_state();
@@ -72,11 +77,13 @@ impl BrowserContext {
         reason: TargetPageAbsenceReason,
     ) -> Option<Page> {
         let previous = self
+            .active_page_state_mut()
             .active_target
             .runtime_slot
             .clear_loaded_page_with_reason(reason);
         self.ingest_active_target_output_updates();
-        self.active_target
+        self.active_page_state_mut()
+            .active_target
             .owner_state
             .clear_loaded_document_context_state();
         self.clear_active_target_loaded_document_session_state();
@@ -89,7 +96,8 @@ impl BrowserContext {
         // browsing context. New pages should inherit the current browser
         // policy surface before any JS observes `document.cookie` or
         // `navigator.cookieEnabled`.
-        self.document_cookie_manager_surface
+        self.active_page_state()
+            .document_cookie_manager_surface
             .apply_to_page_async(&mut page)
             .await;
         let _ = self.replace_loaded_page(Some(page));
@@ -103,7 +111,8 @@ impl BrowserContext {
 
     #[cfg(test)]
     pub(crate) fn ingest_active_target_output_updates(&mut self) -> bool {
-        self.active_target
+        self.active_page_state_mut()
+            .active_target
             .runtime_slot
             .ingest_owner_page_observable_output_updates()
     }
@@ -112,8 +121,14 @@ impl BrowserContext {
         &mut self,
     ) -> Result<(), String> {
         self.clear_active_target_session_scoped_state_fields();
-        let emulated_media: moli_core::page::EmulatedMediaOverrides = (&self.emulated_media).into();
-        if let Some(page) = self.active_target.runtime_slot.loaded_page_mut() {
+        let emulated_media: moli_core::page::EmulatedMediaOverrides =
+            (&self.active_page_target().emulated_media).into();
+        if let Some(page) = self
+            .active_page_target_mut()
+            .active_target
+            .runtime_slot
+            .loaded_page_mut()
+        {
             page.set_extra_http_headers_async(&[])
                 .await
                 .map_err(|error| format!("failed to clear page extra headers: {error}"))?;
