@@ -705,6 +705,36 @@ mod tests {
     }
 
     #[test]
+    fn silent_staging_splice_keeps_versions_stable_and_query_index_complete() {
+        let mut host = test_host();
+        let detached_document = host.create_detached_html_document();
+        let detached_style = host.create_element("style");
+
+        assert!(
+            host.html_elements_by_local_name_in_document_tree_order(detached_document, "style")
+                .is_empty()
+        );
+        let dom_version = host.dom_version();
+        let query_version = host.query_version();
+
+        assert!(host.append_child_without_mutation_effects(detached_document, detached_style));
+        assert_eq!(host.dom_version(), dom_version);
+        assert_eq!(host.query_version(), query_version);
+        assert_eq!(
+            host.html_elements_by_local_name_in_document_tree_order(detached_document, "style"),
+            vec![detached_style]
+        );
+
+        assert!(host.remove_child_without_mutation_effects(detached_document, detached_style));
+        assert_eq!(host.dom_version(), dom_version);
+        assert_eq!(host.query_version(), query_version);
+        assert!(
+            host.html_elements_by_local_name_in_document_tree_order(detached_document, "style")
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn shared_script_query_honors_requested_light_tree_root_and_namespace() {
         let mut host = test_host();
         let document = host.document_handle();

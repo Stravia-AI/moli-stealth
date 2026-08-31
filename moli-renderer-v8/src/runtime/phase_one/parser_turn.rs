@@ -235,39 +235,58 @@ impl ParserDomMutationConsumer for PhaseOneParserOwner<'_> {
             .add_attrs_if_missing_for_parser_in_live_dom_host(node_id, attrs);
     }
 
-    fn create_text_node(&mut self, text: String) -> NativeNodeId {
+    fn create_text_node(&mut self, document_handle: NativeNodeId, text: String) -> NativeNodeId {
         self.vm
             .document_runtime
-            .create_text_node_in_live_dom_host(text)
+            .create_text_node_for_document_in_live_dom_host(document_handle, text)
     }
 
-    fn create_comment(&mut self, text: String) -> NativeNodeId {
+    fn create_comment(&mut self, document_handle: NativeNodeId, text: String) -> NativeNodeId {
         self.vm
             .document_runtime
-            .create_comment_in_live_dom_host(text)
+            .create_comment_for_document_in_live_dom_host(document_handle, text)
     }
 
-    fn create_processing_instruction(&mut self, target: String, data: String) -> NativeNodeId {
+    fn create_processing_instruction(
+        &mut self,
+        document_handle: NativeNodeId,
+        target: String,
+        data: String,
+    ) -> NativeNodeId {
         self.vm
             .document_runtime
-            .create_processing_instruction_in_live_dom_host(target, data)
+            .create_processing_instruction_for_document_in_live_dom_host(
+                document_handle,
+                target,
+                data,
+            )
     }
 
-    fn create_cdata_section(&mut self, data: String) -> NativeNodeId {
+    fn create_cdata_section(
+        &mut self,
+        document_handle: NativeNodeId,
+        data: String,
+    ) -> NativeNodeId {
         self.vm
             .document_runtime
-            .create_cdata_section_in_live_dom_host(data)
+            .create_cdata_section_for_document_in_live_dom_host(document_handle, data)
     }
 
     fn create_document_type(
         &mut self,
+        document_handle: NativeNodeId,
         name: String,
         public_id: String,
         system_id: String,
     ) -> NativeNodeId {
         self.vm
             .document_runtime
-            .create_document_type_in_live_dom_host(name, public_id, system_id)
+            .create_document_type_for_document_in_live_dom_host(
+                document_handle,
+                name,
+                public_id,
+                system_id,
+            )
     }
 
     fn prepend_text_to_text_node(&mut self, node_id: NativeNodeId, text: String) {

@@ -22,7 +22,6 @@ use moli_stylesheet_blocking::{
     DocumentBlockingStylesheetSignature, DocumentOwnedBlockingStylesheetDiscoveryInput,
 };
 
-#[cfg(any(test, feature = "test-support"))]
 use super::live_target::new_live_fragment_root_html_tree_sink_stream;
 use super::live_target::{
     ParserDomMutationConsumer, ParserDomReadConsumer, ParserElementCreationConsumer,
@@ -519,6 +518,53 @@ impl HtmlParser {
         }
         parser.finish().finish_dom_host()
     }
+
+    /// Parses an inert HTML fragment directly into a runtime-owned detached
+    /// `DocumentFragment`.
+    ///
+    /// The parser mutates only through the scoped consumer callbacks. Custom
+    /// elements are intentionally left unconstructed so the caller can apply
+    /// the fragment API's required upgrade timing after normalization or
+    /// insertion.
+    #[allow(clippy::too_many_arguments)]
+    pub fn parse_fragment_into_live_dom<T>(
+        &self,
+        final_url: Url,
+        fragment_handle: NativeNodeId,
+        owner_document_handle: NativeNodeId,
+        context_handle: NativeNodeId,
+        context_namespace: &str,
+        context_local_name: &str,
+        html: &str,
+        consumer: &mut T,
+        allow_declarative_shadow_roots: bool,
+    ) -> ParserFinishDiscoverySignals
+    where
+        T: ParserDomReadConsumer + ParserDomMutationConsumer + ParserMutationEffectConsumer,
+    {
+        // TreeBuilder::new_for_fragment creates its synthetic root eagerly, so
+        // construction itself must run under the same scoped runtime sinks as
+        // every later feed/finish operation.
+        let runtime_dom_sinks =
+            // SAFETY: `consumer` remains exclusively borrowed until the
+            // constructor clears the sink bundle before returning.
+            unsafe { ParserRuntimeDomSinks::from_consumer_without_element_creation(consumer) };
+        let mut stream = DocumentStream::new_live_fragment_root(
+            final_url,
+            fragment_handle,
+            owner_document_handle,
+            context_handle,
+            context_namespace,
+            context_local_name,
+            runtime_dom_sinks,
+            allow_declarative_shadow_roots,
+            self.scripting_enabled,
+        );
+        for chunk in html_chunks(html) {
+            stream.feed_with_runtime_dom_consumer_without_element_creation(chunk, consumer);
+        }
+        stream.finish_with_runtime_dom_consumer_without_element_creation(consumer)
+    }
 }
 
 impl Default for ParserInputQueue {
@@ -550,10 +596,10 @@ impl DocumentStream {
         }
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     fn new_live_fragment_root(
         final_url: Url,
         fragment_handle: NativeNodeId,
+        owner_document_handle: NativeNodeId,
         context_handle: NativeNodeId,
         context_namespace: &str,
         context_local_name: &str,
@@ -565,6 +611,7 @@ impl DocumentStream {
             inner: new_live_fragment_root_html_tree_sink_stream(
                 final_url,
                 fragment_handle,
+                owner_document_handle,
                 context_handle,
                 context_namespace,
                 context_local_name,
@@ -598,6 +645,7 @@ impl DocumentStream {
     pub fn new_live_fragment_root_for_testing<T>(
         final_url: Url,
         fragment_handle: NativeNodeId,
+        owner_document_handle: NativeNodeId,
         context_handle: NativeNodeId,
         context_namespace: &str,
         context_local_name: &str,
@@ -615,6 +663,7 @@ impl DocumentStream {
         Self::new_live_fragment_root(
             final_url,
             fragment_handle,
+            owner_document_handle,
             context_handle,
             context_namespace,
             context_local_name,
@@ -658,6 +707,22 @@ impl DocumentStream {
 
     pub fn feed(&mut self, chunk: &str) {
         self.inner.feed(chunk)
+    }
+
+    fn feed_with_runtime_dom_consumer_without_element_creation<T>(
+        &mut self,
+        chunk: &str,
+        consumer: &mut T,
+    ) where
+        T: ParserDomReadConsumer + ParserDomMutationConsumer + ParserMutationEffectConsumer,
+    {
+        // SAFETY: `consumer` stays exclusively borrowed for this call; the
+        // parser-step Drop guard removes every erased callback before return.
+        let sinks =
+            unsafe { ParserRuntimeDomSinks::from_consumer_without_element_creation(consumer) };
+        self.inner.enter_runtime_dom_sinks_parse_step(sinks);
+        let mut step = RuntimeDomSinksParserStep { stream: self };
+        step.feed(chunk);
     }
 
     /// Append decoded document input to the parser-owned end segment chain.
@@ -896,6 +961,20 @@ impl DocumentStream {
         self.finish_with_runtime_dom_sinks(sinks)
     }
 
+    fn finish_with_runtime_dom_consumer_without_element_creation<T>(
+        self,
+        consumer: &mut T,
+    ) -> ParserFinishDiscoverySignals
+    where
+        T: ParserDomReadConsumer + ParserDomMutationConsumer + ParserMutationEffectConsumer,
+    {
+        // SAFETY: `consumer` stays exclusively borrowed for this call. The
+        // finish guard clears the callbacks if parser finalization unwinds.
+        let sinks =
+            unsafe { ParserRuntimeDomSinks::from_consumer_without_element_creation(consumer) };
+        self.finish_with_runtime_dom_sinks(sinks)
+    }
+
     fn finish_with_runtime_dom_sinks(
         mut self,
         sinks: ParserRuntimeDomSinks,
@@ -998,6 +1077,10 @@ struct RuntimeDomSinksParserStep<'a> {
 }
 
 impl RuntimeDomSinksParserStep<'_> {
+    fn feed(&mut self, chunk: &str) {
+        self.stream.inner.feed(chunk);
+    }
+
     fn pump_parser_step(&mut self, chunk: &str) -> ParserPumpOutcome {
         self.stream.pump_parser_step(chunk)
     }

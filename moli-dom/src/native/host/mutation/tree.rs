@@ -12,9 +12,20 @@ impl DomHost {
         parent: DomHandle,
         child: DomHandle,
     ) -> bool {
+        self.insert_before_without_mutation_effects(parent, child, None)
+    }
+
+    /// Raw tree splice for parser/clone staging trees that are not yet exposed
+    /// through a Web mutation surface.
+    pub fn insert_before_without_mutation_effects(
+        &mut self,
+        parent: DomHandle,
+        child: DomHandle,
+        reference_child: Option<DomHandle>,
+    ) -> bool {
         let previous_shadow_root = self.containing_shadow_root(child);
-        let appended = self.dom.append_child(parent, child);
-        if appended {
+        let inserted = self.dom.insert_before(parent, child, reference_child);
+        if inserted {
             if let Some(shadow_root) = previous_shadow_root {
                 self.invalidate_shadow_slot_name_index(shadow_root);
             }
@@ -26,7 +37,24 @@ impl DomHost {
             // this does not advance query_version or emit mutation effects.
             self.record_query_index_candidates_in_subtree(child);
         }
-        appended
+        inserted
+    }
+
+    /// Raw removal counterpart to [`Self::insert_before_without_mutation_effects`].
+    pub fn remove_child_without_mutation_effects(
+        &mut self,
+        parent: DomHandle,
+        child: DomHandle,
+    ) -> bool {
+        let previous_shadow_root = self.containing_shadow_root(child);
+        let removed = self.dom.remove_child(parent, child);
+        if removed {
+            if let Some(shadow_root) = previous_shadow_root {
+                self.invalidate_shadow_slot_name_index(shadow_root);
+            }
+            self.invalidate_shadow_slot_name_index_for_tree_parent(parent);
+        }
+        removed
     }
 
     pub fn remove_child(&mut self, parent: DomHandle, child: DomHandle) -> bool {

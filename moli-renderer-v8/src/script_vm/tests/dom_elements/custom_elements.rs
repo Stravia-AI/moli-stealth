@@ -2902,6 +2902,49 @@ fn scoped_registry_define_upgrades_associated_connected_nodes() {
 }
 
 #[test]
+fn fragment_html_skips_redundant_default_registry_associations() {
+    let mut vm = new_storage_test_vm("https://example.com/");
+
+    let setup = vm
+        .eval(
+            r#"
+            (() => {
+              const container = document.createElement("div");
+              window.__moliDefaultRegistryContainer = container;
+              return container.customElementRegistry === customElements;
+            })()
+            "#,
+        )
+        .expect("default registry fragment setup should evaluate");
+    assert_eq!(setup, "true");
+    let associations_before = vm.custom_element_registry_association_count_for_test();
+
+    let result = vm
+        .eval(
+            r#"
+            (() => {
+              const container = window.__moliDefaultRegistryContainer;
+              container.innerHTML = "<div></div>".repeat(128);
+              return [
+                container.children.length,
+                Array.from(container.children).every(
+                  child => child.customElementRegistry === customElements
+                )
+              ].join("|");
+            })()
+            "#,
+        )
+        .expect("default registry fragment should evaluate");
+
+    assert_eq!(result, "128|true");
+    assert_eq!(
+        vm.custom_element_registry_association_count_for_test(),
+        associations_before,
+        "fragment roots using their owner document's default registry should not need explicit associations"
+    );
+}
+
+#[test]
 fn fragment_html_uses_context_custom_element_registry_association() {
     let mut vm = new_storage_test_vm("https://example.com/");
 

@@ -362,38 +362,52 @@ impl DocumentRuntime {
         }
     }
 
-    pub(crate) fn create_text_node_in_live_dom_host(&mut self, text: String) -> DomHandle {
-        self.dom_host_mut_for_active_parser_step()
-            .create_text_node(&text)
-    }
-
-    pub(crate) fn create_comment_in_live_dom_host(&mut self, text: String) -> DomHandle {
-        self.dom_host_mut_for_active_parser_step()
-            .create_comment(&text)
-    }
-
-    pub(crate) fn create_processing_instruction_in_live_dom_host(
+    pub(crate) fn create_text_node_for_document_in_live_dom_host(
         &mut self,
+        document_handle: DomHandle,
+        text: String,
+    ) -> DomHandle {
+        self.dom_host_mut_for_active_parser_step()
+            .create_text_node_for_document(document_handle, &text)
+    }
+
+    pub(crate) fn create_comment_for_document_in_live_dom_host(
+        &mut self,
+        document_handle: DomHandle,
+        text: String,
+    ) -> DomHandle {
+        self.dom_host_mut_for_active_parser_step()
+            .create_comment_for_document(document_handle, &text)
+    }
+
+    pub(crate) fn create_processing_instruction_for_document_in_live_dom_host(
+        &mut self,
+        document_handle: DomHandle,
         target: String,
         data: String,
     ) -> DomHandle {
         self.dom_host_mut_for_active_parser_step()
-            .create_processing_instruction(&target, &data)
+            .create_processing_instruction_for_document(document_handle, &target, &data)
     }
 
-    pub(crate) fn create_cdata_section_in_live_dom_host(&mut self, data: String) -> DomHandle {
-        self.dom_host_mut_for_active_parser_step()
-            .create_cdata_section(&data)
-    }
-
-    pub(crate) fn create_document_type_in_live_dom_host(
+    pub(crate) fn create_cdata_section_for_document_in_live_dom_host(
         &mut self,
+        document_handle: DomHandle,
+        data: String,
+    ) -> DomHandle {
+        self.dom_host_mut_for_active_parser_step()
+            .create_cdata_section_for_document(document_handle, &data)
+    }
+
+    pub(crate) fn create_document_type_for_document_in_live_dom_host(
+        &mut self,
+        document_handle: DomHandle,
         name: String,
         public_id: String,
         system_id: String,
     ) -> DomHandle {
         self.dom_host_mut_for_active_parser_step()
-            .create_document_type(&name, &public_id, &system_id)
+            .create_document_type_for_document(document_handle, &name, &public_id, &system_id)
     }
 
     pub(crate) fn prepend_text_to_text_node_in_live_dom_host(
@@ -581,17 +595,6 @@ impl DocumentRuntime {
     ) -> DomHandle {
         self.dom_host
             .create_document_fragment_for_document(document_handle)
-    }
-
-    pub(in crate::document_runtime) fn initialize_new_native_node_owner_document(
-        &mut self,
-        document_handle: DomHandle,
-        handle: DomHandle,
-    ) -> Option<DomHandle> {
-        // This is creation-time owner assignment for a freshly created native
-        // node. User-visible adoption must go through adopt_node(...), which
-        // snapshots registry/adoptedCallback side effects before mutating.
-        self.dom_host.adopt_node(document_handle, handle)
     }
 
     pub(crate) fn create_detached_html_document(&mut self) -> DomHandle {

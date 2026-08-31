@@ -295,33 +295,48 @@ impl ParserDomMutationConsumer for ChildFrameLiveParserOwner<'_, '_, '_> {
             .add_attrs_if_missing_for_parser(node_id, attrs);
     }
 
-    fn create_text_node(&mut self, text: String) -> DomHandle {
-        self.host.dom_host_mut().create_text_node(&text)
-    }
-
-    fn create_comment(&mut self, text: String) -> DomHandle {
-        self.host.dom_host_mut().create_comment(&text)
-    }
-
-    fn create_processing_instruction(&mut self, target: String, data: String) -> DomHandle {
+    fn create_text_node(&mut self, document_handle: DomHandle, text: String) -> DomHandle {
         self.host
             .dom_host_mut()
-            .create_processing_instruction(&target, &data)
+            .create_text_node_for_document(document_handle, &text)
     }
 
-    fn create_cdata_section(&mut self, data: String) -> DomHandle {
-        self.host.dom_host_mut().create_cdata_section(&data)
+    fn create_comment(&mut self, document_handle: DomHandle, text: String) -> DomHandle {
+        self.host
+            .dom_host_mut()
+            .create_comment_for_document(document_handle, &text)
+    }
+
+    fn create_processing_instruction(
+        &mut self,
+        document_handle: DomHandle,
+        target: String,
+        data: String,
+    ) -> DomHandle {
+        self.host
+            .dom_host_mut()
+            .create_processing_instruction_for_document(document_handle, &target, &data)
+    }
+
+    fn create_cdata_section(&mut self, document_handle: DomHandle, data: String) -> DomHandle {
+        self.host
+            .dom_host_mut()
+            .create_cdata_section_for_document(document_handle, &data)
     }
 
     fn create_document_type(
         &mut self,
+        document_handle: DomHandle,
         name: String,
         public_id: String,
         system_id: String,
     ) -> DomHandle {
-        self.host
-            .dom_host_mut()
-            .create_document_type(&name, &public_id, &system_id)
+        self.host.dom_host_mut().create_document_type_for_document(
+            document_handle,
+            &name,
+            &public_id,
+            &system_id,
+        )
     }
 
     fn prepend_text_to_text_node(&mut self, node_id: DomHandle, text: String) {

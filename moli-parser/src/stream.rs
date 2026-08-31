@@ -17,8 +17,6 @@ use crate::script_planning::{
     classify_parser_script,
 };
 
-#[cfg(any(test, feature = "test-support"))]
-use super::session::new_fragment_html_tree_sink_session;
 use super::{
     html::{
         ParserBlockingStylesheetPause, ParserFinishDiscoverySignals, ParserInputQueue,
@@ -27,7 +25,10 @@ use super::{
         ParserYield,
     },
     live_target::{ParserRuntimeDomSinks, ParserStreamHtmlTreeSinkTarget},
-    session::{HtmlParserSession, HtmlParserSessionResult, new_html_tree_sink_session},
+    session::{
+        HtmlParserSession, HtmlParserSessionResult, new_fragment_html_tree_sink_session,
+        new_html_tree_sink_session,
+    },
 };
 
 pub(super) struct HtmlTreeSinkStream {
@@ -437,7 +438,6 @@ impl HtmlTreeSinkStream {
         }
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn from_fragment_target(
         target: ParserStreamHtmlTreeSinkTarget,
         context_handle: NativeNodeId,
@@ -1048,34 +1048,57 @@ mod tests {
             unsafe { &mut *self.host }.add_attrs_if_missing_for_parser(node_id, attrs);
         }
 
-        fn create_text_node(&mut self, text: String) -> NativeNodeId {
+        fn create_text_node(
+            &mut self,
+            document_handle: NativeNodeId,
+            text: String,
+        ) -> NativeNodeId {
             // SAFETY: the test keeps the DomHost alive for this parser pump step.
-            unsafe { &mut *self.host }.create_text_node(&text)
+            unsafe { &mut *self.host }.create_text_node_for_document(document_handle, &text)
         }
 
-        fn create_comment(&mut self, text: String) -> NativeNodeId {
+        fn create_comment(&mut self, document_handle: NativeNodeId, text: String) -> NativeNodeId {
             // SAFETY: the test keeps the DomHost alive for this parser pump step.
-            unsafe { &mut *self.host }.create_comment(&text)
+            unsafe { &mut *self.host }.create_comment_for_document(document_handle, &text)
         }
 
-        fn create_processing_instruction(&mut self, target: String, data: String) -> NativeNodeId {
+        fn create_processing_instruction(
+            &mut self,
+            document_handle: NativeNodeId,
+            target: String,
+            data: String,
+        ) -> NativeNodeId {
             // SAFETY: the test keeps the DomHost alive for this parser pump step.
-            unsafe { &mut *self.host }.create_processing_instruction(&target, &data)
+            unsafe { &mut *self.host }.create_processing_instruction_for_document(
+                document_handle,
+                &target,
+                &data,
+            )
         }
 
-        fn create_cdata_section(&mut self, data: String) -> NativeNodeId {
+        fn create_cdata_section(
+            &mut self,
+            document_handle: NativeNodeId,
+            data: String,
+        ) -> NativeNodeId {
             // SAFETY: the test keeps the DomHost alive for this parser pump step.
-            unsafe { &mut *self.host }.create_cdata_section(&data)
+            unsafe { &mut *self.host }.create_cdata_section_for_document(document_handle, &data)
         }
 
         fn create_document_type(
             &mut self,
+            document_handle: NativeNodeId,
             name: String,
             public_id: String,
             system_id: String,
         ) -> NativeNodeId {
             // SAFETY: the test keeps the DomHost alive for this parser pump step.
-            unsafe { &mut *self.host }.create_document_type(&name, &public_id, &system_id)
+            unsafe { &mut *self.host }.create_document_type_for_document(
+                document_handle,
+                &name,
+                &public_id,
+                &system_id,
+            )
         }
 
         fn prepend_text_to_text_node(&mut self, node_id: NativeNodeId, text: String) {

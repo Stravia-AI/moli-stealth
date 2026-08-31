@@ -98,7 +98,7 @@ pub(super) fn transform_parser_target_to_xml_tree_view(
         return;
     }
 
-    let parser_document = target.parser_document_node_id();
+    let parser_document = target.parser_root_node_id();
     if source_document.document_node_id() != parser_document {
         return;
     }
@@ -160,7 +160,10 @@ fn materialize_transformed_viewer_node(
             target.add_attrs_if_missing_for_parser(handle, element.attributes().to_vec());
             handle
         }
-        NodeData::Text(text) => target.create_text_node(text.data().to_owned()),
+        NodeData::Text(text) => target.create_text_node_for_document(
+            target.parser_owner_document_node_id(),
+            text.data().to_owned(),
+        ),
         NodeData::CDataSection(cdata) => target.create_cdata_section_node(cdata.data().to_owned()),
         NodeData::Comment(comment) => target.create_comment_node(comment.data().to_owned()),
         NodeData::ProcessingInstruction(instruction) => target.create_processing_instruction_node(

@@ -42,12 +42,37 @@ struct DocumentWriteParserMutationOwner<'a, 'scope, 'pin> {
     runtime: &'a mut DocumentRuntime,
     scope: &'a mut v8::PinScope<'scope, 'pin>,
     host_ptr: *mut JsContextHost,
+    target: DocumentWriteParserMutationTarget,
+}
+
+#[derive(Clone, Copy)]
+enum DocumentWriteParserMutationTarget {
+    LiveDocument,
+    DetachedFragment { owner_document: DomHandle },
+}
+
+impl DocumentWriteParserMutationOwner<'_, '_, '_> {
+    fn owner_document_handle(&self) -> DomHandle {
+        match self.target {
+            DocumentWriteParserMutationTarget::LiveDocument => self.runtime.document_handle(),
+            DocumentWriteParserMutationTarget::DetachedFragment { owner_document } => {
+                owner_document
+            }
+        }
+    }
+
+    fn targets_live_document(&self) -> bool {
+        matches!(self.target, DocumentWriteParserMutationTarget::LiveDocument)
+    }
 }
 
 impl LiveDocumentParserOwner for DocumentWriteParserMutationOwner<'_, '_, '_> {}
 
 impl ParserMutationEffectConsumer for DocumentWriteParserMutationOwner<'_, '_, '_> {
     fn consume_parser_mutation_effects(&mut self, effects: DomMutationEffects) {
+        if !self.targets_live_document() {
+            return;
+        }
         self.runtime
             .apply_parser_stream_mutation_effects_to_live_dom_host(
                 self.scope,
@@ -150,6 +175,11 @@ impl ParserDomReadConsumer for DocumentWriteParserMutationOwner<'_, '_, '_> {
 
 impl ParserDomMutationConsumer for DocumentWriteParserMutationOwner<'_, '_, '_> {
     fn apply_parser_dom_mutation(&mut self, mutation: ParserDomMutation) {
+        if !self.targets_live_document() {
+            let _ = mutation
+                .apply_to_detached_dom_host(self.runtime.dom_host_mut_for_active_parser_step());
+            return;
+        }
         self.runtime.apply_parser_dom_mutation_to_live_dom_host(
             self.scope,
             self.host_ptr,
@@ -165,9 +195,13 @@ impl ParserDomMutationConsumer for DocumentWriteParserMutationOwner<'_, '_, '_> 
         namespace: String,
         prefix: Option<String>,
     ) -> DomHandle {
+        let document_handle = self.owner_document_handle();
         self.runtime
-            .create_parser_element_without_attributes_in_live_dom_host(
-                local_name, namespace, prefix,
+            .create_parser_element_for_document_without_attributes_in_live_dom_host(
+                document_handle,
+                local_name,
+                namespace,
+                prefix,
             )
     }
 
@@ -196,31 +230,45 @@ impl ParserDomMutationConsumer for DocumentWriteParserMutationOwner<'_, '_, '_> 
             .add_attrs_if_missing_for_parser_in_live_dom_host(node_id, attrs);
     }
 
-    fn create_text_node(&mut self, text: String) -> DomHandle {
-        self.runtime.create_text_node_in_live_dom_host(text)
-    }
-
-    fn create_comment(&mut self, text: String) -> DomHandle {
-        self.runtime.create_comment_in_live_dom_host(text)
-    }
-
-    fn create_processing_instruction(&mut self, target: String, data: String) -> DomHandle {
+    fn create_text_node(&mut self, document_handle: DomHandle, text: String) -> DomHandle {
         self.runtime
-            .create_processing_instruction_in_live_dom_host(target, data)
+            .dom_host_mut_for_active_parser_step()
+            .create_text_node_for_document(document_handle, &text)
     }
 
-    fn create_cdata_section(&mut self, data: String) -> DomHandle {
-        self.runtime.create_cdata_section_in_live_dom_host(data)
+    fn create_comment(&mut self, document_handle: DomHandle, text: String) -> DomHandle {
+        self.runtime
+            .dom_host_mut_for_active_parser_step()
+            .create_comment_for_document(document_handle, &text)
+    }
+
+    fn create_processing_instruction(
+        &mut self,
+        document_handle: DomHandle,
+        target: String,
+        data: String,
+    ) -> DomHandle {
+        self.runtime
+            .dom_host_mut_for_active_parser_step()
+            .create_processing_instruction_for_document(document_handle, &target, &data)
+    }
+
+    fn create_cdata_section(&mut self, document_handle: DomHandle, data: String) -> DomHandle {
+        self.runtime
+            .dom_host_mut_for_active_parser_step()
+            .create_cdata_section_for_document(document_handle, &data)
     }
 
     fn create_document_type(
         &mut self,
+        document_handle: DomHandle,
         name: String,
         public_id: String,
         system_id: String,
     ) -> DomHandle {
         self.runtime
-            .create_document_type_in_live_dom_host(name, public_id, system_id)
+            .dom_host_mut_for_active_parser_step()
+            .create_document_type_for_document(document_handle, &name, &public_id, &system_id)
     }
 
     fn prepend_text_to_text_node(&mut self, node_id: DomHandle, text: String) {
@@ -234,12 +282,16 @@ impl ParserDomMutationConsumer for DocumentWriteParserMutationOwner<'_, '_, '_> 
     }
 
     fn push_parse_error(&mut self, error: String) {
-        self.runtime.push_parse_error_in_live_dom_host(error);
+        if self.targets_live_document() {
+            self.runtime.push_parse_error_in_live_dom_host(error);
+        }
     }
 
     fn set_html_quirks_mode_for_parser(&mut self, quirks_mode: QuirksMode) {
-        self.runtime
-            .set_html_quirks_mode_for_parser_in_live_dom_host(quirks_mode);
+        if self.targets_live_document() {
+            self.runtime
+                .set_html_quirks_mode_for_parser_in_live_dom_host(quirks_mode);
+        }
     }
 
     fn mark_script_already_started_for_parser(&mut self, node_id: DomHandle) {
@@ -398,6 +450,7 @@ impl DocumentRuntime {
                 runtime,
                 scope,
                 host_ptr,
+                target: DocumentWriteParserMutationTarget::LiveDocument,
             };
             parser.finish(&mut mutation_owner)
         });
@@ -469,131 +522,11 @@ impl DocumentRuntime {
         if self.dom_host().node(root).is_some_and(|node| {
             node.is_document() || node.is_document_fragment() || node.is_element()
         }) {
-            unsafe { &mut *host_ptr }.set_custom_element_registry_association(root, association);
-        }
-    }
-
-    fn set_fragment_null_registry_associations_from_native_dom(
-        &self,
-        host_ptr: *mut JsContextHost,
-        source: &NativeDom,
-        source_root: DomHandle,
-        imported_root: DomHandle,
-    ) {
-        let mut stack = vec![(source_root, imported_root)];
-        while let Some((source_handle, imported_handle)) = stack.pop() {
-            if source_node_has_null_registry_attribute(source.node(source_handle)) {
-                unsafe { &mut *host_ptr }.set_custom_element_registry_association(
-                    imported_handle,
-                    custom_elements::CustomElementRegistryAssociation::Null,
-                );
-            }
-
-            let source_children = source.child_ids(source_handle).collect::<Vec<_>>();
-            let imported_children = self
-                .dom_host()
-                .child_handles(imported_handle)
-                .collect::<Vec<_>>();
-            for (source_child, imported_child) in
-                source_children.into_iter().zip(imported_children).rev()
-            {
-                stack.push((source_child, imported_child));
-            }
-            if let (Some(source_template), Some(imported_template)) = (
-                source
-                    .node(source_handle)
-                    .and_then(Node::as_element)
-                    .and_then(|element| element.template_contents()),
-                self.dom_host()
-                    .node(imported_handle)
-                    .and_then(Node::as_element)
-                    .and_then(|element| element.template_contents()),
-            ) {
-                stack.push((source_template, imported_template));
+            let host = unsafe { &mut *host_ptr };
+            if host.effective_custom_element_registry_association(root) != association {
+                host.set_custom_element_registry_association(root, association);
             }
         }
-    }
-
-    fn set_fragment_null_registry_associations_from_dom_host(
-        &self,
-        host_ptr: *mut JsContextHost,
-        source: &DomHost,
-        source_root: DomHandle,
-        imported_root: DomHandle,
-    ) {
-        let mut stack = vec![(source_root, imported_root)];
-        while let Some((source_handle, imported_handle)) = stack.pop() {
-            if source_node_has_null_registry_attribute(source.node(source_handle)) {
-                unsafe { &mut *host_ptr }.set_custom_element_registry_association(
-                    imported_handle,
-                    custom_elements::CustomElementRegistryAssociation::Null,
-                );
-            }
-
-            let source_children = source.child_handles(source_handle).collect::<Vec<_>>();
-            let imported_children = self
-                .dom_host()
-                .child_handles(imported_handle)
-                .collect::<Vec<_>>();
-            for (source_child, imported_child) in
-                source_children.into_iter().zip(imported_children).rev()
-            {
-                stack.push((source_child, imported_child));
-            }
-            if let (Some(source_template), Some(imported_template)) = (
-                source
-                    .node(source_handle)
-                    .and_then(Node::as_element)
-                    .and_then(|element| element.template_contents()),
-                self.dom_host()
-                    .node(imported_handle)
-                    .and_then(Node::as_element)
-                    .and_then(|element| element.template_contents()),
-            ) {
-                stack.push((source_template, imported_template));
-            }
-            if let (Some(source_shadow), Some(imported_shadow)) = (
-                source.shadow_root_handle(source_handle),
-                self.dom_host().shadow_root_handle(imported_handle),
-            ) {
-                self.set_fragment_declarative_shadow_root_registry_association(
-                    host_ptr,
-                    source,
-                    source_shadow,
-                    imported_shadow,
-                );
-                stack.push((source_shadow, imported_shadow));
-            }
-        }
-    }
-
-    fn set_fragment_declarative_shadow_root_registry_association(
-        &self,
-        host_ptr: *mut JsContextHost,
-        source: &DomHost,
-        source_shadow: DomHandle,
-        imported_shadow: DomHandle,
-    ) {
-        if !source
-            .shadow_root_is_declarative(source_shadow)
-            .unwrap_or(false)
-        {
-            return;
-        }
-        let association = if source
-            .shadow_root_uses_null_custom_element_registry(source_shadow)
-            .unwrap_or(false)
-        {
-            custom_elements::CustomElementRegistryAssociation::Null
-        } else {
-            let Some(owner_document) = self.dom_host().owner_document_handle(imported_shadow)
-            else {
-                return;
-            };
-            unsafe { &*host_ptr }.effective_custom_element_registry_association(owner_document)
-        };
-        unsafe { &mut *host_ptr }
-            .set_custom_element_registry_association(imported_shadow, association);
     }
 
     fn build_fragment_from_html_with_context_mode(
@@ -607,6 +540,7 @@ impl DocumentRuntime {
         custom_element_upgrade_timing: HtmlFragmentCustomElementUpgradeTiming,
         context_mode: HtmlFragmentParserContextMode,
         scripting_enabled: bool,
+        allow_declarative_shadow_roots: bool,
     ) -> Option<DomHandle> {
         let first_node_index = self.dom_host().dom().len();
         let parser = HtmlParser::with_scripting_enabled(scripting_enabled);
@@ -625,73 +559,80 @@ impl DocumentRuntime {
         {
             context_local_name = "body".to_owned();
         }
-        let parsed = parser.parse_fragment_without_declarative_shadow_roots(
-            self.document_url().clone(),
-            &context_namespace,
-            &context_local_name,
-            html.to_owned(),
-        );
         let is_frameset_context = context_namespace == "http://www.w3.org/1999/xhtml"
             && context_local_name.eq_ignore_ascii_case("frameset");
         let registry_association =
             self.fragment_context_custom_element_registry_association(host_ptr, context_handle);
-        let fragment = self.create_document_fragment();
-        self.initialize_new_native_node_owner_document(document_handle, fragment)
-            .map(|_| ())?;
-        let preserves_html_context_wrappers = custom_element_upgrade_timing
-            == HtmlFragmentCustomElementUpgradeTiming::AfterInsertion
-            && context_namespace == "http://www.w3.org/1999/xhtml"
-            && context_local_name.eq_ignore_ascii_case("html");
-        let source_root = if preserves_html_context_wrappers {
-            let document_root = parsed.document_node_id();
-            parsed
-                .child_ids(document_root)
-                .find(|child| {
-                    parsed
-                        .node(*child)
-                        .is_some_and(|node| node.is_html_element_named("html"))
-                })
-                .unwrap_or(document_root)
-        } else {
-            parsed.body_node_id().unwrap_or_else(|| {
-                let document_root = parsed.document_node_id();
-                let document_children = parsed.child_ids(document_root).collect::<Vec<_>>();
-                if document_children.len() == 1
-                    && parsed
-                        .node(document_children[0])
-                        .is_some_and(|node| node.is_html_element_named("html"))
-                {
-                    document_children[0]
-                } else {
-                    document_root
-                }
-            })
-        };
-        for child in parsed.child_ids(source_root) {
-            if parsed.node(child).is_some_and(|node| {
+        let fragment = self.create_document_fragment_for_document(document_handle);
+        let finish_signals = self.with_dom_host_parse_step(|runtime| {
+            let mut mutation_owner = DocumentWriteParserMutationOwner {
+                runtime,
+                scope,
+                host_ptr,
+                target: DocumentWriteParserMutationTarget::DetachedFragment {
+                    owner_document: document_handle,
+                },
+            };
+            parser.parse_fragment_into_live_dom(
+                mutation_owner.runtime.document_url().clone(),
+                fragment,
+                document_handle,
+                context_handle,
+                &context_namespace,
+                &context_local_name,
+                html,
+                &mut mutation_owner,
+                allow_declarative_shadow_roots,
+            )
+        });
+        let synthetic_html_root = self.dom_host().child_handles(fragment).find(|child| {
+            self.dom_host()
+                .node(*child)
+                .is_some_and(|node| node.is_html_element_named("html"))
+        });
+        let source_root = synthetic_html_root.unwrap_or(fragment);
+        let source_children = self
+            .dom_host()
+            .child_handles(source_root)
+            .collect::<Vec<_>>();
+        let mut fragment_roots = Vec::with_capacity(source_children.len());
+        for child in source_children {
+            if self.dom_host().node(child).is_some_and(|node| {
                 Self::frameset_fragment_child_is_ignored(is_frameset_context, node)
             }) {
+                let _ = self.dom_host_mut().remove_child(source_root, child);
                 continue;
             }
-            let imported =
-                self.dom_host_mut()
-                    .import_foreign_node(document_handle, &parsed, child, true)?;
-            self.set_fragment_root_custom_element_registry_association(
-                host_ptr,
-                imported,
-                registry_association,
-            );
-            self.set_fragment_null_registry_associations_from_native_dom(
-                host_ptr, &parsed, child, imported,
-            );
-            self.dom_host_mut()
-                .set_subtree_script_already_started(imported, scripts_already_started);
-            let _ = self.dom_host_mut().append_child(fragment, imported);
-            if custom_element_upgrade_timing
-                == HtmlFragmentCustomElementUpgradeTiming::InReturnedFragment
-                && !custom_elements::upgrade_subtree_if_defined(scope, host_ptr, imported)
+            if source_root != fragment
+                && !self
+                    .dom_host_mut()
+                    .append_child_without_mutation_effects(fragment, child)
             {
                 return None;
+            }
+            self.set_fragment_root_custom_element_registry_association(
+                host_ptr,
+                child,
+                registry_association,
+            );
+            self.dom_host_mut()
+                .set_subtree_script_already_started(child, scripts_already_started);
+            fragment_roots.push(child);
+        }
+        if source_root != fragment {
+            let _ = self.dom_host_mut().remove_child(fragment, source_root);
+        }
+        custom_elements::apply_parser_created_null_registry_associations(
+            host_ptr,
+            &finish_signals.parser_created_null_registry_elements,
+        );
+        if custom_element_upgrade_timing
+            == HtmlFragmentCustomElementUpgradeTiming::InReturnedFragment
+        {
+            for root in fragment_roots {
+                if !custom_elements::upgrade_subtree_if_defined(scope, host_ptr, root) {
+                    return None;
+                }
             }
         }
         unsafe { &mut *host_ptr }.capture_node_creation_stack_traces_since(scope, first_node_index);
@@ -717,6 +658,7 @@ impl DocumentRuntime {
             HtmlFragmentCustomElementUpgradeTiming::InReturnedFragment,
             HtmlFragmentParserContextMode::RangeCreateContextualFragment,
             scripting_enabled,
+            false,
         )
     }
 
@@ -741,6 +683,7 @@ impl DocumentRuntime {
             custom_element_upgrade_timing,
             HtmlFragmentParserContextMode::Standard,
             scripting_enabled,
+            false,
         )
     }
 
@@ -753,92 +696,19 @@ impl DocumentRuntime {
         html: &str,
         custom_element_upgrade_timing: HtmlFragmentCustomElementUpgradeTiming,
     ) -> Option<DomHandle> {
-        let first_node_index = self.dom_host().dom().len();
         let scripting_enabled = unsafe { &*host_ptr }.document_scripting_enabled(document_handle);
-        let parser = HtmlParser::with_scripting_enabled(scripting_enabled);
-        let context_node = self.dom_host().node(context_handle);
-        let context_namespace = context_node
-            .and_then(Node::namespace)
-            .unwrap_or("http://www.w3.org/1999/xhtml")
-            .to_owned();
-        let context_local_name = context_node
-            .and_then(Node::local_name)
-            .unwrap_or("body")
-            .to_owned();
-        let parsed = parser.parse_fragment_dom_host(
-            self.document_url().clone(),
-            &context_namespace,
-            &context_local_name,
-            html.to_owned(),
-        );
-        let is_frameset_context = context_namespace == "http://www.w3.org/1999/xhtml"
-            && context_local_name.eq_ignore_ascii_case("frameset");
-        let registry_association =
-            self.fragment_context_custom_element_registry_association(host_ptr, context_handle);
-        let fragment = self.create_document_fragment();
-        self.initialize_new_native_node_owner_document(document_handle, fragment)
-            .map(|_| ())?;
-        let preserves_html_context_wrappers = custom_element_upgrade_timing
-            == HtmlFragmentCustomElementUpgradeTiming::AfterInsertion
-            && context_namespace == "http://www.w3.org/1999/xhtml"
-            && context_local_name.eq_ignore_ascii_case("html");
-        let source_root = if preserves_html_context_wrappers {
-            let document_root = parsed.document_handle();
-            parsed
-                .child_handles(document_root)
-                .find(|child| {
-                    parsed
-                        .node(*child)
-                        .is_some_and(|node| node.is_html_element_named("html"))
-                })
-                .unwrap_or(document_root)
-        } else {
-            parsed.dom().body_node_id().unwrap_or_else(|| {
-                let document_root = parsed.document_handle();
-                let document_children = parsed.child_handles(document_root).collect::<Vec<_>>();
-                if document_children.len() == 1
-                    && parsed
-                        .node(document_children[0])
-                        .is_some_and(|node| node.is_html_element_named("html"))
-                {
-                    document_children[0]
-                } else {
-                    document_root
-                }
-            })
-        };
-        for child in parsed.child_handles(source_root) {
-            if parsed.node(child).is_some_and(|node| {
-                Self::frameset_fragment_child_is_ignored(is_frameset_context, node)
-            }) {
-                continue;
-            }
-            let imported = self.dom_host_mut().import_foreign_node_with_shadow_roots(
-                document_handle,
-                &parsed,
-                child,
-                true,
-            )?;
-            self.set_fragment_root_custom_element_registry_association(
-                host_ptr,
-                imported,
-                registry_association,
-            );
-            self.set_fragment_null_registry_associations_from_dom_host(
-                host_ptr, &parsed, child, imported,
-            );
-            self.dom_host_mut()
-                .set_subtree_script_already_started(imported, true);
-            let _ = self.dom_host_mut().append_child(fragment, imported);
-            if custom_element_upgrade_timing
-                == HtmlFragmentCustomElementUpgradeTiming::InReturnedFragment
-                && !custom_elements::upgrade_subtree_if_defined(scope, host_ptr, imported)
-            {
-                return None;
-            }
-        }
-        unsafe { &mut *host_ptr }.capture_node_creation_stack_traces_since(scope, first_node_index);
-        Some(fragment)
+        self.build_fragment_from_html_with_context_mode(
+            scope,
+            host_ptr,
+            document_handle,
+            context_handle,
+            html,
+            true,
+            custom_element_upgrade_timing,
+            HtmlFragmentParserContextMode::Standard,
+            scripting_enabled,
+            true,
+        )
     }
 
     fn is_template_contents_fragment(&self, handle: DomHandle) -> bool {
@@ -1838,6 +1708,7 @@ impl DocumentRuntime {
                     runtime,
                     scope,
                     host_ptr,
+                    target: DocumentWriteParserMutationTarget::LiveDocument,
                 };
                 match input {
                     DocumentWriteParserPumpInput::Inserted(chunk) => stream
@@ -2688,17 +2559,6 @@ fn record_document_write_modulepreload_warning(
             None,
         );
     }
-}
-
-fn source_node_has_null_registry_attribute(node: Option<&Node>) -> bool {
-    node.and_then(Node::as_element).is_some_and(|element| {
-        element.attributes().iter().any(|attribute| {
-            attribute.namespace().is_empty()
-                && attribute
-                    .local_name()
-                    .eq_ignore_ascii_case("customelementregistry")
-        })
-    })
 }
 
 #[cfg(test)]
