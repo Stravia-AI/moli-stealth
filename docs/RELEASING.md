@@ -31,6 +31,11 @@ signed. The allocator behind the default `jemalloc` feature is target-gated
 out on Windows, so Windows builds use the system allocator because upstream
 treats the Windows/MSVC combination as untested.
 
+Release builds use one code-generation unit. The release workflow and the CI
+release-regression binaries both invoke Cargo with `--release`, so they consume
+the same production profile. Normal development and unit-test builds retain
+their separate profiles and parallel code generation.
+
 ## Prepare the release
 
 1. Update `version` in `moli/Cargo.toml` and refresh `Cargo.lock`.

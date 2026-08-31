@@ -114,6 +114,9 @@ panic = "abort"
 [profile.release]
 panic = "abort"
 strip = false
+# Production and release-regression binaries favor a compact code working set
+# over parallel code generation.
+codegen-units = 1
 
 [profile.test]
 debug = 1
