@@ -933,6 +933,9 @@ impl Element {
     }
 
     pub fn set_cryptographic_nonce(&mut self, nonce: Option<String>) -> bool {
+        if self.cryptographic_nonce() == nonce.as_deref() {
+            return false;
+        }
         self.control_state_mut().set_cryptographic_nonce(nonce)
     }
 

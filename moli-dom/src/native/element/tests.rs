@@ -13,6 +13,7 @@ fn ordinary_elements_keep_control_state_unmaterialized_until_needed() {
     assert_eq!(div.scroll_top(), 0.0);
     assert!(!div.set_scroll_top(0.0));
     assert!(!div.set_scroll_left(0.0));
+    assert!(!div.set_cryptographic_nonce(None));
     assert!(!div.popover_open());
     assert!(div.custom_states().is_empty());
     assert!(!div.rare_data.is_materialized());
