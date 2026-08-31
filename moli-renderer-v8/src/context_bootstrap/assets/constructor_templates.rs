@@ -16,8 +16,7 @@ use super::super::{
     exposed_interfaces::{TemplateBuildProfile, install_interface_template_metadata},
     file_api::{
         data_transfer_constructor_callback, file_constructor_callback,
-        file_list_constructor_callback, file_reader_constructor_callback,
-        file_reader_sync_constructor_callback,
+        file_reader_constructor_callback, file_reader_sync_constructor_callback,
     },
     form_data_runtime::build_form_data_constructor_template,
     geometry_runtime::{
@@ -358,9 +357,6 @@ pub(in crate::context_bootstrap) fn build_constructor_template_for_profile<'s>(
         }
         ConstructorKind::File => v8::FunctionTemplate::builder(file_constructor_callback)
             .length(2)
-            .build(scope),
-        ConstructorKind::FileList => v8::FunctionTemplate::builder(file_list_constructor_callback)
-            .length(0)
             .build(scope),
         ConstructorKind::FileReader => {
             v8::FunctionTemplate::builder(file_reader_constructor_callback)

@@ -1174,7 +1174,7 @@ const CONSTRUCTOR_SPECS_AFTER_STREAMS: &[ConstructorSpec] = &[
     ConstructorSpec {
         name: "FileList",
         parent: None,
-        kind: ConstructorKind::FileList,
+        kind: ConstructorKind::Illegal,
     },
     ConstructorSpec {
         name: "FileSystem",

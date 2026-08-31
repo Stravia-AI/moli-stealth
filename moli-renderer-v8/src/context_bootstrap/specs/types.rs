@@ -68,7 +68,6 @@ pub(in crate::context_bootstrap) enum ConstructorKind {
     WebGlDebugRendererInfo,
     WebGlLoseContext,
     File,
-    FileList,
     FileReader,
     FileReaderSync,
     XmlSerializer,
