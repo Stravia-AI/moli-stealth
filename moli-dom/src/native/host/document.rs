@@ -1697,6 +1697,7 @@ impl DomHost {
             return None;
         }
         let root = self.create_document_fragment();
+        self.dom.set_document_fragment_host(root, host);
         let owner_document = self.node(host).and_then(Node::owner_document);
         let connected = self.is_connected(host);
         self.dom.register_stylesheet_candidate_tree_scope(root);
@@ -2264,6 +2265,7 @@ impl DomHost {
                 continue;
             }
             self.dom.register_stylesheet_candidate_tree_scope(root);
+            self.dom.set_document_fragment_host(root, host);
             self.shadow_roots_by_host.borrow_mut().insert(
                 host,
                 ShadowRootState {
