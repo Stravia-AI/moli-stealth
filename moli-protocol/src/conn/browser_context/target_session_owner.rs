@@ -1741,7 +1741,15 @@ impl CdpConnection {
         &self,
         session_id: Option<&str>,
     ) -> Option<&DevToolsSessionState> {
-        self.target_session_owner_ref(session_id)?
+        self.target_devtools_session_state_for_route(session_id, None)
+    }
+
+    pub(crate) fn target_devtools_session_state_for_route(
+        &self,
+        session_id: Option<&str>,
+        owner_route: Option<&CdpSessionRoute>,
+    ) -> Option<&DevToolsSessionState> {
+        self.target_session_owner_ref_for_route(session_id, owner_route)?
             .devtools_session_state()
     }
 
@@ -1776,7 +1784,15 @@ impl CdpConnection {
         &self,
         session_id: Option<&str>,
     ) -> Option<String> {
-        self.target_session_owner_ref(session_id)
+        self.target_renderer_runtime_inspector_session_id_for_route(session_id, None)
+    }
+
+    pub(crate) fn target_renderer_runtime_inspector_session_id_for_route(
+        &self,
+        session_id: Option<&str>,
+        owner_route: Option<&CdpSessionRoute>,
+    ) -> Option<String> {
+        self.target_session_owner_ref_for_route(session_id, owner_route)
             .and_then(|owner| owner.renderer_runtime_inspector_session_id())
     }
 
