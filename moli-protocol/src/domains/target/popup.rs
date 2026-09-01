@@ -313,12 +313,9 @@ async fn ensure_popup_initial_document_page_async(
     let Some(route) = conn.target_session_route_for_target_id(target_id) else {
         return false;
     };
+    let owner = CommandOwnerScope::for_implicit_route(Some(route));
     {
-        let mut route_scope = conn.scoped_none_session_owner_route_override(route.clone());
-        let pending = match route_scope
-            .conn_mut()
-            .start_initial_document_page_ensure_for_session_owner(None)
-        {
+        let pending = match conn.start_initial_document_page_ensure_for_owner(&owner) {
             Ok(pending) => pending,
             Err(message) => {
                 tracing::debug!(
@@ -333,9 +330,7 @@ async fn ensure_popup_initial_document_page_async(
             let completed = match pending.wait().await {
                 Ok(completed) => completed,
                 Err(failed) => {
-                    let message = route_scope
-                        .conn_mut()
-                        .reset_failed_initial_document_page_build_for_owner(failed);
+                    let message = conn.reset_failed_initial_document_page_build_for_owner(failed);
                     tracing::debug!(
                         target_id,
                         ?message,
@@ -344,8 +339,7 @@ async fn ensure_popup_initial_document_page_async(
                     return false;
                 }
             };
-            if let Err(message) = route_scope
-                .conn_mut()
+            if let Err(message) = conn
                 .complete_initial_document_page_build_for_owner(completed)
                 .await
             {

@@ -5490,6 +5490,22 @@ impl CdpConnection {
             .map_err(|error| format!("runtime default execution context lookup failed: {error}"))
     }
 
+    pub(crate) async fn runtime_default_or_initial_execution_context_id_for_owner_async(
+        &mut self,
+        owner: &CommandOwnerScope,
+    ) -> Result<Option<i64>, String> {
+        let page = self
+            .runtime_session_owner_slot_mut_for_route(
+                owner.session_id(),
+                owner.session_owner_route(),
+            )?
+            .loaded_page_mut()
+            .ok_or_else(|| "NoDocumentLoaded".to_owned())?;
+        page.default_or_initial_execution_context_id_async()
+            .await
+            .map_err(|error| format!("runtime default execution context lookup failed: {error}"))
+    }
+
     pub(crate) async fn runtime_ensure_isolated_world_for_session_owner_async(
         &mut self,
         session_id: Option<&str>,

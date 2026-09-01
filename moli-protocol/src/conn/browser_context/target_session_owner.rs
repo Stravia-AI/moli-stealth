@@ -1451,11 +1451,13 @@ impl CdpConnection {
             .await
     }
 
-    pub(crate) fn initial_document_page_owner_for_session(
+    pub(crate) fn initial_document_page_owner_for_route(
         &self,
         session_id: Option<&str>,
+        owner_route: Option<&CdpSessionRoute>,
     ) -> Option<InitialDocumentPageOwner> {
-        let (browser_context_id, target_id) = self.target_owner_identity_for_session(session_id)?;
+        let (browser_context_id, target_id) =
+            self.target_owner_identity_for_route(session_id, owner_route)?;
         Some(InitialDocumentPageOwner {
             browser_context_id,
             target_id: target_id?,
@@ -1852,13 +1854,25 @@ impl CdpConnection {
         &self,
         session_id: Option<&str>,
     ) -> bool {
+        let none_session_owner_route = self.none_session_owner_route_override();
+        self.target_owner_has_bidi_channel_preload_script_for_route(
+            session_id,
+            none_session_owner_route.as_ref(),
+        )
+    }
+
+    pub(crate) fn target_owner_has_bidi_channel_preload_script_for_route(
+        &self,
+        session_id: Option<&str>,
+        owner_route: Option<&CdpSessionRoute>,
+    ) -> bool {
         let target_owner_has_script = self
-            .target_owner_state_for_session(session_id)
+            .target_owner_state_for_route(session_id, owner_route)
             .is_some_and(TargetOwnerState::has_bidi_channel_preload_script);
         if target_owner_has_script {
             return true;
         }
-        self.target_owner_identity_for_session(session_id)
+        self.target_owner_identity_for_route(session_id, owner_route)
             .and_then(|(browser_context_id, _)| self.browser_context_by_id(&browser_context_id))
             .is_some_and(|browser_context| {
                 browser_context.has_default_bidi_channel_preload_script()
@@ -1998,15 +2012,27 @@ impl CdpConnection {
         &self,
         session_id: Option<&str>,
     ) -> Option<TargetPageResidenceIdentity> {
+        let none_session_owner_route = self.none_session_owner_route_override();
+        self.pending_target_page_residence_identity_for_route(
+            session_id,
+            none_session_owner_route.as_ref(),
+        )
+    }
+
+    pub(crate) fn pending_target_page_residence_identity_for_route(
+        &self,
+        session_id: Option<&str>,
+        owner_route: Option<&CdpSessionRoute>,
+    ) -> Option<TargetPageResidenceIdentity> {
         let (browser_context_id, routed_target_id) =
-            self.target_owner_identity_for_session(session_id)?;
+            self.target_owner_identity_for_route(session_id, owner_route)?;
         let target_id = routed_target_id.or_else(|| {
             self.browser_context_by_id(&browser_context_id)
                 .and_then(|browser_context| browser_context.active_target_id())
                 .map(str::to_owned)
         });
         let page_attachment_id = self
-            .runtime_session_owner_slot(session_id)
+            .runtime_session_owner_slot_for_route(session_id, owner_route)
             .ok()?
             .pending_page_attachment_id()?;
         Some(TargetPageResidenceIdentity::new(
@@ -2505,6 +2531,15 @@ impl CdpConnection {
             .initial_empty_document_url_if_current()
     }
 
+    pub(crate) fn runtime_session_owner_record_initial_empty_document_url_for_route(
+        &self,
+        session_id: Option<&str>,
+        owner_route: Option<&CdpSessionRoute>,
+    ) -> Option<String> {
+        self.target_session_owner_ref_for_route(session_id, owner_route)?
+            .initial_empty_document_url_if_current()
+    }
+
     pub(crate) fn runtime_session_owner_initial_empty_document_storage_key(
         &self,
         session_id: Option<&str>,
@@ -2513,11 +2548,21 @@ impl CdpConnection {
             .initial_empty_document_storage_key_if_current()
     }
 
-    pub(crate) fn runtime_session_owner_record_is_on_initial_empty_document(
+    pub(crate) fn runtime_session_owner_initial_empty_document_storage_key_for_route(
         &self,
         session_id: Option<&str>,
+        owner_route: Option<&CdpSessionRoute>,
+    ) -> Option<moli_storage_key::MoliStorageKey> {
+        self.target_session_owner_ref_for_route(session_id, owner_route)?
+            .initial_empty_document_storage_key_if_current()
+    }
+
+    pub(crate) fn runtime_session_owner_record_is_on_initial_empty_document_for_route(
+        &self,
+        session_id: Option<&str>,
+        owner_route: Option<&CdpSessionRoute>,
     ) -> Option<bool> {
-        self.target_session_owner_ref(session_id)?
+        self.target_session_owner_ref_for_route(session_id, owner_route)?
             .is_on_initial_empty_document()
     }
 

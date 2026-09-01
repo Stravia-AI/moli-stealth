@@ -124,14 +124,20 @@ impl PendingAddScriptToEvaluateOnNewDocumentCommand {
     }
 }
 
-async fn append_loaded_page_document_start_script_for_session_async(
+async fn append_loaded_page_document_start_script_for_owner_async(
     conn: &mut CdpConnection,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     script: &DocumentStartScript,
 ) -> Result<(), String> {
-    let renderer_runtime_inspector_session_id =
-        conn.target_renderer_runtime_inspector_session_id_for_session(session_id);
-    let slot = conn.runtime_session_owner_slot_mut(session_id)?;
+    let renderer_runtime_inspector_session_id = conn
+        .target_renderer_runtime_inspector_session_id_for_route(
+            owner.session_id(),
+            owner.session_owner_route(),
+        );
+    let slot = conn.runtime_session_owner_slot_mut_for_route(
+        owner.session_id(),
+        owner.session_owner_route(),
+    )?;
     if let Some(page) = slot.loaded_page_mut() {
         page.add_document_start_script_runtime_activity_async(
             renderer_runtime_inspector_session_id.as_deref(),
@@ -144,12 +150,15 @@ async fn append_loaded_page_document_start_script_for_session_async(
     Ok(())
 }
 
-async fn remove_loaded_page_document_start_script_for_session_async(
+async fn remove_loaded_page_document_start_script_for_owner_async(
     conn: &mut CdpConnection,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     registry_key: &str,
 ) -> Result<(), String> {
-    let slot = conn.runtime_session_owner_slot_mut(session_id)?;
+    let slot = conn.runtime_session_owner_slot_mut_for_route(
+        owner.session_id(),
+        owner.session_owner_route(),
+    )?;
     if let Some(page) = slot.loaded_page_mut() {
         page.remove_document_start_script_by_registry_key_async(registry_key)
             .await
@@ -390,13 +399,14 @@ async fn execute_devtools_single_route_preload_command_async(
         Ok(resolved) => resolved,
         Err(error) => return (Err(error), Vec::new(), None),
     };
-    let mut route_scope = conn.scoped_none_session_owner_route_override(route);
+    let owner = CommandOwnerScope::for_implicit_route(Some(route));
     let mut events = Vec::new();
     let mut command_context = CommandDispatchContext::default();
     let result = match command {
         DevToolsCommand::AddPreloadScript(command) => {
             execute_devtools_single_route_add_preload_script_command(
-                route_scope.conn_mut(),
+                conn,
+                &owner,
                 command,
                 result_kind,
                 &mut events,
@@ -405,11 +415,8 @@ async fn execute_devtools_single_route_preload_command_async(
             .await
         }
         DevToolsCommand::RemovePreloadScript(command) => {
-            match execute_devtools_single_route_remove_preload_script_command(
-                route_scope.conn_mut(),
-                command,
-            )
-            .await
+            match execute_devtools_single_route_remove_preload_script_command(conn, &owner, command)
+                .await
             {
                 Ok(()) => Ok(DevToolsCommandResult::Empty),
                 Err(error) => Err(error),
@@ -473,14 +480,10 @@ async fn execute_devtools_browser_context_add_preload_script_command(
             target_id: active_target_id,
             is_attached_session: false,
         };
-        let mut route_scope = conn.scoped_none_session_owner_route_override(route);
-        append_loaded_page_document_start_script_for_session_async(
-            route_scope.conn_mut(),
-            None,
-            &renderer_script,
-        )
-        .await
-        .map_err(|message| devtools_preload_owner_error(&message))?;
+        let owner = CommandOwnerScope::for_implicit_route(Some(route));
+        append_loaded_page_document_start_script_for_owner_async(conn, &owner, &renderer_script)
+            .await
+            .map_err(|message| devtools_preload_owner_error(&message))?;
     }
     Ok(DevToolsCommandResult::AddPreloadScript(
         DevToolsAddPreloadScriptResult {
@@ -491,22 +494,25 @@ async fn execute_devtools_browser_context_add_preload_script_command(
 
 async fn execute_devtools_single_route_add_preload_script_command(
     conn: &mut CdpConnection,
+    owner: &CommandOwnerScope,
     command: DevToolsAddPreloadScriptCommand,
     result_kind: DevToolsPreloadResultKind,
     events: &mut Vec<BackgroundProtocolEvent>,
     command_context: &mut CommandDispatchContext,
 ) -> Result<DevToolsCommandResult, DevToolsError> {
     let identifier = if is_bidi_default_preload_command(&command) {
-        execute_devtools_default_add_preload_script_command(conn, command).await?
+        execute_devtools_default_add_preload_script_command(conn, owner, command).await?
     } else {
-        if conn.target_owner_identity_for_session(None).is_none() {
+        if conn
+            .target_owner_identity_for_route(owner.session_id(), owner.session_owner_route())
+            .is_none()
+        {
             return Err(preload_missing_owner_error(conn));
         }
-        let owner = CommandOwnerScope::capture(conn, None);
         let mut side_effects = CommandOutputPlan::default();
         let identifier = add_script_to_evaluate_on_new_document_direct_async(
             conn,
-            &owner,
+            owner,
             command,
             &mut side_effects,
             command_context,
@@ -520,10 +526,20 @@ async fn execute_devtools_single_route_add_preload_script_command(
 
 async fn execute_devtools_default_add_preload_script_command(
     conn: &mut CdpConnection,
+    owner: &CommandOwnerScope,
     command: DevToolsAddPreloadScriptCommand,
 ) -> Result<String, DevToolsError> {
     let script = document_start_script_from_add_preload_command(&command)?;
-    let Some(browser_context) = conn.browser_context.as_mut() else {
+    let Some(browser_context_id) = conn
+        .target_owner_identity_for_route(owner.session_id(), owner.session_owner_route())
+        .map(|(browser_context_id, _)| browser_context_id)
+    else {
+        return Err(DevToolsError::new(
+            DevToolsErrorKind::NoSuchTarget,
+            "BrowserContextNotLoaded",
+        ));
+    };
+    let Some(browser_context) = conn.browser_context_by_id_mut(&browser_context_id) else {
         return Err(DevToolsError::new(
             DevToolsErrorKind::NoSuchTarget,
             "BrowserContextNotLoaded",
@@ -533,19 +549,22 @@ async fn execute_devtools_default_add_preload_script_command(
     let script = script.with_registry_key(
         BrowserContext::default_document_start_script_registry_key(&identifier),
     );
-    append_default_document_start_script_direct_async(conn, None, identifier, &script).await
+    append_default_document_start_script_direct_async(conn, owner, identifier, &script).await
 }
 
 async fn append_default_document_start_script_direct_async(
     conn: &mut CdpConnection,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     identifier: String,
     script: &DocumentStartScript,
 ) -> Result<String, DevToolsError> {
-    let renderer_runtime_inspector_session_id =
-        conn.target_renderer_runtime_inspector_session_id_for_session(session_id);
+    let renderer_runtime_inspector_session_id = conn
+        .target_renderer_runtime_inspector_session_id_for_route(
+            owner.session_id(),
+            owner.session_owner_route(),
+        );
     let Some(page) = conn
-        .runtime_session_owner_slot_mut(session_id)
+        .runtime_session_owner_slot_mut_for_route(owner.session_id(), owner.session_owner_route())
         .ok()
         .and_then(|slot| slot.loaded_page_mut())
     else {
@@ -563,7 +582,7 @@ async fn append_default_document_start_script_direct_async(
         .await
         .map_err(|error| devtools_preload_internal_error(error.to_string()))?;
     let Some(page) = conn
-        .runtime_session_owner_slot_mut(session_id)
+        .runtime_session_owner_slot_mut_for_route(owner.session_id(), owner.session_owner_route())
         .ok()
         .and_then(|slot| slot.loaded_page_mut())
     else {
@@ -576,22 +595,28 @@ async fn append_default_document_start_script_direct_async(
 
 async fn execute_devtools_single_route_remove_preload_script_command(
     conn: &mut CdpConnection,
+    owner: &CommandOwnerScope,
     command: DevToolsRemovePreloadScriptCommand,
 ) -> Result<(), DevToolsError> {
     let protocol = command.context.protocol;
     let script_id = command.script_id.into_string();
-    let owner_identity = conn.target_owner_identity_for_session(None);
+    let owner_identity =
+        conn.target_owner_identity_for_route(owner.session_id(), owner.session_owner_route());
     let target_registry_key = owner_identity.as_ref().map(|(_, target_id)| {
         BrowserContext::target_document_start_script_registry_key(target_id.as_deref(), &script_id)
     });
-    let remove_result = conn.with_target_owner_state_for_session_mut(None, |owner_state| {
-        remove_stored_document_start_script_registry_key(
-            owner_state,
-            None,
-            &script_id,
-            target_registry_key.clone(),
-        )
-    });
+    let remove_result = conn.with_target_owner_state_for_route_mut(
+        owner.session_id(),
+        owner.session_owner_route(),
+        |owner_state| {
+            remove_stored_document_start_script_registry_key(
+                owner_state,
+                None,
+                &script_id,
+                target_registry_key.clone(),
+            )
+        },
+    );
     let Some((mut removed, mut registry_key)) = remove_result else {
         return Err(preload_missing_owner_error(conn));
     };
@@ -611,19 +636,19 @@ async fn execute_devtools_single_route_remove_preload_script_command(
             "NoSuchScript",
         ));
     }
-    remove_document_start_script_direct_async(conn, None, registry_key).await
+    remove_document_start_script_direct_async(conn, owner, registry_key).await
 }
 
 async fn remove_document_start_script_direct_async(
     conn: &mut CdpConnection,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     registry_key: Option<String>,
 ) -> Result<(), DevToolsError> {
     let Some(registry_key) = registry_key else {
         return Ok(());
     };
     let Some(page) = conn
-        .runtime_session_owner_slot_mut(session_id)
+        .runtime_session_owner_slot_mut_for_route(owner.session_id(), owner.session_owner_route())
         .ok()
         .and_then(|slot| slot.loaded_page_mut())
     else {
@@ -637,7 +662,7 @@ async fn remove_document_start_script_direct_async(
         .await
         .map_err(|error| devtools_preload_internal_error(error.to_string()))?;
     let Some(page) = conn
-        .runtime_session_owner_slot_mut(session_id)
+        .runtime_session_owner_slot_mut_for_route(owner.session_id(), owner.session_owner_route())
         .ok()
         .and_then(|slot| slot.loaded_page_mut())
     else {
@@ -685,14 +710,10 @@ async fn execute_devtools_bidi_browser_context_remove_preload_script_command(
             target_id: active_target_id,
             is_attached_session: false,
         };
-        let mut route_scope = conn.scoped_none_session_owner_route_override(route);
-        remove_loaded_page_document_start_script_for_session_async(
-            route_scope.conn_mut(),
-            None,
-            registry_key,
-        )
-        .await
-        .map_err(|message| devtools_preload_owner_error(&message))?;
+        let owner = CommandOwnerScope::for_implicit_route(Some(route));
+        remove_loaded_page_document_start_script_for_owner_async(conn, &owner, registry_key)
+            .await
+            .map_err(|message| devtools_preload_owner_error(&message))?;
     }
     Ok(DevToolsCommandResult::Empty)
 }
@@ -975,10 +996,8 @@ fn find_preload_script_route(conn: &mut CdpConnection, script_id: &str) -> Optio
         let Some(route) = conn.target_session_route_for_target_id(&target_id) else {
             continue;
         };
-        let mut route_scope = conn.scoped_none_session_owner_route_override(route.clone());
-        let scoped_conn = route_scope.conn_mut();
-        let has_script = scoped_conn
-            .target_owner_state_for_session(None)
+        let has_script = conn
+            .target_owner_state_for_route(None, Some(&route))
             .is_some_and(|owner_state| {
                 owner_state
                     .document_start_scripts
@@ -987,9 +1006,7 @@ fn find_preload_script_route(conn: &mut CdpConnection, script_id: &str) -> Optio
             })
             || route
                 .browser_context_id()
-                .and_then(|browser_context_id| {
-                    scoped_conn.browser_context_by_id(browser_context_id)
-                })
+                .and_then(|browser_context_id| conn.browser_context_by_id(browser_context_id))
                 .is_some_and(|browser_context| {
                     browser_context.has_default_document_start_script(script_id)
                 });
