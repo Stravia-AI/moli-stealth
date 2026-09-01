@@ -15,6 +15,7 @@ const DOM_POINT_W_SLOT: &str = "__moliDomPointW";
 const DOM_POINT_BRAND_SLOT: &str = "__moliDomPointBrand";
 const DOM_POINT_MUTABLE_BRAND_SLOT: &str = "__moliDomPointMutableBrand";
 const DOM_POINT_RESTRICTED_NUMBER_SLOT: &str = "__moliDomPointRestrictedNumber";
+const DOM_POINT_READ_ONLY_SLOT: &str = "__moliDomPointReadOnly";
 
 const DOM_MATRIX_M11_SLOT: &str = "__moliDomMatrixM11";
 const DOM_MATRIX_M12_SLOT: &str = "__moliDomMatrixM12";
@@ -824,7 +825,15 @@ pub(in crate::context_bootstrap) fn build_dom_point_object<'s>(
 pub(in crate::context_bootstrap) fn build_svg_point_object<'s>(
     scope: &mut v8::PinScope<'s, '_>,
 ) -> v8::Local<'s, v8::Object> {
-    let object = build_dom_point_object(scope, 0.0, 0.0, 0.0, 1.0);
+    build_svg_point_object_with_values(scope, 0.0, 0.0)
+}
+
+pub(in crate::context_bootstrap) fn build_svg_point_object_with_values<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    x: f64,
+    y: f64,
+) -> v8::Local<'s, v8::Object> {
+    let object = build_dom_point_object(scope, x, y, 0.0, 1.0);
     let restricted = v8::Boolean::new(scope, true);
     set_private_value(
         scope,
@@ -833,6 +842,19 @@ pub(in crate::context_bootstrap) fn build_svg_point_object<'s>(
         restricted.into(),
     );
     object
+}
+
+pub(in crate::context_bootstrap) fn set_svg_point_read_only<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    point: v8::Local<'s, v8::Object>,
+    read_only: bool,
+) {
+    set_private_value(
+        scope,
+        point,
+        DOM_POINT_READ_ONLY_SLOT,
+        v8::Boolean::new(scope, read_only).into(),
+    );
 }
 
 fn build_dom_point_readonly_object<'s>(
@@ -946,6 +968,17 @@ fn dom_point_setter_callback<'s>(
         throw_type_error(scope, "Illegal invocation");
         return;
     }
+    if get_private_value(scope, args.this(), DOM_POINT_READ_ONLY_SLOT)
+        .is_some_and(|value| value.boolean_value(scope))
+    {
+        throw_dom_exception(
+            scope,
+            "NoModificationAllowedError",
+            7,
+            "The SVG point is read-only.",
+        );
+        return;
+    }
     let context = webidl::Context::member("DOMPoint", slot);
     let value = if get_private_value(scope, args.this(), DOM_POINT_RESTRICTED_NUMBER_SLOT)
         .is_some_and(|value| value.boolean_value(scope))
@@ -969,6 +1002,7 @@ fn dom_point_setter_callback<'s>(
         slot,
         v8::Number::new(scope, value).into(),
     );
+    super::svg_runtime::reflect_svg_point_mutation(scope, args.this());
     rv.set_undefined();
 }
 
