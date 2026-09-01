@@ -123,6 +123,7 @@ fslock = "0.2"
 which = "6"
 home = "0"
 bindgen = "0.72"
+cc = "1"
 
 [dev-dependencies]
 miniz_oxide = "0.8.8"

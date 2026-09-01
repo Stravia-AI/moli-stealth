@@ -1,4 +1,6 @@
 use crate::AccessorConfiguration;
+use crate::LazyDataPropertyConfiguration;
+use crate::NativeDataPropertyConfiguration;
 use crate::AccessorNameGetterCallback;
 use crate::AccessorNameSetterCallback;
 use crate::Array;
@@ -47,6 +49,15 @@ unsafe extern "C" {
     length: usize,
   ) -> *const Object;
   fn v8__Object__SetAccessor(
+    this: *const Object,
+    context: *const Context,
+    key: *const Name,
+    getter: AccessorNameGetterCallback,
+    setter: Option<AccessorNameSetterCallback>,
+    data_or_null: *const Value,
+    attr: PropertyAttribute,
+  ) -> MaybeBool;
+  fn v8__Object__SetNativeDataProperty(
     this: *const Object,
     context: *const Context,
     key: *const Name,
@@ -611,6 +622,57 @@ impl Object {
     .into()
   }
 
+  /// Defines a callback-backed native data property.
+  #[inline(always)]
+  pub fn set_native_data_property(
+    &self,
+    scope: &PinScope<'_, '_>,
+    name: Local<Name>,
+    getter: impl MapFnTo<AccessorNameGetterCallback>,
+  ) -> Option<bool> {
+    self.set_native_data_property_with_configuration(
+      scope,
+      name,
+      NativeDataPropertyConfiguration::new(getter),
+    )
+  }
+
+  #[inline(always)]
+  pub fn set_native_data_property_with_setter(
+    &self,
+    scope: &PinScope<'_, '_>,
+    name: Local<Name>,
+    getter: impl MapFnTo<AccessorNameGetterCallback>,
+    setter: impl MapFnTo<AccessorNameSetterCallback>,
+  ) -> Option<bool> {
+    self.set_native_data_property_with_configuration(
+      scope,
+      name,
+      NativeDataPropertyConfiguration::new(getter).setter(setter),
+    )
+  }
+
+  #[inline(always)]
+  pub fn set_native_data_property_with_configuration(
+    &self,
+    scope: &PinScope<'_, '_>,
+    name: Local<Name>,
+    configuration: NativeDataPropertyConfiguration,
+  ) -> Option<bool> {
+    unsafe {
+      v8__Object__SetNativeDataProperty(
+        self,
+        &*scope.get_current_context(),
+        &*name,
+        configuration.getter,
+        configuration.setter,
+        configuration.data.map_or_else(null, |p| &*p),
+        configuration.property_attribute,
+      )
+    }
+    .into()
+  }
+
   /// Sets a lazy data property on this object. The getter is invoked the first
   /// time the property is read, and then the property is replaced with an
   /// ordinary data property containing the value returned by the getter.
@@ -660,6 +722,28 @@ impl Object {
         attr,
         getter_side_effect_type,
         setter_side_effect_type,
+      )
+    }
+    .into()
+  }
+
+  #[inline(always)]
+  pub fn set_lazy_data_property_with_configuration(
+    &self,
+    scope: &PinScope<'_, '_>,
+    name: Local<Name>,
+    configuration: LazyDataPropertyConfiguration,
+  ) -> Option<bool> {
+    unsafe {
+      v8__Object__SetLazyDataProperty(
+        self,
+        &*scope.get_current_context(),
+        &*name,
+        configuration.getter,
+        configuration.data.map_or_else(null, |p| &*p),
+        configuration.property_attribute,
+        configuration.getter_side_effect_type,
+        configuration.setter_side_effect_type,
       )
     }
     .into()

@@ -265,6 +265,9 @@ version = "6"
 [build-dependencies.bindgen]
 version = "0.72"
 
+[build-dependencies.cc]
+version = "1"
+
 [build-dependencies.fslock]
 version = "0.2"
 

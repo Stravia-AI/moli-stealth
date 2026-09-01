@@ -1,3 +1,5 @@
+#![allow(dead_code, unused_variables)]
+
 // Copyright 2018-2019 the Deno authors. All rights reserved. MIT license.
 use fslock::LockFile;
 use miniz_oxide::MZFlush;
@@ -46,9 +48,12 @@ fn clang_resource_dir(clang_bin: &Path) -> Result<String, String> {
 }
 
 fn main() {
-  println!("cargo:rerun-if-changed=.gn");
-  println!("cargo:rerun-if-changed=BUILD.gn");
-  println!("cargo:rerun-if-changed=src/binding.cc");
+  println!("cargo:rerun-if-changed=build.rs");
+  // The upstream binding and every Moli-owned bridge live under `src`. Watch
+  // the directory so adding or removing an `_ext.cc` file cannot drift from
+  // the compiler inputs discovered below.
+  println!("cargo:rerun-if-changed=src");
+  let moli_v8_ext_sources = moli_v8_ext_sources();
 
   // These are all the environment variables that we check. This is
   // probably more than what is needed, but missing an important
@@ -127,8 +132,9 @@ fn main() {
   // because we store everything in a parent directory of OUT_DIR.
   let _lockfile = acquire_lock();
 
-  // Build from source
   if env_bool("V8_FROM_SOURCE") {
+    ensure_full_source_build_layout();
+
     if is_asan && env::var_os("OPT_LEVEL").unwrap_or_default() == "0" {
       panic!(
         "v8 crate cannot be compiled with OPT_LEVEL=0 and ASAN.\nTry `[profile.dev.package.v8] opt-level = 1`.\nAborting before miscompilations cause issues."
@@ -142,6 +148,7 @@ fn main() {
 
     build_v8(is_asan);
     build_binding();
+    build_moli_v8_ext(&moli_v8_ext_sources);
 
     return;
   }
@@ -149,6 +156,56 @@ fn main() {
   print_prebuilt_src_binding_path();
 
   download_static_lib_binaries();
+  build_moli_v8_ext(&moli_v8_ext_sources);
+}
+
+fn moli_v8_ext_sources() -> Vec<PathBuf> {
+  let mut sources = fs::read_dir("src")
+    .expect("vendored V8 src directory must exist")
+    .map(|entry| entry.expect("vendored V8 src entry must be readable").path())
+    .filter(|path| {
+      path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with("_ext.cc"))
+    })
+    .collect::<Vec<_>>();
+  sources.sort();
+  assert!(
+    !sources.is_empty(),
+    "vendored V8 must contain local *_ext.cc bridge sources"
+  );
+  sources
+}
+
+fn ensure_full_source_build_layout() {
+  let required_paths = [
+    "BUILD.gn",
+    "build/config/BUILDCONFIG.gn",
+    "buildtools",
+    "third_party",
+    "tools/get_bindgen_args.py",
+    "tools/clang/scripts/update.py",
+    "v8/BUILD.gn",
+    "v8/src/objects/module.cc",
+    "v8/src/interpreter/interpreter-generator.cc",
+    "v8/src/compiler/bytecode-graph-builder.cc",
+    "v8/src/wasm/wasm-objects.h",
+  ];
+  let missing = required_paths
+    .iter()
+    .filter(|path| !Path::new(path).exists())
+    .copied()
+    .collect::<Vec<_>>();
+  if !missing.is_empty() {
+    panic!(
+      "V8_FROM_SOURCE=1 requires a full upstream rusty_v8 source-build layout. \
+This Moli checkout contains the slim prebuilt-only vendor tree. Missing \
+required path(s): {}. Restore the full rusty_v8/V8 source tree before using \
+V8_FROM_SOURCE=1, or provide a matching custom RUSTY_V8_ARCHIVE.",
+      missing.join(", ")
+    );
+  }
 }
 
 fn acquire_lock() -> LockFile {
@@ -338,6 +395,25 @@ fn build_binding() {
   bindings
     .write_to_file(out_path)
     .expect("Couldn't write bindings!");
+}
+
+fn build_moli_v8_ext(sources: &[PathBuf]) {
+  let mut build = cc::Build::new();
+  build
+    .cpp(true)
+    .warnings(false)
+    .include(".")
+    .include("v8/include")
+    .std("c++20")
+    .flag_if_supported("-w");
+  let compiler = build.get_compiler();
+  if compiler.is_like_msvc() && !compiler.is_like_clang_cl() {
+    build.flag("/Zc:__cplusplus");
+  }
+  for source in sources {
+    build.file(source);
+  }
+  build.compile("rusty_v8_moli_ext");
 }
 
 /// Builds the explicit Linux header-search arguments for bindgen.

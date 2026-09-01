@@ -51,6 +51,15 @@ unsafe extern "C" {
     intrinsic: Intrinsic,
     attr: PropertyAttribute,
   );
+  fn v8__Template__SetLazyDataProperty(
+    this: *const Template,
+    key: *const Name,
+    getter: AccessorNameGetterCallback,
+    data_or_null: *const Value,
+    attr: PropertyAttribute,
+    getter_side_effect_type: SideEffectType,
+    setter_side_effect_type: SideEffectType,
+  );
 
   fn v8__Signature__New(
     isolate: *mut RealIsolate,
@@ -94,6 +103,10 @@ unsafe extern "C" {
   );
   fn v8__FunctionTemplate__ReadOnlyPrototype(this: *const FunctionTemplate);
   fn v8__FunctionTemplate__RemovePrototype(this: *const FunctionTemplate);
+  fn v8__FunctionTemplate__HasInstance(
+    this: *const FunctionTemplate,
+    value: *const Value,
+  ) -> bool;
 
   fn v8__ObjectTemplate__New(
     isolate: *mut RealIsolate,
@@ -159,12 +172,40 @@ unsafe extern "C" {
     callback: FunctionCallback,
     data_or_null: *const Value,
   );
+  fn v8__ObjectTemplate__MarkAsUndetectable(this: *const ObjectTemplate);
+  fn v8__ObjectTemplate__SetCodeLike(this: *const ObjectTemplate);
+  #[allow(clippy::too_many_arguments)]
+  fn v8__ObjectTemplate__SetSecurityTokenAccessCheckAndHandlers(
+    this: *const ObjectTemplate,
+    access_check: AccessCheckCallback,
+    named_getter: Option<NamedPropertyGetterCallback>,
+    named_setter: Option<NamedPropertySetterCallback>,
+    named_query: Option<NamedPropertyQueryCallback>,
+    named_deleter: Option<NamedPropertyDeleterCallback>,
+    named_enumerator: Option<NamedPropertyEnumeratorCallback>,
+    named_definer: Option<NamedPropertyDefinerCallback>,
+    named_descriptor: Option<NamedPropertyDescriptorCallback>,
+    named_data_or_null: *const Value,
+    named_flags: PropertyHandlerFlags,
+    indexed_getter: Option<IndexedPropertyGetterCallback>,
+    indexed_setter: Option<IndexedPropertySetterCallback>,
+    indexed_query: Option<IndexedPropertyQueryCallback>,
+    indexed_deleter: Option<IndexedPropertyDeleterCallback>,
+    indexed_enumerator: Option<IndexedPropertyEnumeratorCallback>,
+    indexed_definer: Option<IndexedPropertyDefinerCallback>,
+    indexed_descriptor: Option<IndexedPropertyDescriptorCallback>,
+    indexed_data_or_null: *const Value,
+    indexed_flags: PropertyHandlerFlags,
+  );
 }
 
 pub type AccessorNameGetterCallback = NamedGetterCallbackForAccessor;
 
 /// Note: [ReturnValue] is ignored for accessors.
 pub type AccessorNameSetterCallback = NamedSetterCallbackForAccessor;
+
+pub type AccessCheckCallback =
+  unsafe extern "C" fn(Local<Context>, Local<Object>, Local<Value>) -> bool;
 
 /// Interceptor for get requests on an object.
 ///
@@ -276,6 +317,58 @@ pub struct AccessorConfiguration<'s> {
   pub(crate) setter: Option<AccessorNameSetterCallback>,
   pub(crate) data: Option<Local<'s, Value>>,
   pub(crate) property_attribute: PropertyAttribute,
+}
+
+/// Configuration for a callback-backed V8 native data property.
+pub type NativeDataPropertyConfiguration<'s> = AccessorConfiguration<'s>;
+
+pub struct LazyDataPropertyConfiguration<'s> {
+  pub(crate) getter: AccessorNameGetterCallback,
+  pub(crate) data: Option<Local<'s, Value>>,
+  pub(crate) property_attribute: PropertyAttribute,
+  pub(crate) getter_side_effect_type: SideEffectType,
+  pub(crate) setter_side_effect_type: SideEffectType,
+}
+
+impl<'s> LazyDataPropertyConfiguration<'s> {
+  pub fn new(getter: impl MapFnTo<AccessorNameGetterCallback>) -> Self {
+    Self {
+      getter: getter.map_fn_to(),
+      data: None,
+      property_attribute: PropertyAttribute::NONE,
+      getter_side_effect_type: SideEffectType::HasSideEffect,
+      setter_side_effect_type: SideEffectType::HasSideEffect,
+    }
+  }
+
+  pub fn property_attribute(
+    mut self,
+    property_attribute: PropertyAttribute,
+  ) -> Self {
+    self.property_attribute = property_attribute;
+    self
+  }
+
+  pub fn data(mut self, data: Local<'s, Value>) -> Self {
+    self.data = Some(data);
+    self
+  }
+
+  pub fn getter_side_effect_type(
+    mut self,
+    side_effect_type: SideEffectType,
+  ) -> Self {
+    self.getter_side_effect_type = side_effect_type;
+    self
+  }
+
+  pub fn setter_side_effect_type(
+    mut self,
+    side_effect_type: SideEffectType,
+  ) -> Self {
+    self.setter_side_effect_type = side_effect_type;
+    self
+  }
 }
 
 impl<'s> AccessorConfiguration<'s> {
@@ -650,6 +743,38 @@ impl Template {
     unsafe { v8__Template__Set(self, &*key, &*value, attr) }
   }
 
+  /// Adds a data-like property whose value is produced on first read.
+  #[inline(always)]
+  pub fn set_lazy_data_property(
+    &self,
+    key: Local<Name>,
+    getter: impl MapFnTo<AccessorNameGetterCallback>,
+  ) {
+    self.set_lazy_data_property_with_configuration(
+      key,
+      LazyDataPropertyConfiguration::new(getter),
+    );
+  }
+
+  #[inline(always)]
+  pub fn set_lazy_data_property_with_configuration(
+    &self,
+    key: Local<Name>,
+    configuration: LazyDataPropertyConfiguration,
+  ) {
+    unsafe {
+      v8__Template__SetLazyDataProperty(
+        self,
+        &*key,
+        configuration.getter,
+        configuration.data.map_or_else(null, |p| &*p),
+        configuration.property_attribute,
+        configuration.getter_side_effect_type,
+        configuration.setter_side_effect_type,
+      );
+    }
+  }
+
   /// During template instantiation, sets the value with the
   /// intrinsic property from the correct context.
   #[inline(always)]
@@ -767,6 +892,13 @@ impl Signature {
 }
 
 impl FunctionTemplate {
+  /// Returns true if `value` was created from this function template or from
+  /// a function template that inherits from it.
+  #[inline(always)]
+  pub fn has_instance(&self, value: Local<Value>) -> bool {
+    unsafe { v8__FunctionTemplate__HasInstance(self, &*value) }
+  }
+
   /// Create a FunctionBuilder to configure a FunctionTemplate.
   /// This is the same as FunctionBuilder::<FunctionTemplate>::new().
   #[inline(always)]
@@ -995,6 +1127,34 @@ impl ObjectTemplate {
     }
   }
 
+  #[inline(always)]
+  pub fn set_native_data_property(
+    &self,
+    key: Local<Name>,
+    getter: impl MapFnTo<AccessorNameGetterCallback>,
+  ) {
+    self.set_accessor(key, getter);
+  }
+
+  #[inline(always)]
+  pub fn set_native_data_property_with_setter(
+    &self,
+    key: Local<Name>,
+    getter: impl MapFnTo<AccessorNameGetterCallback>,
+    setter: impl MapFnTo<AccessorNameSetterCallback>,
+  ) {
+    self.set_accessor_with_setter(key, getter, setter);
+  }
+
+  #[inline(always)]
+  pub fn set_native_data_property_with_configuration(
+    &self,
+    key: Local<Name>,
+    configuration: NativeDataPropertyConfiguration,
+  ) {
+    self.set_accessor_with_configuration(key, configuration);
+  }
+
   //Re uses the AccessorNameGetterCallback to avoid implementation conflicts since the declaration for
   //GenericNamedPropertyGetterCallback and  AccessorNameGetterCallback are the same
   pub fn set_named_property_handler(
@@ -1071,6 +1231,18 @@ impl ObjectTemplate {
     unsafe { v8__ObjectTemplate__SetImmutableProto(self) };
   }
 
+  /// Marks object instances created from this template as undetectable.
+  #[inline(always)]
+  pub fn mark_as_undetectable(&self) {
+    unsafe { v8__ObjectTemplate__MarkAsUndetectable(self) };
+  }
+
+  /// Marks instances as code-like for string-code-generation policy checks.
+  #[inline(always)]
+  pub fn set_code_like(&self) {
+    unsafe { v8__ObjectTemplate__SetCodeLike(self) };
+  }
+
   /// Sets the callback to be used when calling instances created from this
   /// template as a function.
   ///
@@ -1087,6 +1259,51 @@ impl ObjectTemplate {
         self,
         callback.map_fn_to(),
         data.map_or_else(null, |p| &*p),
+      );
+    }
+  }
+
+  /// Sets the callback and optional associated data used when instances are
+  /// called as functions.
+  #[inline(always)]
+  pub fn set_call_as_function_handler_with_data(
+    &self,
+    callback: impl MapFnTo<FunctionCallback>,
+    data: Option<Local<'_, Value>>,
+  ) {
+    self.set_call_as_function_handler(callback, data);
+  }
+
+  /// Enables embedder-defined access checks and denied-access handlers.
+  pub fn set_security_token_access_check_and_handlers(
+    &self,
+    access_check: AccessCheckCallback,
+    named: NamedPropertyHandlerConfiguration,
+    indexed: IndexedPropertyHandlerConfiguration,
+  ) {
+    assert!(named.is_some() || indexed.is_some());
+    unsafe {
+      v8__ObjectTemplate__SetSecurityTokenAccessCheckAndHandlers(
+        self,
+        access_check,
+        named.getter,
+        named.setter,
+        named.query,
+        named.deleter,
+        named.enumerator,
+        named.definer,
+        named.descriptor,
+        named.data.map_or_else(null, |p| &*p),
+        named.flags,
+        indexed.getter,
+        indexed.setter,
+        indexed.query,
+        indexed.deleter,
+        indexed.enumerator,
+        indexed.definer,
+        indexed.descriptor,
+        indexed.data.map_or_else(null, |p| &*p),
+        indexed.flags,
       );
     }
   }
