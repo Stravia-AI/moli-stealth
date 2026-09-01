@@ -653,10 +653,7 @@ impl BrowserContext {
         &self,
         target_id: &str,
     ) -> Option<BrowserContextPageStorageHandles> {
-        if self.is_active_target(target_id) {
-            return Some(self.page_storage_handles());
-        }
-        let target = self.background_target(target_id)?;
+        let target = self.page_target(target_id)?;
         Some(
             self.storage_partition
                 .handles
