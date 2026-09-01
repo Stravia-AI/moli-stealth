@@ -149,6 +149,11 @@ const CONSTRUCTOR_SPECS_BEFORE_STREAMS: &[ConstructorSpec] = &[
         kind: ConstructorKind::Illegal,
     },
     ConstructorSpec {
+        name: "SVGAnimatedInteger",
+        parent: None,
+        kind: ConstructorKind::Illegal,
+    },
+    ConstructorSpec {
         name: "SVGNumberList",
         parent: None,
         kind: ConstructorKind::Illegal,
