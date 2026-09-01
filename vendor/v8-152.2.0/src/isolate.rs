@@ -1231,13 +1231,36 @@ impl Isolate {
   /// Snapshot-path teardown.
   ///
   /// Used by [`OwnedIsolate::create_blob`], which consumes the isolate
-  /// before V8 has run its final dispose. Cleans up the annex synchronously
-  /// (no weak-callback re-entry to worry about here) and nulls `ANNEX_SLOT`
-  /// so the snapshot creator's later isolate-dispose sees a clean slot.
+  /// before V8 has run its final dispose. Rust-owned slots and guaranteed
+  /// finalizers must be released while the isolate is still live: they can
+  /// own `Global` or `Weak` handles, and V8 refuses to create a snapshot while
+  /// such handles remain. Only after releasing them do we close the liveness
+  /// handles and detach the annex.
   unsafe fn dispose_annex(&mut self) -> Box<dyn Any> {
-    let (annex_ptr, create_param_allocations) =
-      unsafe { self.prepare_annex_for_dispose() };
+    let annex_ptr =
+      self.get_data_internal(Self::ANNEX_SLOT) as *mut IsolateAnnex;
+    assert!(!annex_ptr.is_null());
+
+    // Drop isolate slots first. Their destructors are allowed to use the
+    // isolate and may reset V8 handles or retire guaranteed finalizers.
+    let slots = unsafe { std::mem::take(&mut (*annex_ptr).slots) };
+    drop(slots);
+
+    // Context annexes keep a self-weak handle and register a guaranteed
+    // finalizer in this map. Running it before `isolate_handle.dispose()` is
+    // what lets `Weak::drop` reset the corresponding V8 global handle.
     unsafe { Self::run_remaining_guaranteed_finalizers(annex_ptr) };
+
+    unsafe {
+      (*annex_ptr)
+        .global_liveness()
+        .close_deferred_global_resets();
+      (*annex_ptr).global_liveness().dispose();
+      (*annex_ptr).isolate_handle.dispose();
+    }
+
+    let create_param_allocations =
+      unsafe { (*annex_ptr).create_param_allocations.take().unwrap() };
     let taken_annex =
       self.take_data_internal(Self::ANNEX_SLOT) as *mut IsolateAnnex;
     debug_assert_eq!(taken_annex, annex_ptr);
