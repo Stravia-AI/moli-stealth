@@ -975,10 +975,28 @@ impl CdpConnection {
         session_id: Option<&str>,
         cdp_request_id: u64,
     ) -> Option<RendererRuntimeCommandCausalIdentity> {
-        let correlation =
-            self.renderer_call_for_frontend_for_session_owner(session_id, cdp_request_id)?;
+        let owner_route = self.none_session_owner_route_override();
+        self.renderer_runtime_command_cause_for_route(
+            session_id,
+            owner_route.as_ref(),
+            cdp_request_id,
+        )
+    }
+
+    pub(crate) fn renderer_runtime_command_cause_for_route(
+        &self,
+        session_id: Option<&str>,
+        owner_route: Option<&CdpSessionRoute>,
+        cdp_request_id: u64,
+    ) -> Option<RendererRuntimeCommandCausalIdentity> {
+        let correlation = if session_id.is_some() {
+            self.renderer_call_for_frontend_for_session_owner(session_id, cdp_request_id)
+        } else {
+            self.target_devtools_session_state_for_route(session_id, owner_route)?
+                .renderer_call_for_frontend(cdp_request_id)
+        }?;
         Some(RendererRuntimeCommandCausalIdentity::new(
-            self.target_renderer_runtime_inspector_session_id_for_session(session_id),
+            self.target_renderer_runtime_inspector_session_id_for_route(session_id, owner_route),
             correlation.renderer_call_id().get(),
         ))
     }
@@ -6870,7 +6888,11 @@ mod tests {
         channel: &str,
     ) -> BidiChannelListenerResidence {
         BidiChannelListenerResidence::new(
-            BidiChannelPageOwner::capture(conn, Some(session_id)).expect("test Page attachment"),
+            BidiChannelPageOwner::capture_for_owner(
+                conn,
+                CommandOwnerScope::for_session(session_id),
+            )
+            .expect("test Page attachment"),
             bidi_channel_listener_for_test(channel),
         )
     }

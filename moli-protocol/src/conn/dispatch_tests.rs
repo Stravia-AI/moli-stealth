@@ -697,8 +697,9 @@ async fn bidi_fetch_control_resolves_background_request_owner() {
     ));
     conn.browser_context = Some(browser_context);
 
-    conn.register_pending_fetch_navigation_request_for_session_owner(
+    conn.register_pending_fetch_navigation_request_for_route(
         Some("SID-background"),
+        None,
         PendingFetchNavigation {
             fetch_request_id: "FETCH-background".to_owned(),
             interception_session_id: Some("bidi-session-1".to_owned()),
@@ -1576,10 +1577,7 @@ async fn devtools_runtime_command_uses_background_initial_document_without_resol
         let route = conn
             .target_session_route_for_target_id(second_target_id.as_str())
             .expect("background target route");
-        let previous_route = conn.replace_none_session_owner_route_override(Some(route));
-        let load_inputs = conn.navigation_load_inputs_for_session_owner(None);
-        conn.replace_none_session_owner_route_override(previous_route);
-        load_inputs
+        conn.navigation_load_inputs_for_route(None, Some(&route))
     };
     assert!(
         background_load_inputs
@@ -1777,23 +1775,21 @@ async fn protocol_neutral_await_promise_keeps_background_owner_route_across_pend
     let active_route = conn
         .target_session_route_for_target_id(first_target_id.as_str())
         .expect("active target route");
-    let previous_route = conn.replace_none_session_owner_route_override(Some(active_route));
     assert!(
-        !conn.has_pending_inspector_awaits_for_session_owner(None),
+        !conn
+            .target_devtools_session_state_for_route(None, Some(&active_route))
+            .is_some_and(crate::conn::DevToolsSessionState::has_pending_inspector_awaits),
         "internal id 0 pending await must not be registered on the active owner"
     );
-    conn.replace_none_session_owner_route_override(previous_route);
 
     let background_route = conn
         .target_session_route_for_target_id(second_target_id.as_str())
         .expect("background target route");
-    let previous_route =
-        conn.replace_none_session_owner_route_override(Some(background_route.clone()));
     assert!(
-        conn.has_pending_inspector_awaits_for_session_owner(None),
+        conn.target_devtools_session_state_for_route(None, Some(&background_route))
+            .is_some_and(crate::conn::DevToolsSessionState::has_pending_inspector_awaits),
         "internal id 0 pending await must be registered on the targeted background owner"
     );
-    conn.replace_none_session_owner_route_override(previous_route);
 
     let completed = pending.wait().await;
     let step = conn
@@ -1956,16 +1952,14 @@ async fn pending_runtime_binding_page_phase_keeps_background_owner_route_across_
                 .all(|binding| binding.name != "backgroundRouteBinding")),
         "binding state apply completion must not write the active owner"
     );
-    let previous_route = conn.replace_none_session_owner_route_override(Some(background_route));
     assert!(
-        conn.target_devtools_session_state_for_session(None)
+        conn.target_devtools_session_state_for_route(None, Some(&background_route))
             .is_some_and(|state| state
                 .runtime_bindings
                 .iter()
                 .any(|binding| binding.name == "backgroundRouteBinding")),
         "binding state apply completion should persist on the original background owner"
     );
-    conn.replace_none_session_owner_route_override(previous_route);
     assert_eq!(
         conn.browser_context
             .as_ref()
@@ -2408,12 +2402,13 @@ async fn stale_initial_document_page_build_does_not_overwrite_committed_page() {
         .expect("fresh initial target should pend active initial document page build");
     let real_page_url = "data:text/html,<title>real-page</title>";
     let parsed_real_page_url = url::Url::parse(real_page_url).expect("data URL should parse");
+    let owner = crate::conn::CommandOwnerScope::capture(&conn, None);
     let real_page = conn
         .load_page_via_runtime_async(real_page_url)
         .await
         .expect("real navigation page should build");
-    conn.commit_loaded_navigation_page_for_session_owner_async(
-        None,
+    conn.commit_loaded_navigation_page_for_owner_async(
+        &owner,
         real_page,
         crate::conn::LoadedNavigationRendererAttachmentCommit::Prepare(None),
         &parsed_real_page_url,
@@ -2430,8 +2425,8 @@ async fn stale_initial_document_page_build_does_not_overwrite_committed_page() {
         secure_context_type: "InsecureScheme".to_owned(),
         timestamp: 0.0,
     };
-    conn.commit_loaded_navigation_target_identity_for_session_owner(
-        None,
+    conn.commit_loaded_navigation_target_identity_for_owner(
+        &owner,
         &real_page_commit,
         &parsed_real_page_url,
     )
@@ -6273,6 +6268,18 @@ async fn devtools_command_executes_user_context_preload_without_default_leakage(
         "custom userContext target",
     )
     .await;
+    let custom_route = ctx
+        .conn
+        .target_session_route_for_target_id(custom_target.as_str())
+        .expect("custom userContext target route");
+    assert!(
+        ctx.conn
+            .navigation_load_inputs_for_route(None, Some(&custom_route))
+            .document_start_scripts
+            .iter()
+            .any(|script| script.source.contains("__bidiUserContextPreload")),
+        "custom userContext target navigation inputs should retain its context preload script"
+    );
     let custom_context = DevToolsCommandContext {
         target_id: Some(custom_target.clone()),
         ..context.clone()
@@ -6288,6 +6295,14 @@ async fn devtools_command_executes_user_context_preload_without_default_leakage(
     )
     .await
     .expect("custom userContext navigation should succeed");
+    let custom_location = evaluate_string_through_renderer_fence_for_test(
+        &mut ctx,
+        custom_context.clone(),
+        "location.href",
+        "custom preload location",
+    )
+    .await;
+    assert_eq!(custom_location, "data:text/html,user-context-preload");
     let custom_value = evaluate_string_through_renderer_fence_for_test(
         &mut ctx,
         custom_context,
@@ -8266,9 +8281,7 @@ async fn pending_emulation_timezone_keeps_background_owner_route_across_completi
         "background timezone",
         "background Emulation completion should preserve the captured owner"
     );
-    let previous_route = conn.replace_none_session_owner_route_override(Some(background_route));
-    let background_inputs = conn.navigation_load_inputs_for_session_owner(None);
-    conn.replace_none_session_owner_route_override(previous_route);
+    let background_inputs = conn.navigation_load_inputs_for_route(None, Some(&background_route));
     assert_eq!(background_inputs.timezone_override.as_deref(), Some("UTC"));
     assert!(
         conn.navigation_load_inputs_for_session_owner(None)
@@ -8658,7 +8671,7 @@ async fn devtools_network_intercept_commands_route_to_fetch_owner() {
     auth_only_result.expect("auth-only add intercept should succeed");
     let auth_url = url::Url::parse("https://example.test/protected").unwrap();
     let preflight = conn
-        .prepare_navigation_request_for_session_owner(None, &auth_url, None, false)
+        .prepare_navigation_request_for_route(None, None, &auth_url, None, false)
         .expect("auth-only intercept should prepare navigation preflight");
     assert!(preflight.document_auth_required);
     assert_eq!(

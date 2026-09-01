@@ -109,6 +109,16 @@ impl CdpConnection {
         session_id: Option<&str>,
         owns: bool,
     ) -> bool {
+        let owner = crate::conn::CommandOwnerScope::capture(self, session_id);
+        self.set_renderer_runtime_agent_owns_page_console_api_events_for_owner(&owner, owns)
+    }
+
+    pub(crate) fn set_renderer_runtime_agent_owns_page_console_api_events_for_owner(
+        &mut self,
+        owner: &crate::conn::CommandOwnerScope,
+        owns: bool,
+    ) -> bool {
+        let session_id = owner.session_id();
         if session_id.is_some_and(|session_id| {
             self.shared_worker_target_for_session(Some(session_id))
                 .is_some()
@@ -120,13 +130,17 @@ impl CdpConnection {
         }
         let owns = owns
             && self
-                .runtime_session_owner_slot(session_id)
+                .runtime_session_owner_slot_for_route(session_id, owner.session_owner_route())
                 .is_ok_and(|slot| slot.has_loaded_page());
-        self.with_target_devtools_session_state_for_session_mut(session_id, |state| {
-            state
-                .console_output_session_state
-                .renderer_runtime_agent_owns_page_console_api_events = owns;
-        })
+        self.with_target_devtools_session_state_for_route_mut(
+            session_id,
+            owner.session_owner_route(),
+            |state| {
+                state
+                    .console_output_session_state
+                    .renderer_runtime_agent_owns_page_console_api_events = owns;
+            },
+        )
         .is_some()
     }
 
@@ -135,7 +149,17 @@ impl CdpConnection {
         session_id: Option<&str>,
         state: V8InspectorSessionState,
     ) -> bool {
-        self.with_target_devtools_session_state_for_session_mut(session_id, |session| {
+        let owner_route = self.none_session_owner_route_override();
+        self.merge_v8_inspector_session_state_for_route(session_id, owner_route.as_ref(), state)
+    }
+
+    pub(crate) fn merge_v8_inspector_session_state_for_route(
+        &mut self,
+        session_id: Option<&str>,
+        owner_route: Option<&CdpSessionRoute>,
+        state: V8InspectorSessionState,
+    ) -> bool {
+        self.with_target_devtools_session_state_for_route_mut(session_id, owner_route, |session| {
             session.inspector_session_state.v8_state = Some(state);
         })
         .is_some()

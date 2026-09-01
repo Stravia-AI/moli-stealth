@@ -1,10 +1,9 @@
 use super::target_session_owner::{TargetSessionOwnerMut, TargetSessionStateMut};
 use super::*;
-use crate::conn::PageScreencastConfig;
-use crate::conn::TargetRuntimeSlot;
 use crate::conn::state::DevToolsSessionState;
 use crate::conn::state::MainDocumentResourceSnapshot;
 use crate::conn::state::PerformanceTimeDomain;
+use crate::conn::{CommandOwnerScope, PageScreencastConfig, TargetRuntimeSlot};
 
 pub(crate) struct PageLifecycleReplayTarget {
     pub(crate) session_id: String,
@@ -606,9 +605,9 @@ impl CdpConnection {
         .is_some()
     }
 
-    pub(crate) fn commit_main_document_resource_for_session_owner(
+    pub(crate) fn commit_main_document_resource_for_owner(
         &mut self,
-        session_id: Option<&str>,
+        owner: &crate::conn::CommandOwnerScope,
         frame_id: String,
         loader_id: String,
         url: url::Url,
@@ -617,23 +616,27 @@ impl CdpConnection {
         body: Option<crate::conn::CapturedBody>,
     ) -> bool {
         if self
-            .runtime_session_owner_slot(session_id)
+            .runtime_session_owner_slot_for_route(owner.session_id(), owner.session_owner_route())
             .ok()
             .and_then(TargetRuntimeSlot::committed_document_loader_id)
             != Some(loader_id.as_str())
         {
             return false;
         }
-        self.with_target_owner_state_for_session_mut(session_id, |owner_state| {
-            owner_state.page_resource_store.commit_main_document(
-                frame_id,
-                loader_id,
-                url,
-                response_headers,
-                from_cache,
-                body,
-            );
-        })
+        self.with_target_owner_state_for_route_mut(
+            owner.session_id(),
+            owner.session_owner_route(),
+            |owner_state| {
+                owner_state.page_resource_store.commit_main_document(
+                    frame_id,
+                    loader_id,
+                    url,
+                    response_headers,
+                    from_cache,
+                    body,
+                );
+            },
+        )
         .is_some()
     }
 
@@ -660,16 +663,20 @@ impl CdpConnection {
             .map(|owner_state| owner_state.has_attached_child_frame_id(frame_id))
     }
 
-    pub(crate) fn discard_uncommitted_main_document_resource_for_session_owner(
+    pub(crate) fn discard_uncommitted_main_document_resource_for_owner(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         loader_id: &str,
     ) {
-        let _ = self.with_target_owner_state_for_session_mut(session_id, |owner_state| {
-            owner_state
-                .page_resource_store
-                .discard_uncommitted_loader(loader_id);
-        });
+        let _ = self.with_target_owner_state_for_route_mut(
+            owner.session_id(),
+            owner.session_owner_route(),
+            |owner_state| {
+                owner_state
+                    .page_resource_store
+                    .discard_uncommitted_loader(loader_id);
+            },
+        );
     }
 
     pub(crate) fn set_page_domain_enabled_for_session_owner(

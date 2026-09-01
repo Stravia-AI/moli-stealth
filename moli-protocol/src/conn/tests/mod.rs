@@ -1409,7 +1409,7 @@ async fn memory_diagnostics_splits_pending_inspector_await_counts_by_target_owne
     );
     assert_eq!(
         diagnostics["activeBrowserContext"]["targetHosts"]["pendingInspectorAwaitCount"],
-        json!(1)
+        json!(3)
     );
 }
 

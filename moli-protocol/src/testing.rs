@@ -306,9 +306,10 @@ impl TestContext {
         mut navigation: crate::conn::LoadedNavigation,
         session_id: Option<&str>,
     ) {
+        let owner = crate::conn::CommandOwnerScope::capture(&self.conn, session_id);
         let (_, target_id) = self
             .conn
-            .target_owner_identity_for_session(session_id)
+            .target_owner_identity_for_route(owner.session_id(), owner.session_owner_route())
             .expect("navigation fixture requires an installed browser context");
         let target_id = target_id.expect("navigation fixture requires an exact target");
         let renderer_output_predecessor = navigation.renderer_output_predecessor;
@@ -320,8 +321,8 @@ impl TestContext {
             .expect("navigation fixture must retain its frozen Document commit identity");
         let page_commit = self
             .conn
-            .commit_loaded_navigation_page_for_session_owner_async(
-                session_id,
+            .commit_loaded_navigation_page_for_owner_async(
+                &owner,
                 navigation.page,
                 LoadedNavigationRendererAttachmentCommit::Prepare(None),
                 &final_url,
@@ -337,29 +338,29 @@ impl TestContext {
         );
         let _ = self
             .conn
-            .commit_loaded_navigation_target_identity_for_session_owner(
-                session_id,
+            .commit_loaded_navigation_target_identity_for_owner(
+                &owner,
                 &main_document_commit,
                 &final_url,
             );
-        let (binding, _) = self
-            .conn
-            .bind_renderer_document_lifecycle_for_session_owner(
-                session_id,
-                page_creation_artifacts,
-                None,
-                target_id,
-                crate::domains::page::LOADER_ID.to_owned(),
-            );
+        let (binding, _) = self.conn.bind_renderer_document_lifecycle_for_owner(
+            &owner,
+            page_creation_artifacts,
+            None,
+            target_id,
+            crate::domains::page::LOADER_ID.to_owned(),
+        );
         let binding =
             binding.expect("navigation fixture must install its exact renderer Document binding");
         if let Some(navigation_engine) = navigation_engine {
             self.conn
-                .adopt_loaded_navigation_engine_for_session_owner(session_id, navigation_engine);
+                .adopt_loaded_navigation_engine_for_owner(&owner, navigation_engine);
         }
         assert_eq!(
-            self.conn
-                .target_root_document_lifecycle_identity_for_session(session_id),
+            self.conn.target_root_document_lifecycle_identity_for_route(
+                owner.session_id(),
+                owner.session_owner_route(),
+            ),
             Some(binding.renderer_document_identity()),
             "navigation fixture must retain its exact renderer Document binding"
         );

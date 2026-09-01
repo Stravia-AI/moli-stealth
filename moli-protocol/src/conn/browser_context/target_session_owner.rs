@@ -7,8 +7,8 @@ use crate::conn::state::{
     TargetPageResidenceIdentity, TargetRuntimeSessionState, TargetRuntimeSlot,
 };
 use crate::conn::{
-    BackgroundProtocolEvent, ConnectionNetworkRequestIdAllocator, DocumentStartScript,
-    EmulatedDeviceMetrics, FetchInterceptionPattern, FetchRequestStage,
+    BackgroundProtocolEvent, CommandOwnerScope, ConnectionNetworkRequestIdAllocator,
+    DocumentStartScript, EmulatedDeviceMetrics, FetchInterceptionPattern, FetchRequestStage,
     InitialDocumentPageInstallResult, InitialDocumentPageOwner, LoadedNavigationPageCommit,
     LoadedNavigationRendererAttachmentCommit, NETWORK_ERROR_PAGE_URL, NetworkErrorPageNavigation,
     PausedDocumentTransfer, PendingFetchAuthNavigation, PendingFetchNavigation,
@@ -1356,22 +1356,6 @@ impl CdpConnection {
             .and_then(|owner| owner.navigation_initiator_url())
     }
 
-    pub(crate) fn prepare_navigation_request_for_session_owner(
-        &mut self,
-        session_id: Option<&str>,
-        requested_url: &Url,
-        referrer: Option<&str>,
-        is_data_url: bool,
-    ) -> Option<TargetNavigationRequestPreflight> {
-        self.prepare_navigation_request_for_route(
-            session_id,
-            None,
-            requested_url,
-            referrer,
-            is_data_url,
-        )
-    }
-
     pub(crate) fn prepare_navigation_request_for_route(
         &mut self,
         session_id: Option<&str>,
@@ -1401,14 +1385,6 @@ impl CdpConnection {
         result
     }
 
-    pub(crate) fn register_pending_fetch_navigation_request_for_session_owner(
-        &mut self,
-        session_id: Option<&str>,
-        pending: PendingFetchNavigation,
-    ) -> Option<()> {
-        self.register_pending_fetch_navigation_request_for_route(session_id, None, pending)
-    }
-
     pub(crate) fn register_pending_fetch_navigation_request_for_route(
         &mut self,
         session_id: Option<&str>,
@@ -1419,32 +1395,32 @@ impl CdpConnection {
             .register_pending_fetch_navigation_request(pending)
     }
 
-    pub(crate) fn prepare_loaded_navigation_commit_for_session_owner(
+    pub(crate) fn prepare_loaded_navigation_commit_for_owner(
         &mut self,
-        session_id: Option<&str>,
+        owner: &crate::conn::CommandOwnerScope,
     ) -> Option<TargetLoadedNavigationCommitState> {
-        self.target_session_owner_mut(session_id)?
+        self.target_session_owner_mut_for_route(owner.session_id(), owner.session_owner_route())?
             .prepare_loaded_navigation_commit()
     }
 
-    pub(crate) fn commit_loaded_navigation_target_identity_for_session_owner(
+    pub(crate) fn commit_loaded_navigation_target_identity_for_owner(
         &mut self,
-        session_id: Option<&str>,
+        owner: &crate::conn::CommandOwnerScope,
         main_document_commit: &RendererMainDocumentCommit,
         target_url: &Url,
     ) -> Option<()> {
-        self.target_session_owner_mut(session_id)?
+        self.target_session_owner_mut_for_route(owner.session_id(), owner.session_owner_route())?
             .commit_loaded_navigation_target_identity(main_document_commit, target_url)
     }
 
-    pub(crate) async fn commit_loaded_navigation_page_for_session_owner_async(
+    pub(crate) async fn commit_loaded_navigation_page_for_owner_async(
         &mut self,
-        session_id: Option<&str>,
+        owner: &crate::conn::CommandOwnerScope,
         page: Page,
         renderer_attachment_commit: LoadedNavigationRendererAttachmentCommit,
         history_url: &Url,
     ) -> Option<anyhow::Result<LoadedNavigationPageCommit>> {
-        self.target_session_owner_mut(session_id)?
+        self.target_session_owner_mut_for_route(owner.session_id(), owner.session_owner_route())?
             .commit_loaded_navigation_page_async(page, renderer_attachment_commit, history_url)
             .await
     }
@@ -1514,11 +1490,11 @@ impl CdpConnection {
         Ok(InitialDocumentPageInstallResult::Installed)
     }
 
-    pub(crate) fn clear_pending_navigation_history_update_for_session_owner(
+    pub(crate) fn clear_pending_navigation_history_update_for_owner(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
     ) -> Option<()> {
-        self.target_session_owner_mut(session_id)?
+        self.target_session_owner_mut_for_route(owner.session_id(), owner.session_owner_route())?
             .clear_pending_navigation_history_update()
     }
 
@@ -1532,12 +1508,12 @@ impl CdpConnection {
             .await
     }
 
-    pub(crate) async fn discard_loaded_page_after_failed_navigation_for_session_owner_async(
+    pub(crate) async fn discard_loaded_page_after_failed_navigation_for_owner_async(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         final_url: &Url,
     ) -> Option<()> {
-        self.target_session_owner_mut(session_id)?
+        self.target_session_owner_mut_for_route(owner.session_id(), owner.session_owner_route())?
             .discard_loaded_page_after_failed_navigation_async(final_url)
             .await
     }
@@ -1797,6 +1773,15 @@ impl CdpConnection {
             .runtime_session_state()
     }
 
+    pub(crate) fn target_runtime_session_state_for_route(
+        &self,
+        session_id: Option<&str>,
+        owner_route: Option<&CdpSessionRoute>,
+    ) -> Option<&TargetRuntimeSessionState> {
+        self.target_session_owner_ref_for_route(session_id, owner_route)?
+            .runtime_session_state()
+    }
+
     pub(crate) fn target_runtime_bindings_for_renderer_session_owner(
         &self,
         session_id: Option<&str>,
@@ -1846,17 +1831,6 @@ impl CdpConnection {
     ) -> Option<&TargetOwnerState> {
         self.target_session_owner_ref_for_route(session_id, owner_route)?
             .target_owner_state()
-    }
-
-    pub(crate) fn target_owner_has_bidi_channel_preload_script_for_session(
-        &self,
-        session_id: Option<&str>,
-    ) -> bool {
-        let none_session_owner_route = self.none_session_owner_route_override();
-        self.target_owner_has_bidi_channel_preload_script_for_route(
-            session_id,
-            none_session_owner_route.as_ref(),
-        )
     }
 
     pub(crate) fn target_owner_has_bidi_channel_preload_script_for_route(
@@ -1954,6 +1928,13 @@ impl CdpConnection {
         session_id: Option<&str>,
         owner_route: Option<&CdpSessionRoute>,
     ) -> Option<(String, Option<String>)> {
+        if session_id.is_none()
+            && let Some(CdpSessionRoute::BrowserContext { browser_context_id }) = owner_route
+        {
+            return self
+                .browser_context_by_id(browser_context_id)
+                .map(|_| (browser_context_id.clone(), None));
+        }
         self.target_session_owner_ref_for_route(session_id, owner_route)?
             .owner_identity()
     }
@@ -2006,17 +1987,6 @@ impl CdpConnection {
     /// before protocol commits that Page into the target slot. The reservation
     /// therefore owns an explicit attachment id before renderer work starts;
     /// callers never predict that identity from mutable current-Page state.
-    pub(crate) fn pending_target_page_residence_identity_for_session(
-        &self,
-        session_id: Option<&str>,
-    ) -> Option<TargetPageResidenceIdentity> {
-        let none_session_owner_route = self.none_session_owner_route_override();
-        self.pending_target_page_residence_identity_for_route(
-            session_id,
-            none_session_owner_route.as_ref(),
-        )
-    }
-
     pub(crate) fn pending_target_page_residence_identity_for_route(
         &self,
         session_id: Option<&str>,
@@ -2122,7 +2092,16 @@ impl CdpConnection {
         &self,
         session_id: Option<&str>,
     ) -> Option<crate::conn::RendererPageResidenceIdentity> {
-        self.runtime_session_owner_slot(session_id)
+        let owner_route = self.none_session_owner_route_override();
+        self.renderer_page_residence_identity_for_route(session_id, owner_route.as_ref())
+    }
+
+    pub(crate) fn renderer_page_residence_identity_for_route(
+        &self,
+        session_id: Option<&str>,
+        owner_route: Option<&CdpSessionRoute>,
+    ) -> Option<crate::conn::RendererPageResidenceIdentity> {
+        self.runtime_session_owner_slot_for_route(session_id, owner_route)
             .ok()?
             .loaded_page()
             .map(crate::conn::RendererPageResidenceIdentity::from_page)
@@ -2138,22 +2117,36 @@ impl CdpConnection {
     /// time. Looking it up again during drain could route an old Page's
     /// response or notification through a replacement Page or an unrelated
     /// contextual command session.
-    pub(crate) fn target_page_protocol_attachment_identity_for_renderer_inspector_route(
+    pub(crate) fn target_page_protocol_attachment_identity_for_renderer_inspector_owner(
         &self,
-        source_session_id: Option<&str>,
+        source_owner: &crate::conn::CommandOwnerScope,
         renderer_inspector_session_id: Option<&str>,
     ) -> Option<crate::conn::TargetPageProtocolAttachmentIdentity> {
-        let source =
-            self.target_page_protocol_attachment_identity_for_session(source_session_id)?;
+        let source = self.target_page_protocol_attachment_identity_for_route(
+            source_owner.session_id(),
+            source_owner.session_owner_route(),
+        )?;
         let protocol_session_id = renderer_inspector_session_id
             .map(str::to_owned)
-            .or_else(|| self.runtime_session_owner_primary_session_id(source_session_id));
-        let attachment = self
-            .target_page_protocol_attachment_identity_for_session(protocol_session_id.as_deref())?;
+            .or_else(|| {
+                self.runtime_session_owner_primary_session_id_for_route(
+                    source_owner.session_id(),
+                    source_owner.session_owner_route(),
+                )
+            });
+        let protocol_owner_route = protocol_session_id
+            .is_none()
+            .then(|| source_owner.session_owner_route())
+            .flatten();
+        let attachment = self.target_page_protocol_attachment_identity_for_route(
+            protocol_session_id.as_deref(),
+            protocol_owner_route,
+        )?;
         if attachment.page_owner() != source.page_owner()
             || self
-                .target_renderer_runtime_inspector_session_id_for_session(
+                .target_renderer_runtime_inspector_session_id_for_route(
                     protocol_session_id.as_deref(),
+                    protocol_owner_route,
                 )
                 .as_deref()
                 != renderer_inspector_session_id
@@ -2169,10 +2162,13 @@ impl CdpConnection {
         &self,
         expected: &crate::conn::TargetPageProtocolAttachmentIdentity,
     ) -> bool {
-        self.target_page_residence_identity_is_current_for_session(
-            expected.session_id(),
-            expected.page_owner(),
-        )
+        if let Some(session_id) = expected.session_id() {
+            return self
+                .target_page_protocol_attachment_identity_for_session(Some(session_id))
+                .as_ref()
+                == Some(expected);
+        }
+        self.target_page_residence_identity_is_current_for_session(None, expected.page_owner())
     }
 
     /// Binds renderer-produced child-frame activity to the Page attachment
@@ -2218,13 +2214,6 @@ impl CdpConnection {
             .and_then(|slot| slot.page_slot().renderer_document_lifecycle_binding())
             .map(crate::conn::CommittedRendererDocumentBinding::renderer_document_identity)
             == Some(expected.root_document())
-    }
-
-    pub(crate) fn target_root_document_lifecycle_identity_for_session(
-        &self,
-        session_id: Option<&str>,
-    ) -> Option<moli_core::RendererDocumentLifecycleIdentity> {
-        self.target_root_document_lifecycle_identity_for_route(session_id, None)
     }
 
     pub(crate) fn target_root_document_lifecycle_identity_for_route(
@@ -2439,8 +2428,12 @@ impl CdpConnection {
         self.page_event_session_ids_for_route(session_id, owner_route)
             .into_iter()
             .filter(|event_session_id| {
-                self.target_page_session_state_for_session(event_session_id.as_deref())
-                    .is_some_and(|state| state.page_domain_enabled)
+                let event_owner_route = event_session_id.is_none().then_some(owner_route).flatten();
+                self.target_page_session_state_for_route(
+                    event_session_id.as_deref(),
+                    event_owner_route,
+                )
+                .is_some_and(|state| state.page_domain_enabled)
             })
             .collect()
     }
@@ -2481,21 +2474,29 @@ impl CdpConnection {
     /// once per Inspector session. Freeze the audience at ingress so a later
     /// detach, target replacement, or `Runtime.enable` cannot retarget that
     /// historical fact.
-    pub(crate) fn runtime_event_protocol_attachments_for_session_owner(
+    pub(crate) fn runtime_event_protocol_attachments_for_route(
         &self,
         session_id: Option<&str>,
+        owner_route: Option<&CdpSessionRoute>,
     ) -> Option<Vec<crate::conn::TargetPageProtocolAttachmentIdentity>> {
-        let source = self.target_page_protocol_attachment_identity_for_session(session_id)?;
+        let source =
+            self.target_page_protocol_attachment_identity_for_route(session_id, owner_route)?;
         let attachments = self
-            .page_event_session_ids_for_session_owner(session_id)
+            .page_event_session_ids_for_route(session_id, owner_route)
             .into_iter()
             .filter(|event_session_id| {
-                self.target_runtime_session_state_for_session(event_session_id.as_deref())
-                    .is_some_and(|state| state.runtime_frontend_enabled)
+                let event_owner_route = event_session_id.is_none().then_some(owner_route).flatten();
+                self.target_runtime_session_state_for_route(
+                    event_session_id.as_deref(),
+                    event_owner_route,
+                )
+                .is_some_and(|state| state.runtime_frontend_enabled)
             })
             .map(|event_session_id| {
-                self.target_page_protocol_attachment_identity_for_session(
+                let event_owner_route = event_session_id.is_none().then_some(owner_route).flatten();
+                self.target_page_protocol_attachment_identity_for_route(
                     event_session_id.as_deref(),
+                    event_owner_route,
                 )
             })
             .collect::<Option<Vec<_>>>()?;
@@ -2588,14 +2589,6 @@ impl CdpConnection {
     ) -> Option<(String, String, String, String)> {
         self.target_session_owner_ref_for_route(session_id, owner_route)?
             .frame_tree_identity()
-    }
-
-    pub(crate) fn target_session_owner_frame_tree_loader_id(
-        &self,
-        session_id: Option<&str>,
-    ) -> Option<String> {
-        self.target_session_owner_ref(session_id)?
-            .frame_tree_loader_id()
     }
 
     pub(crate) fn target_session_owner_frame_tree_loader_id_for_route(
@@ -2976,24 +2969,24 @@ mod tests {
         );
 
         let default_route = conn
-            .target_page_protocol_attachment_identity_for_renderer_inspector_route(
-                Some("SID-active-aux"),
+            .target_page_protocol_attachment_identity_for_renderer_inspector_owner(
+                &crate::conn::CommandOwnerScope::for_session("SID-active-aux"),
                 None,
             )
             .expect("default inspector route should resolve through the target primary session");
         assert_eq!(default_route.session_id(), Some("SID-active-primary"));
 
         let auxiliary_route = conn
-            .target_page_protocol_attachment_identity_for_renderer_inspector_route(
-                Some("SID-active-primary"),
+            .target_page_protocol_attachment_identity_for_renderer_inspector_owner(
+                &crate::conn::CommandOwnerScope::for_session("SID-active-primary"),
                 Some("SID-active-aux"),
             )
             .expect("auxiliary inspector route should retain its exact protocol attachment");
         assert_eq!(auxiliary_route.session_id(), Some("SID-active-aux"));
 
         assert!(
-            conn.target_page_protocol_attachment_identity_for_renderer_inspector_route(
-                Some("SID-active-primary"),
+            conn.target_page_protocol_attachment_identity_for_renderer_inspector_owner(
+                &crate::conn::CommandOwnerScope::for_session("SID-active-primary"),
                 Some("SID-background-aux"),
             )
             .is_none(),
@@ -3837,8 +3830,11 @@ mod tests {
             "a reservation must not masquerade as the current Page"
         );
         assert!(
-            conn.pending_target_page_residence_identity_for_session(Some("SID-pending-residence"))
-                .is_some(),
+            conn.pending_target_page_residence_identity_for_route(
+                Some("SID-pending-residence"),
+                None,
+            )
+            .is_some(),
             "the future Page attachment should remain explicitly addressable"
         );
     }
@@ -3863,8 +3859,13 @@ mod tests {
             .expect("browser context")
             .set_active_target_id("TID-replacement");
         assert!(
-            !conn.target_page_residence_identity_is_current_for_session(None, &original),
-            "an implicit route must not let the old Page identity follow a new active target"
+            conn.target_page_residence_identity_is_current_for_session(None, &original),
+            "changing visibility must not retire the original stable Page residence"
+        );
+        assert_ne!(
+            conn.target_page_residence_identity_for_session(None),
+            Some(original),
+            "a fresh implicit lookup must follow the new active target without mutating the old identity"
         );
     }
 
@@ -4005,7 +4006,7 @@ mod tests {
         })
         .expect("Runtime-enabled auxiliary session should be mutable");
         assert_eq!(
-            conn.runtime_event_protocol_attachments_for_session_owner(Some("SID-runtime-a"))
+            conn.runtime_event_protocol_attachments_for_route(Some("SID-runtime-a"), None)
                 .expect("the current Page should expose its Runtime audience")
                 .into_iter()
                 .map(|attachment| attachment.session_id().map(str::to_owned))
@@ -4019,7 +4020,7 @@ mod tests {
         })
         .expect("Runtime-enabled primary session should be mutable");
         assert_eq!(
-            conn.runtime_event_protocol_attachments_for_session_owner(Some("SID-runtime-b"))
+            conn.runtime_event_protocol_attachments_for_route(Some("SID-runtime-b"), None)
                 .expect("the current Page should expose its Runtime audience")
                 .into_iter()
                 .map(|attachment| attachment.session_id().map(str::to_owned))

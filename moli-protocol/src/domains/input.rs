@@ -1,5 +1,5 @@
 use crate::conn::{
-    BackgroundProtocolEvent, CdpConnection, Cmd, CommandDispatchContext,
+    BackgroundProtocolEvent, CdpConnection, Cmd, CommandDispatchContext, CommandOwnerScope,
     TargetPageResidenceIdentity, TargetPageResidenceObservation, TargetPageResidenceToken,
 };
 use crate::devtools_runtime::{
@@ -1538,14 +1538,17 @@ impl InputPreparedOutputs {
 
     pub(crate) fn from_renderer_file_chooser_activation(
         conn: &CdpConnection,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         activation: RendererPendingFileChooserActivation,
     ) -> Self {
-        let Some(page_owner) = conn.target_page_residence_identity_for_session(session_id) else {
+        let Some(page_owner) = conn.target_page_residence_identity_for_route(
+            owner.session_id(),
+            owner.session_owner_route(),
+        ) else {
             return Self::default();
         };
         let Some(activation) = file_chooser::PreparedFileChooserActivation::capture(
-            conn, session_id, page_owner, activation,
+            conn, owner, page_owner, activation,
         ) else {
             return Self::default();
         };
@@ -1642,6 +1645,9 @@ async fn handle_input_dispatch_outcome_async(
     outcome: RendererInputDispatchOutcome,
     command_context: &mut CommandDispatchContext,
 ) -> Result<(), String> {
+    let action_owner = session_id
+        .map(CommandOwnerScope::for_session)
+        .unwrap_or_else(|| CommandOwnerScope::for_page_residence(owner));
     if let Some(download) = outcome.pending_download {
         let mut events = Vec::new();
         conn.handle_pending_download_activation_background_events_async(
@@ -1656,7 +1662,7 @@ async fn handle_input_dispatch_outcome_async(
     if let Some(file_chooser) = outcome.pending_file_chooser
         && let Some(file_chooser) = file_chooser::PreparedFileChooserActivation::capture(
             conn,
-            session_id,
+            &action_owner,
             owner.clone(),
             file_chooser,
         )
@@ -1975,7 +1981,7 @@ mod producer_tests {
 
     use crate::conn::{
         BackgroundProtocolEvent, BrowserContext, CdpConnection, CommandDispatchContext,
-        TargetPageResidenceIdentity, build_event,
+        CommandOwnerScope, TargetPageResidenceIdentity, build_event,
     };
     use crate::devtools_runtime::{
         AutomationEvent, BrowserDownloadProgressEvent, BrowserDownloadWillBeginEvent,
@@ -2019,8 +2025,8 @@ mod producer_tests {
             load: None,
             terminated: None,
         };
-        let (binding, initial_events) = conn.bind_renderer_document_lifecycle_for_session_owner(
-            Some(session_id),
+        let (binding, initial_events) = conn.bind_renderer_document_lifecycle_for_owner(
+            &crate::conn::CommandOwnerScope::for_session(session_id),
             RendererPageCreationArtifacts {
                 active_document: identity.document,
                 active_epoch: identity.epoch,
@@ -2197,7 +2203,7 @@ mod producer_tests {
 
         let prepared = super::file_chooser::PreparedFileChooserActivation::capture(
             &conn,
-            Some("SID-typed"),
+            &CommandOwnerScope::for_session("SID-typed"),
             owner,
             renderer_file_chooser_for_test(source_document, Some("FRAME-typed"), 77, false),
         )
@@ -2253,7 +2259,7 @@ mod producer_tests {
 
         let prepared = super::file_chooser::PreparedFileChooserActivation::capture(
             &conn,
-            Some("SID-root-capture"),
+            &CommandOwnerScope::for_session("SID-root-capture"),
             owner,
             renderer_file_chooser_for_test(source_document, None, 41, false),
         )
@@ -2284,7 +2290,7 @@ mod producer_tests {
         let owner = page_residence_identity_for_test(&conn, "SID-document-collision");
         let prepared = super::file_chooser::PreparedFileChooserActivation::capture(
             &conn,
-            Some("SID-document-collision"),
+            &CommandOwnerScope::for_session("SID-document-collision"),
             owner,
             renderer_file_chooser_for_test(source_document, None, 42, false),
         )
@@ -2355,7 +2361,7 @@ mod producer_tests {
         let owner = page_residence_identity_for_test(&conn, "SID-page-replacement");
         let stale = super::file_chooser::PreparedFileChooserActivation::capture(
             &conn,
-            Some("SID-page-replacement"),
+            &CommandOwnerScope::for_session("SID-page-replacement"),
             owner.clone(),
             renderer_file_chooser_for_test(source_document, None, 43, false),
         )
@@ -2373,7 +2379,7 @@ mod producer_tests {
         let replacement_owner = page_residence_identity_for_test(&conn, "SID-page-replacement");
         let current = super::file_chooser::PreparedFileChooserActivation::capture(
             &conn,
-            Some("SID-page-replacement"),
+            &CommandOwnerScope::for_session("SID-page-replacement"),
             replacement_owner,
             renderer_file_chooser_for_test(replacement_document, None, 43, true),
         )

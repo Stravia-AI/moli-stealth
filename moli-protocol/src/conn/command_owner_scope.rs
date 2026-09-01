@@ -1,6 +1,6 @@
 use super::{
     CdpConnection, CdpSessionRoute, NoneSessionOwnerRouteOverrideScope,
-    TargetPageProtocolAttachmentIdentity,
+    TargetPageProtocolAttachmentIdentity, TargetPageResidenceIdentity,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,7 +56,10 @@ impl CommandOwnerScope {
         if let Some(session_id) = attachment.session_id() {
             return Self::for_session(session_id);
         }
-        let page = attachment.page_owner();
+        Self::for_page_residence(attachment.page_owner())
+    }
+
+    pub(crate) fn for_page_residence(page: &TargetPageResidenceIdentity) -> Self {
         let route = match page.target_id() {
             Some(target_id) => CdpSessionRoute::PageTarget {
                 browser_context_id: page.browser_context_id().to_owned(),

@@ -8297,8 +8297,12 @@ async fn complete_pending_runtime_inspector_command(
     if !saw_current_response
         && renderer_response_rx.is_some()
         && completed.command_id.is_some_and(|command_id| {
-            conn.renderer_runtime_command_cause_for_frontend(completed.session_id(), command_id)
-                .is_none()
+            conn.renderer_runtime_command_cause_for_route(
+                completed.session_id(),
+                completed.owner_scope.session_owner_route(),
+                command_id,
+            )
+            .is_none()
         })
     {
         renderer_response_rx.take();
