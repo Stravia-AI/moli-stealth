@@ -2004,7 +2004,7 @@ fn top_level_target_routes_for_browser_contexts(
             CdpSessionRoute::PageTarget {
                 browser_context_id: browser_context.id.clone(),
                 target_id: target.target_id().to_owned(),
-                is_attached_session: false,
+                session_key: moli_page_types::DevToolsSessionKey::Primary,
             }
         }));
     }

@@ -385,9 +385,13 @@ impl BrowserContext {
             state.effective_renderer_browser_identity_override_owned();
         let previous_locale = state.locale_override.clone();
         let previous_timezone = state.timezone_override.clone();
-        let routed_session_id = is_auxiliary.then_some(session_id);
-        state.clear_devtools_network_state(is_auxiliary, routed_session_id);
-        state.clear_devtools_emulation_state(is_auxiliary, routed_session_id);
+        let session_key = if is_auxiliary {
+            moli_page_types::DevToolsSessionKey::Attached(session_id.to_owned())
+        } else {
+            moli_page_types::DevToolsSessionKey::Primary
+        };
+        state.clear_devtools_network_state(&session_key);
+        state.clear_devtools_emulation_state(&session_key);
         let extra_headers_changed = previous_headers != state.network_policy.extra_headers();
         let bypass_service_worker_changed =
             previous_bypass != state.network_policy.bypass_service_worker();

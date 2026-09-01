@@ -51,12 +51,15 @@ async fn close_target_success() {
         .runtime_slot
         .enable_primary_network_events();
     bc.active_page_state_mut()
-        .mutate_devtools_network_session_state(false, None, |network| {
-            network.network_enabled = true;
-            network.cache_disabled = true;
-            network.bypass_service_worker = true;
-            network.extra_headers = vec![("X-Test".into(), "1".into())];
-        });
+        .mutate_devtools_network_session_state(
+            &moli_page_types::DevToolsSessionKey::Primary,
+            |network| {
+                network.network_enabled = true;
+                network.cache_disabled = true;
+                network.bypass_service_worker = true;
+                network.extra_headers = vec![("X-Test".into(), "1".into())];
+            },
+        );
     bc.active_page_state_mut().css_enabled = true;
     bc.active_page_state_mut().fetch_owner.configure(
         None,

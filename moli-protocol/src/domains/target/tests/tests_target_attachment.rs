@@ -1019,7 +1019,7 @@ async fn detach_browser_target_session_cascades_owned_target_sessions() {
     assert!(matches!(
         ctx.conn.session_route(Some(&page_session_id)),
         Some(CdpSessionRoute::PageTarget {
-            is_attached_session: true,
+            session_key: moli_page_types::DevToolsSessionKey::Attached(_),
             ..
         })
     ));
@@ -1169,7 +1169,7 @@ async fn root_frontend_release_preserves_private_browser_owned_page_session() {
     assert!(matches!(
         ctx.conn.session_route(Some(&private_page_session_id)),
         Some(CdpSessionRoute::PageTarget {
-            is_attached_session: true,
+            session_key: moli_page_types::DevToolsSessionKey::Attached(_),
             ..
         })
     ));
@@ -1307,7 +1307,7 @@ async fn session_route_finds_browser_active_auxiliary_background_and_inactive_se
         Some(CdpSessionRoute::PageTarget {
             browser_context_id: "BID-A".to_owned(),
             target_id: "TID-000000000A".to_owned(),
-            is_attached_session: false,
+            session_key: moli_page_types::DevToolsSessionKey::Primary,
         })
     );
     assert_eq!(
@@ -1315,7 +1315,7 @@ async fn session_route_finds_browser_active_auxiliary_background_and_inactive_se
         Some(CdpSessionRoute::PageTarget {
             browser_context_id: "BID-A".to_owned(),
             target_id: "TID-000000000A".to_owned(),
-            is_attached_session: true,
+            session_key: moli_page_types::DevToolsSessionKey::Attached("SID-auxiliary".to_owned(),),
         })
     );
     assert_eq!(
@@ -1323,7 +1323,7 @@ async fn session_route_finds_browser_active_auxiliary_background_and_inactive_se
         Some(CdpSessionRoute::PageTarget {
             browser_context_id: "BID-A".to_owned(),
             target_id: "TID-000000000B".to_owned(),
-            is_attached_session: false,
+            session_key: moli_page_types::DevToolsSessionKey::Primary,
         })
     );
     assert_eq!(
@@ -1338,7 +1338,7 @@ async fn session_route_finds_browser_active_auxiliary_background_and_inactive_se
         Some(CdpSessionRoute::PageTarget {
             browser_context_id: "BID-B".to_owned(),
             target_id: "TID-000000000C".to_owned(),
-            is_attached_session: false,
+            session_key: moli_page_types::DevToolsSessionKey::Primary,
         })
     );
     assert_eq!(ctx.conn.session_route(Some("SID-missing")), None);
@@ -1361,7 +1361,9 @@ async fn session_route_finds_browser_active_auxiliary_background_and_inactive_se
         Some(CdpSessionRoute::PageTarget {
             browser_context_id: "BID-B".to_owned(),
             target_id: "TID-000000000D".to_owned(),
-            is_attached_session: true,
+            session_key: moli_page_types::DevToolsSessionKey::Attached(
+                "SID-inactive-aux-background".to_owned(),
+            ),
         })
     );
     assert_eq!(
@@ -1560,12 +1562,15 @@ async fn detach_from_target() {
         .runtime_slot
         .enable_primary_network_events();
     bc.active_page_state_mut()
-        .mutate_devtools_network_session_state(false, None, |network| {
-            network.network_enabled = true;
-            network.cache_disabled = true;
-            network.bypass_service_worker = true;
-            network.extra_headers = vec![("X-Test".into(), "1".into())];
-        });
+        .mutate_devtools_network_session_state(
+            &moli_page_types::DevToolsSessionKey::Primary,
+            |network| {
+                network.network_enabled = true;
+                network.cache_disabled = true;
+                network.bypass_service_worker = true;
+                network.extra_headers = vec![("X-Test".into(), "1".into())];
+            },
+        );
     bc.active_page_state_mut().css_enabled = true;
     bc.active_page_state_mut().fetch_owner.configure(
         None,
@@ -2221,12 +2226,15 @@ async fn set_auto_attach_false_detaches_existing_target() {
         .runtime_slot
         .enable_primary_network_events();
     bc.active_page_state_mut()
-        .mutate_devtools_network_session_state(false, None, |network| {
-            network.network_enabled = true;
-            network.cache_disabled = true;
-            network.bypass_service_worker = true;
-            network.extra_headers = vec![("X-Test".into(), "1".into())];
-        });
+        .mutate_devtools_network_session_state(
+            &moli_page_types::DevToolsSessionKey::Primary,
+            |network| {
+                network.network_enabled = true;
+                network.cache_disabled = true;
+                network.bypass_service_worker = true;
+                network.extra_headers = vec![("X-Test".into(), "1".into())];
+            },
+        );
     bc.active_page_state_mut().css_enabled = true;
     bc.active_page_state_mut().fetch_owner.configure(
         None,
@@ -2871,7 +2879,7 @@ async fn set_auto_attach_true_attaches_existing_page_target_for_each_owner() {
         ctx.conn.session_route(Some(&owner_page_session_id)),
         Some(CdpSessionRoute::PageTarget {
             target_id,
-            is_attached_session: true,
+            session_key: moli_page_types::DevToolsSessionKey::Attached(_),
             ..
         }) if target_id == "TID-page"
     ));

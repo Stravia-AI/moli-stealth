@@ -6858,7 +6858,7 @@ mod tests {
             Some(crate::conn::CdpSessionRoute::PageTarget {
                 browser_context_id: "BID-1".to_owned(),
                 target_id: "TID-page".to_owned(),
-                is_attached_session: false,
+                session_key: moli_page_types::DevToolsSessionKey::Primary,
             }),
             "dropping late shared worker output must not disturb or reuse the active page session"
         );

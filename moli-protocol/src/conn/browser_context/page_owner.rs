@@ -375,16 +375,19 @@ impl TargetSessionOwnerMut<'_> {
                 Self::PageTarget {
                     browser_context,
                     target_id,
-                    session_id,
-                    is_auxiliary_target_session,
+                    session_key,
+                    ..
                 } => browser_context
                     .page_target(target_id)
                     .filter(|target| target.has_loaded_page())
                     .and_then(|target| {
-                        let replay_session_id = if *is_auxiliary_target_session {
-                            session_id.clone()
-                        } else {
-                            target.session_id().map(str::to_owned)
+                        let replay_session_id = match session_key {
+                            moli_page_types::DevToolsSessionKey::Primary => {
+                                target.session_id().map(str::to_owned)
+                            }
+                            moli_page_types::DevToolsSessionKey::Attached(session_id) => {
+                                Some(session_id.clone())
+                            }
                         }?;
                         Some(PageLifecycleReplayTarget {
                             session_id: replay_session_id,

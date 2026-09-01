@@ -1,12 +1,13 @@
 #[cfg(test)]
 use crate::conn::BrowserContext;
 use crate::conn::{CdpConnection, CdpSessionRoute, PageTargetHost};
+use moli_page_types::DevToolsSessionKey;
 
 pub(super) enum TargetSessionOwner {
     PageTarget {
         browser_context_id: String,
         target_id: String,
-        is_auxiliary_target_session: bool,
+        session_key: DevToolsSessionKey,
     },
     NoLoadedBrowserContext,
 }
@@ -29,7 +30,7 @@ impl CdpConnection {
         f: impl FnOnce(&mut PageTargetHost),
     ) -> bool {
         self.target_session_owner_mut(session_id)
-            .and_then(|mut owner| owner.mutate_page_state(|state, _, _| f(state)))
+            .and_then(|mut owner| owner.mutate_page_state(|state, _| f(state)))
             .is_some()
     }
 
@@ -62,7 +63,7 @@ impl CdpConnection {
                     return Some(TargetSessionOwner::PageTarget {
                         browser_context_id: browser_context.id.clone(),
                         target_id: target_id.to_owned(),
-                        is_auxiliary_target_session: false,
+                        session_key: DevToolsSessionKey::Primary,
                     });
                 }
             },
@@ -76,7 +77,7 @@ impl CdpConnection {
                         Some(TargetSessionOwner::PageTarget {
                             browser_context_id: browser_context.id.clone(),
                             target_id: browser_context.active_target_id()?.to_owned(),
-                            is_auxiliary_target_session: false,
+                            session_key: DevToolsSessionKey::Primary,
                         })
                     })
                     .unwrap_or(TargetSessionOwner::NoLoadedBrowserContext),
@@ -87,7 +88,7 @@ impl CdpConnection {
                         Some(TargetSessionOwner::PageTarget {
                             browser_context_id,
                             target_id: browser_context.active_target_id()?.to_owned(),
-                            is_auxiliary_target_session: false,
+                            session_key: DevToolsSessionKey::Primary,
                         })
                     })
                     .unwrap_or(TargetSessionOwner::NoLoadedBrowserContext),
@@ -95,14 +96,14 @@ impl CdpConnection {
             CdpSessionRoute::PageTarget {
                 browser_context_id,
                 target_id,
-                is_attached_session,
+                session_key,
             } => {
                 let browser_context = self.browser_context_by_id(&browser_context_id)?;
                 if browser_context.page_target(&target_id).is_some() {
                     Some(TargetSessionOwner::PageTarget {
                         browser_context_id,
                         target_id,
-                        is_auxiliary_target_session: is_attached_session,
+                        session_key,
                     })
                 } else {
                     Some(TargetSessionOwner::NoLoadedBrowserContext)

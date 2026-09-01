@@ -9,6 +9,7 @@ use crate::domains::network::{
     TargetNetworkBacklogPreparedDelivery,
 };
 use moli_core::page::PendingPageCommand;
+use moli_page_types::DevToolsSessionKey;
 
 impl TargetSessionStateMut<'_> {
     fn set_tls_verify_host_override(mut self, enabled: bool) -> bool {
@@ -41,7 +42,7 @@ impl TargetSessionStateMut<'_> {
 enum TargetNetworkListenerOwnerMut<'a> {
     PageTarget {
         target: &'a mut crate::conn::PageTargetHost,
-        is_auxiliary_target_session: bool,
+        session_key: DevToolsSessionKey,
     },
     NoLoadedBrowserContext,
 }
@@ -52,12 +53,12 @@ impl<'a> TargetSessionOwnerMut<'a> {
             Self::PageTarget {
                 browser_context,
                 target_id,
-                is_auxiliary_target_session,
+                session_key,
                 ..
             } => match browser_context.page_target_mut(&target_id) {
                 Some(target) => TargetNetworkListenerOwnerMut::PageTarget {
                     target,
-                    is_auxiliary_target_session,
+                    session_key,
                 },
                 None => TargetNetworkListenerOwnerMut::NoLoadedBrowserContext,
             },
@@ -65,45 +66,40 @@ impl<'a> TargetSessionOwnerMut<'a> {
         }
     }
 
-    fn enable_listener(mut self, session_id: Option<&str>) -> bool {
+    fn enable_listener(mut self) -> bool {
         if self
             .mutate_network_policy_session_state(|state| state.network_enabled = true)
             .is_none()
         {
             return false;
         }
-        self.into_network_listener_owner()
-            .enable_listener(session_id)
+        self.into_network_listener_owner().enable_listener()
     }
 
-    fn disable_listener(mut self, session_id: Option<&str>) -> bool {
+    fn disable_listener(mut self) -> bool {
         if self
             .mutate_network_policy_session_state(|state| *state = Default::default())
             .is_none()
         {
             return false;
         }
-        self.into_network_listener_owner()
-            .disable_listener(session_id)
+        self.into_network_listener_owner().disable_listener()
     }
 }
 
 impl TargetNetworkListenerOwnerMut<'_> {
-    fn network_listener_enabled(&self, session_id: Option<&str>) -> bool {
+    fn network_listener_enabled(&self) -> bool {
         match self {
             Self::PageTarget {
                 target,
-                is_auxiliary_target_session,
-            } => {
-                if *is_auxiliary_target_session {
-                    return session_id.is_some_and(|session_id| {
-                        target
-                            .runtime_slot()
-                            .auxiliary_network_events_enabled_for_session(session_id)
-                    });
-                }
-                target.runtime_slot.primary_network_events_enabled()
-            }
+                session_key: DevToolsSessionKey::Primary,
+            } => target.runtime_slot.primary_network_events_enabled(),
+            Self::PageTarget {
+                target,
+                session_key: DevToolsSessionKey::Attached(session_id),
+            } => target
+                .runtime_slot()
+                .auxiliary_network_events_enabled_for_session(session_id),
             Self::NoLoadedBrowserContext => false,
         }
     }
@@ -156,31 +152,32 @@ impl TargetNetworkListenerOwnerMut<'_> {
         }
     }
 
-    fn listener_session_id<'s>(&self, session_id: Option<&'s str>) -> Option<&'s str> {
-        self.is_auxiliary_target_session()
-            .then_some(session_id)
-            .flatten()
-    }
-
-    fn is_auxiliary_target_session(&self) -> bool {
+    fn listener_session_id(&self) -> Option<&str> {
         match self {
-            Self::PageTarget {
-                is_auxiliary_target_session,
-                ..
-            } => *is_auxiliary_target_session,
-            Self::NoLoadedBrowserContext => false,
+            Self::PageTarget { session_key, .. } => session_key.wire_session_id(),
+            Self::NoLoadedBrowserContext => None,
         }
     }
 
-    fn enable_listener(mut self, session_id: Option<&str>) -> bool {
+    fn is_attached_session(&self) -> bool {
+        matches!(
+            self,
+            Self::PageTarget {
+                session_key: DevToolsSessionKey::Attached(_),
+                ..
+            }
+        )
+    }
+
+    fn enable_listener(mut self) -> bool {
         if matches!(self, Self::NoLoadedBrowserContext) {
             return false;
         }
 
-        let adding_network_event_listener = !self.network_listener_enabled(session_id);
-        let listener_session_id = self.listener_session_id(session_id);
-        if self.is_auxiliary_target_session() {
-            if let Some(session_id) = session_id
+        let adding_network_event_listener = !self.network_listener_enabled();
+        let listener_session_id = self.listener_session_id().map(str::to_owned);
+        if self.is_attached_session() {
+            if let Some(session_id) = listener_session_id.as_deref()
                 && let Some(runtime_slot) = self.runtime_slot_mut()
             {
                 runtime_slot.enable_auxiliary_network_events(session_id);
@@ -189,19 +186,21 @@ impl TargetNetworkListenerOwnerMut<'_> {
             self.set_primary_network_enabled(true);
         }
         if adding_network_event_listener {
-            self.initialize_network_observation_cursor_at_current_tail(listener_session_id);
+            self.initialize_network_observation_cursor_at_current_tail(
+                listener_session_id.as_deref(),
+            );
         }
         true
     }
 
-    fn disable_listener(mut self, session_id: Option<&str>) -> bool {
+    fn disable_listener(mut self) -> bool {
         if matches!(self, Self::NoLoadedBrowserContext) {
             return false;
         }
 
-        let listener_session_id = self.listener_session_id(session_id);
-        if self.is_auxiliary_target_session() {
-            if let Some(session_id) = session_id
+        let listener_session_id = self.listener_session_id().map(str::to_owned);
+        if self.is_attached_session() {
+            if let Some(session_id) = listener_session_id.as_deref()
                 && let Some(runtime_slot) = self.runtime_slot_mut()
             {
                 runtime_slot.disable_auxiliary_network_events(session_id);
@@ -209,8 +208,8 @@ impl TargetNetworkListenerOwnerMut<'_> {
         } else {
             self.set_primary_network_enabled(false);
         }
-        self.remove_network_observation_cursor(listener_session_id);
-        self.remove_captured_response_body_visibility_for_session(listener_session_id);
+        self.remove_network_observation_cursor(listener_session_id.as_deref());
+        self.remove_captured_response_body_visibility_for_session(listener_session_id.as_deref());
         self.clear_network_observation_artifacts_if_unobserved();
         true
     }
@@ -230,27 +229,21 @@ impl TargetSessionOwnerMut<'_> {
     ) -> Option<T> {
         fn mutate<T>(
             page_state: &mut crate::conn::state::PageTargetHost,
-            session_id: Option<&str>,
-            is_auxiliary_target_session: bool,
+            session_key: &DevToolsSessionKey,
             f: impl FnOnce(&mut crate::conn::state::DevToolsNetworkSessionState) -> T,
         ) -> T {
-            page_state.mutate_devtools_network_session_state(
-                is_auxiliary_target_session,
-                session_id,
-                f,
-            )
+            page_state.mutate_devtools_network_session_state(session_key, f)
         }
 
         match self {
             Self::PageTarget {
                 browser_context,
                 target_id,
-                session_id,
-                is_auxiliary_target_session,
+                session_key,
+                ..
             } => Some(mutate(
                 browser_context.page_target_mut(target_id)?,
-                session_id.as_deref(),
-                *is_auxiliary_target_session,
+                session_key,
                 f,
             )),
             Self::NoLoadedBrowserContext => None,
@@ -429,12 +422,8 @@ impl TargetSessionOwnerMut<'_> {
         &mut self,
         browser_identity: Option<crate::conn::DevToolsBrowserIdentityOverride>,
     ) -> bool {
-        self.mutate_page_state(|state, is_auxiliary_target_session, session_id| {
-            state.set_devtools_browser_identity_override(
-                is_auxiliary_target_session,
-                session_id,
-                browser_identity,
-            );
+        self.mutate_page_state(|state, session_key| {
+            state.set_devtools_browser_identity_override(session_key, browser_identity);
         })
         .is_some()
     }
@@ -444,7 +433,7 @@ impl TargetSessionOwnerMut<'_> {
         user_agent: Option<String>,
         fallback_identity: &moli_browser_profile::BrowserIdentityProfile,
     ) -> bool {
-        self.mutate_page_state(|state, _is_auxiliary_target_session, _session_id| {
+        self.mutate_page_state(|state, _session_key| {
             state
                 .network_policy
                 .set_base_user_agent_override(user_agent, fallback_identity);
@@ -736,9 +725,9 @@ impl CdpConnection {
         }
         self.with_target_session_owner_mut_for_route(session_id, owner_route, |owner| {
             if enabled {
-                owner.enable_listener(session_id)
+                owner.enable_listener()
             } else {
-                owner.disable_listener(session_id)
+                owner.disable_listener()
             }
         })
         .unwrap_or(false)

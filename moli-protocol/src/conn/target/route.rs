@@ -1,4 +1,5 @@
 use crate::conn::{BrowserContext, CdpConnection};
+use moli_page_types::DevToolsSessionKey;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TargetHandlerAccessMode {
@@ -22,7 +23,7 @@ pub(crate) enum CdpSessionRoute {
     PageTarget {
         browser_context_id: String,
         target_id: String,
-        is_attached_session: bool,
+        session_key: DevToolsSessionKey,
     },
     SharedWorkerTarget {
         browser_context_id: String,
@@ -193,14 +194,14 @@ impl CdpConnection {
                 return Some(CdpSessionRoute::PageTarget {
                     browser_context_id: browser_context.id.clone(),
                     target_id: target_id.to_owned(),
-                    is_attached_session: false,
+                    session_key: DevToolsSessionKey::Primary,
                 });
             }
             if browser_context.background_target(target_id).is_some() {
                 return Some(CdpSessionRoute::PageTarget {
                     browser_context_id: browser_context.id.clone(),
                     target_id: target_id.to_owned(),
-                    is_attached_session: false,
+                    session_key: DevToolsSessionKey::Primary,
                 });
             }
             if browser_context.has_shared_worker_target(target_id) {
@@ -268,7 +269,7 @@ impl CdpConnection {
                     .then(|| CdpSessionRoute::PageTarget {
                         browser_context_id: browser_context.id.clone(),
                         target_id: target.target_id().to_owned(),
-                        is_attached_session: false,
+                        session_key: DevToolsSessionKey::Primary,
                     })
             })
         })
@@ -324,7 +325,7 @@ fn prepared_browser_context_session_route(
         return Some(CdpSessionRoute::PageTarget {
             browser_context_id: browser_context.id.clone(),
             target_id: browser_context.active_target_id()?.to_owned(),
-            is_attached_session: false,
+            session_key: DevToolsSessionKey::Primary,
         });
     }
 
@@ -332,7 +333,7 @@ fn prepared_browser_context_session_route(
         return Some(CdpSessionRoute::PageTarget {
             browser_context_id: browser_context.id.clone(),
             target_id: target_id.to_owned(),
-            is_attached_session: true,
+            session_key: DevToolsSessionKey::Attached(session_id.to_owned()),
         });
     }
 
@@ -342,7 +343,7 @@ fn prepared_browser_context_session_route(
         .map(|target| CdpSessionRoute::PageTarget {
             browser_context_id: browser_context.id.clone(),
             target_id: target.target_id().to_owned(),
-            is_attached_session: false,
+            session_key: DevToolsSessionKey::Primary,
         })
         .or_else(|| {
             browser_context
@@ -387,7 +388,7 @@ mod tests {
         let route = CdpSessionRoute::PageTarget {
             browser_context_id: "BID-route".to_owned(),
             target_id: "TID-a".to_owned(),
-            is_attached_session: false,
+            session_key: DevToolsSessionKey::Primary,
         };
         connection.target_control.commit_attached_session(
             "SID-a".to_owned(),

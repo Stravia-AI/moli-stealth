@@ -70,14 +70,11 @@ impl PageTargetHost {
 
     pub(crate) fn mutate_devtools_network_session_state<T>(
         &mut self,
-        is_attached_session: bool,
-        session_id: Option<&str>,
+        session_key: &moli_page_types::DevToolsSessionKey,
         f: impl FnOnce(&mut DevToolsNetworkSessionState) -> T,
     ) -> T {
         let result = {
-            let session = self
-                .devtools_sessions
-                .routed_mut_or_insert(is_attached_session, session_id);
+            let session = self.devtools_sessions.ensure_session(session_key);
             f(&mut session.network_session_state)
         };
         self.refresh_devtools_network_policy();
@@ -91,44 +88,32 @@ impl PageTargetHost {
 
     pub(crate) fn set_devtools_browser_identity_override(
         &mut self,
-        is_attached_session: bool,
-        session_id: Option<&str>,
+        session_key: &moli_page_types::DevToolsSessionKey,
         browser_identity_override: Option<super::DevToolsBrowserIdentityOverride>,
     ) {
-        self.devtools_sessions.set_browser_identity_override(
-            is_attached_session,
-            session_id,
-            browser_identity_override,
-        );
+        self.devtools_sessions
+            .set_browser_identity_override(session_key, browser_identity_override);
         self.refresh_devtools_emulation_policy();
     }
 
     pub(crate) fn set_devtools_locale_override(
         &mut self,
-        is_attached_session: bool,
-        session_id: Option<&str>,
+        session_key: &moli_page_types::DevToolsSessionKey,
         locale_override: Option<String>,
     ) -> Result<(), &'static str> {
-        self.devtools_sessions.set_locale_override(
-            is_attached_session,
-            session_id,
-            locale_override,
-        )?;
+        self.devtools_sessions
+            .set_locale_override(session_key, locale_override)?;
         self.refresh_devtools_emulation_policy();
         Ok(())
     }
 
     pub(crate) fn set_devtools_timezone_override(
         &mut self,
-        is_attached_session: bool,
-        session_id: Option<&str>,
+        session_key: &moli_page_types::DevToolsSessionKey,
         timezone_override: Option<String>,
     ) -> Result<(), &'static str> {
-        self.devtools_sessions.set_timezone_override(
-            is_attached_session,
-            session_id,
-            timezone_override,
-        )?;
+        self.devtools_sessions
+            .set_timezone_override(session_key, timezone_override)?;
         self.refresh_devtools_emulation_policy();
         Ok(())
     }
@@ -161,21 +146,17 @@ impl PageTargetHost {
 
     pub(crate) fn clear_devtools_network_state(
         &mut self,
-        is_attached_session: bool,
-        session_id: Option<&str>,
+        session_key: &moli_page_types::DevToolsSessionKey,
     ) {
-        self.devtools_sessions
-            .clear_routed_network_state(is_attached_session, session_id);
+        self.devtools_sessions.clear_network_state(session_key);
         self.refresh_devtools_network_policy();
     }
 
     pub(crate) fn clear_devtools_emulation_state(
         &mut self,
-        is_attached_session: bool,
-        session_id: Option<&str>,
+        session_key: &moli_page_types::DevToolsSessionKey,
     ) {
-        self.devtools_sessions
-            .clear_routed_emulation_state(is_attached_session, session_id);
+        self.devtools_sessions.clear_emulation_state(session_key);
         self.refresh_devtools_emulation_policy();
     }
 
@@ -739,6 +720,7 @@ impl TargetNetworkPolicyState {
 mod tests {
     use super::{PageScreencastConfig, PageScreencastFormat, PageScreencastSessionState};
     use crate::conn::PageTargetHost;
+    use moli_page_types::DevToolsSessionKey;
 
     #[test]
     fn devtools_emulation_overrides_reveal_target_base_state_when_cleared() {
@@ -750,14 +732,16 @@ mod tests {
         );
 
         state
-            .set_devtools_locale_override(false, None, Some("fr-FR".to_owned()))
+            .set_devtools_locale_override(&DevToolsSessionKey::Primary, Some("fr-FR".to_owned()))
             .unwrap();
         state
-            .set_devtools_timezone_override(false, None, Some("Europe/Paris".to_owned()))
+            .set_devtools_timezone_override(
+                &DevToolsSessionKey::Primary,
+                Some("Europe/Paris".to_owned()),
+            )
             .unwrap();
         state.set_devtools_browser_identity_override(
-            false,
-            None,
+            &DevToolsSessionKey::Primary,
             crate::conn::DevToolsBrowserIdentityOverride::from_command(
                 &moli_browser_profile::BrowserIdentityProfile::default(),
                 "Moli/CDP".to_owned(),
@@ -770,8 +754,8 @@ mod tests {
         assert_eq!(state.timezone_override.as_deref(), Some("Europe/Paris"));
         assert_eq!(state.network_policy.user_agent_override(), Some("Moli/CDP"));
 
-        state.clear_devtools_network_state(false, None);
-        state.clear_devtools_emulation_state(false, None);
+        state.clear_devtools_network_state(&DevToolsSessionKey::Primary);
+        state.clear_devtools_emulation_state(&DevToolsSessionKey::Primary);
         assert_eq!(state.locale_override.as_deref(), Some("en-GB"));
         assert_eq!(state.timezone_override.as_deref(), Some("Europe/London"));
         assert_eq!(

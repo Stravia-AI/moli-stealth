@@ -1507,7 +1507,7 @@ impl CdpConnection {
                 target_id.map(|target_id| CdpSessionRoute::PageTarget {
                     browser_context_id,
                     target_id,
-                    is_attached_session: false,
+                    session_key: moli_page_types::DevToolsSessionKey::Primary,
                 })
             },
         )

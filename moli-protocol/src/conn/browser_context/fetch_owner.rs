@@ -1299,7 +1299,7 @@ fn pending_fetch_request_route(
             .then(|| CdpSessionRoute::PageTarget {
                 browser_context_id: browser_context.id.clone(),
                 target_id: target.target_id().to_owned(),
-                is_attached_session: false,
+                session_key: moli_page_types::DevToolsSessionKey::Primary,
             })
     })
 }
@@ -1307,7 +1307,9 @@ fn pending_fetch_request_route(
 impl TargetSessionOwnerMut<'_> {
     fn session_id(&self) -> Option<&str> {
         match self {
-            Self::PageTarget { session_id, .. } => session_id.as_deref(),
+            Self::PageTarget {
+                command_session_id, ..
+            } => command_session_id.as_deref(),
             Self::NoLoadedBrowserContext => None,
         }
     }
