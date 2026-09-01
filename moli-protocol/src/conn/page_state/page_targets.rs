@@ -637,76 +637,6 @@ impl BrowserContext {
         Ok(true)
     }
 
-    #[cfg(test)]
-    pub(crate) async fn clear_active_target_selection_for_test_async(
-        &mut self,
-    ) -> anyhow::Result<bool> {
-        let Some(active_target_id) = self.active_target_id_owned() else {
-            return Ok(false);
-        };
-        let surface_script = self
-            .page_target(&active_target_id)
-            .and_then(|host| self.generated_surface_override_script_for_background_state(host));
-        if let Some(script) = surface_script
-            && let Some(page) = self
-                .page_target_mut(&active_target_id)
-                .and_then(|host| host.runtime_slot.loaded_page_mut())
-        {
-            page.run_page_surface_override_script_async(&script.source)
-                .await
-                .map_err(|error| anyhow::anyhow!(error))?;
-        }
-        self.clear_active_target_id();
-        Ok(true)
-    }
-
-    #[cfg(test)]
-    pub fn take_background_document_start_script_counter_for_test(
-        &mut self,
-        target_id: &str,
-    ) -> u32 {
-        let owner_state = &mut self
-            .background_target_mut(target_id)
-            .expect("background target must exist")
-            .owner_state;
-        let counter = owner_state.next_document_start_script_id;
-        owner_state.next_document_start_script_id = 0;
-        counter
-    }
-
-    #[cfg(test)]
-    pub fn replace_background_document_start_script_counter_for_test(
-        &mut self,
-        target_id: String,
-        counter: u32,
-    ) {
-        self.background_target_mut(&target_id)
-            .expect("background target must exist")
-            .owner_state
-            .next_document_start_script_id = counter;
-    }
-
-    #[cfg(test)]
-    pub(crate) fn non_default_background_page_target_for_test(
-        &self,
-        target_id: &str,
-    ) -> Option<&crate::conn::state::PageTargetHost> {
-        let state = self.background_target(target_id)?;
-        state.has_non_default_session_state().then_some(state)
-    }
-
-    #[cfg(test)]
-    pub fn mutate_background_page_target_for_test<T>(
-        &mut self,
-        target_id: &str,
-        mutate: impl FnOnce(&mut crate::conn::state::PageTargetHost) -> T,
-    ) -> T {
-        mutate(
-            self.background_target_mut(target_id)
-                .expect("background target must exist"),
-        )
-    }
-
     pub(crate) fn begin_active_target_initial_empty_document(&mut self, initial_url: String) {
         self.begin_active_target_initial_empty_document_with_storage_key(initial_url, None);
     }
@@ -770,51 +700,6 @@ impl BrowserContext {
         mutate: impl FnOnce(&mut TargetOwnerState) -> T,
     ) -> Option<T> {
         Some(mutate(&mut self.page_target_mut(target_id)?.owner_state))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn mutate_background_target_owner_state_for_test<T>(
-        &mut self,
-        target_id: &str,
-        mutate: impl FnOnce(&mut TargetOwnerState) -> T,
-    ) -> T {
-        mutate(
-            &mut self
-                .background_target_mut(target_id)
-                .expect("background target must exist")
-                .owner_state,
-        )
-    }
-
-    #[cfg(test)]
-    pub(crate) fn non_default_background_target_owner_state_for_test(
-        &self,
-        target_id: &str,
-    ) -> Option<&TargetOwnerState> {
-        let state = &self.background_target(target_id)?.owner_state;
-        (!state.is_default()).then_some(state)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn background_target_owner_state_or_default_for_test(
-        &self,
-        target_id: &str,
-    ) -> TargetOwnerState {
-        self.background_target(target_id)
-            .map(|target| target.owner_state.clone())
-            .unwrap_or_default()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn nonempty_background_fetch_state_for_test(
-        &self,
-        target_id: &str,
-    ) -> Option<&crate::conn::state::TargetFetchState> {
-        let state = self
-            .background_target(target_id)?
-            .fetch_owner
-            .pending_state();
-        (!state.is_empty()).then_some(state)
     }
 
     #[cfg(test)]
@@ -1545,8 +1430,11 @@ mod tests {
             None,
             None,
         );
-        context.replace_background_document_start_script_counter_for_test("TID-bg".to_owned(), 7);
-        context.mutate_background_page_target_for_test("TID-bg", |state| {
+        {
+            let state = context
+                .background_target_mut("TID-bg")
+                .expect("background target must exist");
+            state.owner_state.next_document_start_script_id = 7;
             state.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary] =
                 DevToolsSessionState {
                     runtime_session_state: TargetRuntimeSessionState {
@@ -1555,7 +1443,7 @@ mod tests {
                     },
                     ..Default::default()
                 };
-        });
+        }
 
         let host = context
             .background_target("TID-bg")
@@ -1575,16 +1463,14 @@ mod tests {
         );
         assert!(
             context
-                .non_default_background_page_target_for_test("TID-bg")
+                .background_target("TID-bg")
+                .filter(|target| target.has_non_default_session_state())
                 .is_some_and(|state| state.devtools_sessions
                     [moli_page_types::DevToolsSessionKey::Primary]
                     .runtime_session_state
                     .runtime_frontend_enabled)
         );
-        assert_eq!(
-            context.take_background_document_start_script_counter_for_test("TID-bg"),
-            7
-        );
+        assert_eq!(host.owner_state.next_document_start_script_id, 7);
     }
 
     #[test]
@@ -1701,7 +1587,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn clearing_foreground_selection_preserves_page_session_and_owner_state() {
+    async fn selecting_another_foreground_target_preserves_page_session_and_owner_state() {
         let mut ctx = TestContext::new();
         let active_page = ctx
             .conn
@@ -1785,20 +1671,28 @@ mod tests {
             .runtime_slot
             .current_renderer_attachment()
             .expect("loaded active page should have a renderer attachment");
-
-        assert!(
-            context
-                .clear_active_target_selection_for_test_async()
-                .await
-                .expect("clearing the selection should not fail")
+        context.stage_background_target(
+            "TID-selected".to_owned(),
+            Some("SID-selected".to_owned()),
+            "about:blank#selected".to_owned(),
+            None,
+            None,
         );
 
-        assert_eq!(context.active_target_id(), None);
+        assert_eq!(
+            context
+                .select_background_target_async("TID-selected".to_owned())
+                .await
+                .as_deref(),
+            Some("TID-selected")
+        );
+
+        assert_eq!(context.active_target_id(), Some("TID-selected"));
         assert!(
             context
                 .page_target("TID-demote")
                 .is_some_and(|host| host.has_loaded_page()),
-            "clearing foreground selection must retain the loaded page in its stable host"
+            "changing foreground selection must retain the loaded page in its stable host"
         );
         assert_eq!(context.background_target_count(), 1);
         let background_target = &context.background_target_at(0).unwrap();
@@ -1835,7 +1729,8 @@ mod tests {
         );
         assert!(
             context
-                .non_default_background_page_target_for_test("TID-demote")
+                .background_target("TID-demote")
+                .filter(|target| target.has_non_default_session_state())
                 .is_some_and(|state| state.devtools_sessions
                     [moli_page_types::DevToolsSessionKey::Primary]
                     .runtime_session_state
@@ -1843,7 +1738,8 @@ mod tests {
             "session-scoped Runtime.enable state must remain owned by the target"
         );
         let background_state = context
-            .non_default_background_page_target_for_test("TID-demote")
+            .background_target("TID-demote")
+            .filter(|target| target.has_non_default_session_state())
             .expect("background target should retain page session state");
         assert!(
             background_state.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
@@ -1903,14 +1799,19 @@ mod tests {
             "file chooser interception state must remain target-owned"
         );
         assert_eq!(
-            context.take_background_document_start_script_counter_for_test("TID-demote"),
+            context
+                .background_target("TID-demote")
+                .expect("previous target must remain registered")
+                .owner_state
+                .next_document_start_script_id,
             9,
             "owner state must remain target-owned"
         );
         assert_eq!(
             context
-                .non_default_background_target_owner_state_for_test("TID-demote")
+                .background_target("TID-demote")
                 .expect("background target should retain owner state")
+                .owner_state
                 .document_start_scripts
                 .len(),
             1,
@@ -1932,8 +1833,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn clearing_empty_foreground_selection_is_noop() {
+    #[test]
+    fn staging_background_target_in_empty_context_leaves_foreground_empty() {
         let mut context = BrowserContext::new("BC-demote-empty".to_owned());
         context.stage_background_target(
             "TID-existing-bg".to_owned(),
@@ -1941,13 +1842,6 @@ mod tests {
             "https://existing.test/".to_owned(),
             None,
             None,
-        );
-
-        assert!(
-            !context
-                .clear_active_target_selection_for_test_async()
-                .await
-                .expect("clearing an empty selection should not fail")
         );
 
         assert_eq!(context.active_target_id(), None);
@@ -2213,10 +2107,11 @@ mod tests {
         devtools_session_state
             .console_output_session_state
             .console_enabled = true;
-        context.mutate_background_page_target_for_test("TID-bg", |state| {
-            state.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary] =
-                devtools_session_state;
-        });
+        context
+            .background_target_mut("TID-bg")
+            .expect("background target must exist")
+            .devtools_sessions[moli_page_types::DevToolsSessionKey::Primary] =
+            devtools_session_state;
         context
             .background_target_mut("TID-bg")
             .expect("background target")

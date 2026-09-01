@@ -588,10 +588,9 @@ async fn set_auto_attach_inner_async(
                 .map(|target_id| (target_id, conn.gen_session_id()))
                 .collect::<Vec<_>>();
             let foreground_target_id = {
-                let bc = conn
-                    .browser_context
-                    .as_ref()
-                    .expect("browser context must exist when considering auto-attach promotion");
+                let bc = conn.browser_context.as_ref().expect(
+                    "browser context must exist when choosing an auto-attached foreground target",
+                );
                 if !attach_page_targets || bc.has_loaded_page() {
                     None
                 } else {

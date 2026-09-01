@@ -73,8 +73,6 @@ pub use page_slot::{DocumentStartScript, IsolatedWorldDefinition, RuntimeBinding
 pub(crate) use runtime_slot::{FinishedRendererDocumentNavigation, TargetRuntimeSlot};
 
 pub use fetch::TargetFetchConfig;
-#[cfg(test)]
-pub(crate) use fetch::TargetFetchState;
 pub(crate) use fetch::{TargetFetchOwner, TargetFetchSubresourceInterceptionSnapshot};
 
 pub(crate) use inspector::InspectorCommandDispatch;

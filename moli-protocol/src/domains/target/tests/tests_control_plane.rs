@@ -928,8 +928,10 @@ async fn same_context_targets_keep_paused_fetch_state_target_local_after_switchi
             "promoted target should not see another target's pending fetch ids",
         );
         let parked = bc
-            .nonempty_background_fetch_state_for_test(&first_target_id)
-            .expect("first target pending fetch state should be parked");
+            .background_target(&first_target_id)
+            .expect("background target must exist")
+            .fetch_owner
+            .pending_state();
         assert!(
             parked.has_pending_fetch_request_id_for_test(&request_id),
             "first target pending fetch id should move with parked target state",

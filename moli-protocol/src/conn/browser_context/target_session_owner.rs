@@ -2626,7 +2626,9 @@ mod tests {
         }
         assert!(
             parked
-                .background_target_owner_state_or_default_for_test("TID-parked")
+                .background_target("TID-parked")
+                .expect("background target must exist")
+                .owner_state
                 .target_crash_state
                 .is_crashed()
         );
@@ -2759,8 +2761,10 @@ mod tests {
         }
         assert!(
             parked
-                .nonempty_background_fetch_state_for_test("TID-parked")
-                .expect("parked fetch state")
+                .background_target("TID-parked")
+                .expect("background target must exist")
+                .fetch_owner
+                .pending_state()
                 .has_pending_subresource_fetch_for_test("FETCH-parked")
         );
     }
@@ -2833,13 +2837,17 @@ mod tests {
         }
         assert!(
             parked
-                .non_default_background_page_target_for_test("TID-parked")
+                .background_target("TID-parked")
+                .filter(|target| target.has_non_default_session_state())
                 .is_none_or(|state| !state.fetch_owner.is_enabled())
         );
         assert!(
             parked
-                .nonempty_background_fetch_state_for_test("TID-parked")
-                .is_none()
+                .background_target("TID-parked")
+                .expect("background target must exist")
+                .fetch_owner
+                .pending_state()
+                .is_empty()
         );
     }
 
@@ -2869,12 +2877,14 @@ mod tests {
         }
 
         let mut parked = parked_target_context();
-        parked.mutate_background_target_owner_state_for_test("TID-parked", |owner_state| {
-            owner_state.record_loaded_page_navigation_history((
+        parked
+            .background_target_mut("TID-parked")
+            .expect("background target must exist")
+            .owner_state
+            .record_loaded_page_navigation_history((
                 "https://parked.example/".to_owned(),
                 "parked".to_owned(),
             ));
-        });
         {
             let mut owner = TargetSessionOwnerMut {
                 browser_context: &mut parked,
@@ -3009,7 +3019,10 @@ mod tests {
             Some("SID-parked".to_owned()),
             "about:blank".to_owned(),
         ));
-        parked.mutate_background_page_target_for_test("TID-parked", |state| {
+        {
+            let state = parked
+                .background_target_mut("TID-parked")
+                .expect("background target must exist");
             state.runtime_slot.enable_primary_network_events();
             state
                 .network_policy
@@ -3023,7 +3036,7 @@ mod tests {
                     request_stage: FetchRequestStage::Response,
                 }],
             );
-        });
+        }
         parked
             .background_target_mut("TID-parked")
             .expect("background target should exist")
@@ -3116,9 +3129,11 @@ mod tests {
             Some("SID-parked".to_owned()),
             "about:blank".to_owned(),
         ));
-        parked.mutate_background_page_target_for_test("TID-parked", |state| {
-            state.runtime_slot.enable_primary_network_events();
-        });
+        parked
+            .background_target_mut("TID-parked")
+            .expect("background target must exist")
+            .runtime_slot
+            .enable_primary_network_events();
 
         let mut owner = TargetSessionOwnerMut {
             browser_context: &mut parked,
@@ -3164,7 +3179,10 @@ mod tests {
             Some("SID-parked".to_owned()),
             "https://parked.example/start".to_owned(),
         ));
-        parked.mutate_background_page_target_for_test("TID-parked", |state| {
+        {
+            let state = parked
+                .background_target_mut("TID-parked")
+                .expect("background target must exist");
             state.set_base_locale_override(Some("fr-FR".to_owned()));
             state.set_base_timezone_override(Some("Europe/Paris".to_owned()));
             state.http_proxy_override = Some("http://proxy.example:8080".to_owned());
@@ -3191,9 +3209,13 @@ mod tests {
                     request_stage: FetchRequestStage::Request,
                 }],
             );
-        });
-        parked.mutate_background_target_owner_state_for_test("TID-parked", |owner_state| {
-            owner_state.document_start_scripts.push((
+        }
+        parked
+            .background_target_mut("TID-parked")
+            .expect("background target must exist")
+            .owner_state
+            .document_start_scripts
+            .push((
                 "1".to_owned(),
                 DocumentStartScript {
                     registry_key: None,
@@ -3204,14 +3226,14 @@ mod tests {
                     bidi_channel_handoffs: Vec::new(),
                 },
             ));
-        });
-        parked.mutate_background_page_target_for_test("TID-parked", |state| {
-            state.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
-                .upsert_runtime_binding_definition(
-                    "fromParkedBinding".to_owned(),
-                    Some("utility".to_owned()),
-                );
-        });
+        parked
+            .background_target_mut("TID-parked")
+            .expect("background target must exist")
+            .devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+            .upsert_runtime_binding_definition(
+                "fromParkedBinding".to_owned(),
+                Some("utility".to_owned()),
+            );
 
         let owner = TargetSessionOwnerRef {
             browser_context: &parked,
@@ -3290,7 +3312,10 @@ mod tests {
             Some("SID-parked".to_owned()),
             "about:blank".to_owned(),
         ));
-        parked.mutate_background_page_target_for_test("TID-parked", |state| {
+        {
+            let state = parked
+                .background_target_mut("TID-parked")
+                .expect("background target must exist");
             state.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
                 .page_session_state
                 .page_lifecycle_events = true;
@@ -3306,7 +3331,7 @@ mod tests {
                     request_stage: FetchRequestStage::Request,
                 }],
             );
-        });
+        }
 
         let commit_state = {
             let mut owner = TargetSessionOwnerMut {
@@ -3381,13 +3406,17 @@ mod tests {
             Some("SID-parked".to_owned()),
             "about:blank".to_owned(),
         ));
-        parked.mutate_background_target_owner_state_for_test("TID-parked", |owner_state| {
+        {
+            let owner_state = &mut parked
+                .background_target_mut("TID-parked")
+                .expect("background target must exist")
+                .owner_state;
             owner_state.record_loaded_page_navigation_history((
                 "https://old.example/".to_owned(),
                 "old".to_owned(),
             ));
             owner_state.mark_next_navigation_history_replace_current();
-        });
+        }
         {
             let mut owner = TargetSessionOwnerMut {
                 browser_context: &mut parked,
@@ -3399,16 +3428,19 @@ mod tests {
                 .clear_pending_navigation_history_update()
                 .expect("background history update should clear");
         }
-        parked.mutate_background_target_owner_state_for_test("TID-parked", |owner_state| {
-            owner_state.record_loaded_page_navigation_history((
+        parked
+            .background_target_mut("TID-parked")
+            .expect("background target must exist")
+            .owner_state
+            .record_loaded_page_navigation_history((
                 "https://new.example/".to_owned(),
                 "new".to_owned(),
             ));
-        });
         let (_, entries) = parked
-            .mutate_background_target_owner_state_for_test("TID-parked", |owner_state| {
-                owner_state.navigation_history_snapshot(None)
-            });
+            .background_target_mut("TID-parked")
+            .expect("background target must exist")
+            .owner_state
+            .navigation_history_snapshot(None);
         assert_eq!(
             entries
                 .iter()
@@ -3465,9 +3497,10 @@ mod tests {
                 && target.page_attachment_id() != initial_attachment_id
         );
         let (_, entries) = parked
-            .mutate_background_target_owner_state_for_test("TID-parked", |owner_state| {
-                owner_state.navigation_history_snapshot(None)
-            });
+            .background_target_mut("TID-parked")
+            .expect("background target must exist")
+            .owner_state
+            .navigation_history_snapshot(None);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].title, "background commit");
     }
@@ -3599,11 +3632,12 @@ mod tests {
             [moli_page_types::DevToolsSessionKey::Primary]
             .runtime_session_state
             .runtime_frontend_enabled = true;
-        browser_context.mutate_background_page_target_for_test("TID-background", |state| {
-            state.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
-                .runtime_session_state
-                .inspector_enabled = true;
-        });
+        browser_context
+            .background_target_mut("TID-background")
+            .expect("background target must exist")
+            .devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+            .runtime_session_state
+            .inspector_enabled = true;
         conn.browser_context = Some(browser_context);
 
         conn.with_target_owner_state_for_session_mut(Some("SID-active"), |owner_state| {
@@ -3805,11 +3839,12 @@ mod tests {
             Some("SID-background".to_owned()),
             "https://background.example/".to_owned(),
         ));
-        active.mutate_background_page_target_for_test("TID-background", |state| {
-            state.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
-                .page_session_state
-                .log_enabled = true;
-        });
+        active
+            .background_target_mut("TID-background")
+            .expect("background target must exist")
+            .devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+            .page_session_state
+            .log_enabled = true;
         assert!(
             active.assign_auxiliary_session_to_target(
                 "TID-background",
@@ -3934,7 +3969,8 @@ mod tests {
         ));
         assert!(
             browser_context
-                .non_default_background_page_target_for_test("TID-background-dialog")
+                .background_target("TID-background-dialog")
+                .filter(|target| target.has_non_default_session_state())
                 .is_none(),
             "a background target with default protocol settings should not allocate parked overrides"
         );
@@ -3953,7 +3989,8 @@ mod tests {
         let browser_context = conn.browser_context.as_ref().expect("browser context");
         assert!(
             browser_context
-                .non_default_background_page_target_for_test("TID-background-dialog")
+                .background_target("TID-background-dialog")
+                .filter(|target| target.has_non_default_session_state())
                 .is_none(),
             "clearing an empty dialog list should fold the temporary session state"
         );
