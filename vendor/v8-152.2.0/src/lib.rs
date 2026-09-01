@@ -204,6 +204,7 @@ pub use value_serializer::ValueSerializerHelper;
 pub use value_serializer::ValueSerializerImpl;
 pub use wasm::CompiledWasmModule;
 pub use wasm::ModuleCachingInterface;
+pub use wasm::WasmCompileOptions;
 pub use wasm::WasmModuleCompilation;
 pub use wasm::WasmStreaming;
 

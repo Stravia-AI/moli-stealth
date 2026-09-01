@@ -257,6 +257,11 @@ unsafe extern "C" {
     export_name: *const String,
     export_value: *const Value,
   ) -> MaybeBool;
+  fn v8__Module__SetSyntheticModuleExportUninitialized(
+    this: *const Module,
+    isolate: *const RealIsolate,
+    export_name: *const String,
+  ) -> MaybeBool;
   fn v8__Module__GetUnboundModuleScript(
     this: *const Module,
   ) -> *const UnboundModuleScript;
@@ -568,6 +573,24 @@ impl Module {
         scope.get_isolate_ptr(),
         &*export_name,
         &*export_value,
+      )
+    }
+    .into()
+  }
+
+  /// Sets this module's export cell to V8's uninitialized binding sentinel.
+  #[must_use]
+  #[inline(always)]
+  pub fn set_synthetic_module_export_uninitialized<'s>(
+    &self,
+    scope: &mut PinScope<'s, '_>,
+    export_name: Local<'s, String>,
+  ) -> Option<bool> {
+    unsafe {
+      v8__Module__SetSyntheticModuleExportUninitialized(
+        self,
+        scope.get_isolate_ptr(),
+        &*export_name,
       )
     }
     .into()

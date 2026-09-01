@@ -182,6 +182,41 @@ impl WasmModuleObject {
       })
     }
   }
+
+  /// Compiles a Wasm module with browser module-script compile-time imports.
+  #[inline(always)]
+  pub fn compile_with_options<'s>(
+    scope: &PinScope<'s, '_>,
+    wire_bytes: &[u8],
+    options: WasmCompileOptions<'_>,
+  ) -> Option<Local<'s, WasmModuleObject>> {
+    if options == WasmCompileOptions::default() {
+      return Self::compile(scope, wire_bytes);
+    }
+    let (string_constants_ptr, string_constants_len) = options
+      .imported_string_constants_module
+      .map_or((null(), 0), |module| {
+        (module.as_ptr() as *const char, module.len())
+      });
+    unsafe {
+      scope.cast_local(|sd| {
+        v8__WasmModuleObject__CompileWithOptions(
+          sd.get_isolate_ptr(),
+          wire_bytes.as_ptr(),
+          wire_bytes.len(),
+          options.js_string_builtins,
+          string_constants_ptr,
+          string_constants_len,
+        )
+      })
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WasmCompileOptions<'a> {
+  pub js_string_builtins: bool,
+  pub imported_string_constants_module: Option<&'a str>,
 }
 
 #[repr(C)]
@@ -571,6 +606,14 @@ unsafe extern "C" {
     isolate: *mut RealIsolate,
     wire_bytes_data: *const u8,
     length: usize,
+  ) -> *mut WasmModuleObject;
+  fn v8__WasmModuleObject__CompileWithOptions(
+    isolate: *mut RealIsolate,
+    wire_bytes_data: *const u8,
+    length: usize,
+    js_string_builtins: bool,
+    imported_string_constants_module_data: *const char,
+    imported_string_constants_module_len: usize,
   ) -> *mut WasmModuleObject;
 
   fn v8__CompiledWasmModule__GetWireBytesRef(
