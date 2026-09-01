@@ -965,8 +965,12 @@ impl<'a> TargetSessionOwnerMut<'a> {
         browser_context.forget_target_opener_references_for_target(target_id);
         browser_context.forget_target_window_names_for_target(target_id);
         browser_context.forget_target_popup_id_for_target(target_id);
+        let auxiliary_session_ids = target
+            .devtools_sessions
+            .attached_session_ids()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
         let primary_session_id = target.detach_session();
-        let auxiliary_session_ids = browser_context.remove_auxiliary_sessions_for_target(target_id);
         target.close_page_async().await;
         Some(ClosedPageTarget {
             target_id: target_id.clone(),
@@ -1538,9 +1542,12 @@ impl CdpConnection {
             browser_context.forget_target_opener_references_for_target(target_id);
             browser_context.forget_target_window_names_for_target(target_id);
             browser_context.forget_target_popup_id_for_target(target_id);
+            let auxiliary_session_ids = target
+                .devtools_sessions
+                .attached_session_ids()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
             let primary_session_id = target.detach_session();
-            let auxiliary_session_ids =
-                browser_context.remove_auxiliary_sessions_for_target(target_id);
             (
                 target,
                 primary_session_id,
@@ -1674,9 +1681,13 @@ impl CdpConnection {
                     browser_context.forget_target_opener_references_for_target(target_id);
                     browser_context.forget_target_window_names_for_target(target_id);
                     browser_context.forget_target_popup_id_for_target(target_id);
-                    page_session_ids
-                        .extend(browser_context.remove_auxiliary_sessions_for_target(target_id));
                     target.map(|mut target| {
+                        page_session_ids.extend(
+                            target
+                                .devtools_sessions
+                                .attached_session_ids()
+                                .map(str::to_owned),
+                        );
                         if let Some(session_id) = target.detach_session() {
                             page_session_ids.push(session_id);
                         }

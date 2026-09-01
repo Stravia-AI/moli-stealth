@@ -298,23 +298,22 @@ impl BrowserContext {
             return false;
         };
         target.devtools_sessions.ensure_attached(&session_id);
-        self.auxiliary_target_sessions
-            .insert(session_id, target_id.to_owned());
         true
     }
 
     pub(crate) fn auxiliary_target_id_for_session(&self, session_id: &str) -> Option<&str> {
-        self.auxiliary_target_sessions
-            .get(session_id)
-            .map(String::as_str)
+        self.page_targets
+            .iter()
+            .find(|target| target.devtools_sessions.attached(session_id).is_some())
+            .map(PageTargetHost::target_id)
     }
 
     pub(crate) fn auxiliary_session_ids_for_target(&self, target_id: &str) -> Vec<String> {
         let mut session_ids = self
-            .auxiliary_target_sessions
-            .iter()
-            .filter(|&(_session_id, session_target_id)| session_target_id == target_id)
-            .map(|(session_id, _session_target_id)| session_id.clone())
+            .page_target(target_id)
+            .into_iter()
+            .flat_map(|target| target.devtools_sessions.attached_session_ids())
+            .map(str::to_owned)
             .collect::<Vec<_>>();
         session_ids.sort();
         session_ids
@@ -339,7 +338,7 @@ impl BrowserContext {
     }
 
     pub(crate) fn remove_auxiliary_session(&mut self, session_id: &str) -> Option<String> {
-        let target_id = self.auxiliary_target_sessions.remove(session_id)?;
+        let target_id = self.auxiliary_target_id_for_session(session_id)?.to_owned();
         if let Some(target) = self.page_target_mut(&target_id) {
             target
                 .runtime_slot
@@ -498,12 +497,7 @@ impl BrowserContext {
     }
 
     pub(crate) fn remove_auxiliary_sessions_for_target(&mut self, target_id: &str) -> Vec<String> {
-        let session_ids = self
-            .auxiliary_target_sessions
-            .iter()
-            .filter(|&(_session_id, session_target_id)| session_target_id == target_id)
-            .map(|(session_id, _session_target_id)| session_id.clone())
-            .collect::<Vec<_>>();
+        let session_ids = self.auxiliary_session_ids_for_target(target_id);
         for session_id in &session_ids {
             let _ = self.remove_auxiliary_session(session_id);
         }
@@ -686,14 +680,10 @@ impl BrowserContext {
         &mut self,
     ) -> Result<(), String> {
         let target_id = self.active_target_id_owned();
-        let auxiliary_inspector_session_ids = self
-            .auxiliary_target_sessions
-            .iter()
-            .filter(|(_session_id, session_target_id)| {
-                target_id.as_deref() == Some(session_target_id.as_str())
-            })
-            .map(|(session_id, _session_target_id)| session_id.clone())
-            .collect::<Vec<_>>();
+        let auxiliary_inspector_session_ids = target_id
+            .as_deref()
+            .map(|target_id| self.auxiliary_session_ids_for_target(target_id))
+            .unwrap_or_default();
         if let Some(page) = self
             .active_page_target_mut()
             .active_target
@@ -717,7 +707,6 @@ impl BrowserContext {
             .await?;
         self.detach_active_session();
         for session_id in auxiliary_inspector_session_ids {
-            self.auxiliary_target_sessions.remove(&session_id);
             self.active_page_target_mut()
                 .active_target
                 .runtime_slot
@@ -733,7 +722,7 @@ impl BrowserContext {
         if self.active_session_id().is_none() {
             return Ok(None);
         }
-        self.clear_active_target_session_scoped_state_async()
+        self.clear_active_target_primary_session_scoped_state_async()
             .await?;
         self.detach_active_session();
         Ok(target_id)

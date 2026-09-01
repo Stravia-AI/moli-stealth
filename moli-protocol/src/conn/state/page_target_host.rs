@@ -1,3 +1,4 @@
+use indexmap::IndexMap;
 use moli_core::network::SharedWebStorageStore;
 use moli_core::runtime::NavigationEngine;
 
@@ -17,7 +18,6 @@ use super::{
 #[derive(Debug)]
 pub struct PageTargetHost {
     target_id: String,
-    primary_session_id: Option<String>,
     state: Box<TargetPageState>,
     navigation_engine: Option<NavigationEngine>,
 }
@@ -26,7 +26,6 @@ impl PageTargetHost {
     pub(crate) fn empty(target_id: String) -> Self {
         Self {
             target_id,
-            primary_session_id: None,
             state: Box::default(),
             navigation_engine: None,
         }
@@ -38,9 +37,8 @@ impl PageTargetHost {
         target_identity: TargetIdentityState,
         target_page_slot: TargetPageSlot,
     ) -> Self {
-        Self {
+        let mut host = Self {
             target_id,
-            primary_session_id,
             state: Box::new(TargetPageState {
                 target_identity,
                 active_target: ActiveTargetState {
@@ -50,7 +48,11 @@ impl PageTargetHost {
                 ..Default::default()
             }),
             navigation_engine: None,
+        };
+        if let Some(session_id) = primary_session_id {
+            host.devtools_sessions.attach_primary(session_id);
         }
+        host
     }
 
     #[cfg(test)]
@@ -93,11 +95,11 @@ impl PageTargetHost {
     }
 
     pub(crate) fn session_id(&self) -> Option<&str> {
-        self.primary_session_id.as_deref()
+        self.devtools_sessions.primary_session_id()
     }
 
     pub(crate) fn has_session(&self) -> bool {
-        self.primary_session_id.is_some()
+        self.session_id().is_some()
     }
 
     pub(crate) fn is_session(&self, session_id: &str) -> bool {
@@ -105,11 +107,11 @@ impl PageTargetHost {
     }
 
     pub(crate) fn attach_session(&mut self, session_id: String) {
-        self.primary_session_id = Some(session_id);
+        self.devtools_sessions.attach_primary(session_id);
     }
 
     pub(crate) fn detach_session(&mut self) -> Option<String> {
-        self.primary_session_id.take()
+        self.devtools_sessions.detach_primary()
     }
 
     pub(crate) fn session_storage_store(&self) -> &SharedWebStorageStore {
@@ -234,7 +236,7 @@ impl std::ops::DerefMut for PageTargetHost {
 #[derive(Debug, Default)]
 pub(crate) struct PageTargetRegistry {
     active_target_id: Option<String>,
-    hosts: Vec<PageTargetHost>,
+    hosts: IndexMap<String, PageTargetHost>,
 }
 
 impl PageTargetRegistry {
@@ -256,30 +258,27 @@ impl PageTargetRegistry {
     }
 
     pub(crate) fn get(&self, target_id: &str) -> Option<&PageTargetHost> {
-        self.hosts.iter().find(|host| host.is_target(target_id))
+        self.hosts.get(target_id)
     }
 
     pub(crate) fn get_mut(&mut self, target_id: &str) -> Option<&mut PageTargetHost> {
-        self.hosts.iter_mut().find(|host| host.is_target(target_id))
+        self.hosts.get_mut(target_id)
     }
 
     pub(crate) fn insert(&mut self, host: PageTargetHost) -> bool {
-        if self.get(host.target_id()).is_some() {
+        let target_id = host.target_id().to_owned();
+        if self.hosts.contains_key(&target_id) {
             return false;
         }
-        self.hosts.push(host);
+        self.hosts.insert(target_id, host);
         true
     }
 
     pub(crate) fn remove(&mut self, target_id: &str) -> Option<PageTargetHost> {
-        let index = self
-            .hosts
-            .iter()
-            .position(|host| host.is_target(target_id))?;
         if self.active_target_id() == Some(target_id) {
             self.active_target_id = None;
         }
-        Some(self.hosts.remove(index))
+        self.hosts.shift_remove(target_id)
     }
 
     pub(crate) fn select(&mut self, target_id: &str) -> bool {
@@ -291,13 +290,19 @@ impl PageTargetRegistry {
     }
 
     pub(crate) fn rekey_active(&mut self, target_id: String) -> bool {
-        if self.get(&target_id).is_some() {
+        if self.hosts.contains_key(&target_id) {
             return false;
         }
-        let Some(active) = self.active_mut() else {
+        let Some(previous_target_id) = self.active_target_id.clone() else {
+            return false;
+        };
+        let Some((index, _previous_target_id, mut active)) =
+            self.hosts.shift_remove_full(&previous_target_id)
+        else {
             return false;
         };
         active.replace_target_id(target_id.clone());
+        self.hosts.shift_insert(index, target_id.clone(), active);
         self.active_target_id = Some(target_id);
         true
     }
@@ -308,11 +313,11 @@ impl PageTargetRegistry {
     }
 
     pub(crate) fn iter(&self) -> impl DoubleEndedIterator<Item = &PageTargetHost> {
-        self.hosts.iter()
+        self.hosts.values()
     }
 
     pub(crate) fn iter_mut(&mut self) -> impl DoubleEndedIterator<Item = &mut PageTargetHost> {
-        self.hosts.iter_mut()
+        self.hosts.values_mut()
     }
 
     pub(crate) fn background(&self) -> impl DoubleEndedIterator<Item = &PageTargetHost> {

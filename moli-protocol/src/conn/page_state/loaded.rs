@@ -120,7 +120,23 @@ impl BrowserContext {
     pub(crate) async fn clear_active_target_session_scoped_state_async(
         &mut self,
     ) -> Result<(), String> {
-        self.clear_active_target_session_scoped_state_fields();
+        self.clear_active_target_session_scoped_state_preserving_attached_async(false)
+            .await
+    }
+
+    pub(crate) async fn clear_active_target_primary_session_scoped_state_async(
+        &mut self,
+    ) -> Result<(), String> {
+        self.clear_active_target_session_scoped_state_preserving_attached_async(true)
+            .await
+    }
+
+    async fn clear_active_target_session_scoped_state_preserving_attached_async(
+        &mut self,
+        preserve_attached_sessions: bool,
+    ) -> Result<(), String> {
+        self.active_page_state_mut()
+            .clear_session_scoped_state_fields(preserve_attached_sessions);
         let emulated_media: moli_core::page::EmulatedMediaOverrides =
             (&self.active_page_target().emulated_media).into();
         if let Some(page) = self
