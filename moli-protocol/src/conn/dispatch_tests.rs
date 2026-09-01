@@ -8200,6 +8200,92 @@ async fn pending_emulation_user_agent_loader_keeps_active_owner_route_across_com
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn pending_emulation_viewport_keeps_original_page_when_active_target_changes() {
+    let mut conn = CdpConnection::new();
+    let original_page = conn
+        .load_page_via_runtime_async("data:text/html,<title>original viewport owner</title>")
+        .await
+        .expect("original page should load");
+    let replacement_page = conn
+        .load_page_via_runtime_async("data:text/html,<title>replacement active page</title>")
+        .await
+        .expect("replacement page should load");
+
+    let mut browser_context = BrowserContext::new("BID-emulation-viewport-owner".to_owned());
+    browser_context.set_active_target_id("TID-emulation-viewport-original".to_owned());
+    browser_context
+        .active_page_state_mut()
+        .runtime_slot
+        .set_loaded_page_for_test(original_page);
+    browser_context.stage_background_target(
+        "TID-emulation-viewport-replacement".to_owned(),
+        None,
+        "data:text/html,<title>replacement active page</title>".to_owned(),
+        None,
+        None,
+    );
+    browser_context
+        .background_target_mut("TID-emulation-viewport-replacement")
+        .expect("replacement target")
+        .replace_loaded_page(Some(replacement_page));
+    conn.browser_context = Some(browser_context);
+
+    let raw = serde_json::to_string(&json!({
+        "id": 690,
+        "method": "Emulation.setDeviceMetricsOverride",
+        "params": {
+            "width": 640,
+            "height": 360,
+            "deviceScaleFactor": 2,
+            "mobile": false
+        }
+    }))
+    .unwrap();
+    let pending = match conn.start_command_dispatch(&raw) {
+        CdpCommandTaskStep::Pending(pending) => pending,
+        CdpCommandTaskStep::Complete(outcome) => {
+            panic!(
+                "live Emulation.setDeviceMetricsOverride should update the original Page: {:?}",
+                outcome.into_parts().0
+            )
+        }
+    };
+
+    assert!(
+        conn.promote_background_target_to_active_for_connection_async(
+            "TID-emulation-viewport-replacement",
+        )
+        .await
+        .expect("target activation should succeed")
+        .is_some()
+    );
+    let messages = complete_command_task_for_test(&mut conn, *pending).await;
+
+    assert_eq!(messages, vec![json!({ "id": 690, "result": {} })]);
+    let browser_context = conn.browser_context.as_ref().expect("browser context");
+    assert_eq!(
+        browser_context.active_target_id(),
+        Some("TID-emulation-viewport-replacement")
+    );
+    assert_eq!(
+        browser_context
+            .loaded_page()
+            .expect("replacement page should remain loaded")
+            .document_title(),
+        "replacement active page",
+        "the original Page completion must not overwrite the newly active Page state"
+    );
+    assert_eq!(
+        browser_context
+            .background_target("TID-emulation-viewport-original")
+            .and_then(|target| target.loaded_page())
+            .expect("original page should remain loaded in its stable target")
+            .document_title(),
+        "original viewport owner"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn pending_emulation_timezone_keeps_background_owner_route_across_completion() {
     let mut conn = CdpConnection::new();
     let active_page = conn

@@ -52,7 +52,7 @@ async fn commit_navigation_outcome_for_session_test(
                 .prepared_document_commit_configuration_for_owner(
                     &match session_id {
                         Some(session_id) => CommandOwnerScope::for_session(session_id),
-                        None => CommandOwnerScope::for_implicit_route(None),
+                        None => CommandOwnerScope::capture(conn, None),
                     },
                     navigation.final_url(),
                 )

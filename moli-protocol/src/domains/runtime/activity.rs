@@ -673,7 +673,7 @@ mod tests {
     ) -> RuntimePreparedOutputs {
         let owner = match source_session_id {
             Some(session_id) => CommandOwnerScope::for_session(session_id),
-            None => CommandOwnerScope::for_implicit_route(None),
+            None => CommandOwnerScope::capture(conn, None),
         };
         let session = renderer_inspector_session_id
             .map_or(DevToolsSessionKey::Primary, |session_id| {
@@ -738,7 +738,7 @@ mod tests {
             ProtocolOutputPayloads::from_slot(RuntimePreparedOutputSlot::from_outputs(outputs));
         let owner = match drain_session_id {
             Some(session_id) => crate::conn::CommandOwnerScope::for_session(session_id),
-            None => crate::conn::CommandOwnerScope::for_implicit_route(None),
+            None => crate::conn::CommandOwnerScope::capture(conn, None),
         };
         let mut command_context = CommandDispatchContext::default();
         {
@@ -979,7 +979,7 @@ mod tests {
                 .as_deref(),
             Some("SID-1"),
         );
-        let owner = crate::conn::CommandOwnerScope::for_implicit_route(None);
+        let owner = crate::conn::CommandOwnerScope::capture(&conn, None);
         let mut command_context = CommandDispatchContext::default();
         let mut context = ProtocolOutputProjectionContext::new(&owner, &mut command_context);
 

@@ -392,7 +392,7 @@ impl CdpConnection {
             .is_some_and(|browser_context| {
                 browser_context.has_default_bidi_channel_preload_script()
             });
-        let command_owner = CommandOwnerScope::for_implicit_route(Some(route.clone()));
+        let command_owner = CommandOwnerScope::for_route(route.clone());
         let mut initial_runtime_execution_context_ids = Vec::new();
         let mut renderer_output_predecessor = None;
         let pending = match self.start_initial_document_page_ensure_for_owner(&command_owner) {

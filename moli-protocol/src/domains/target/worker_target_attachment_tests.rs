@@ -66,7 +66,7 @@ async fn drain(
 ) -> Vec<crate::conn::BackgroundProtocolEvent> {
     let mut prepared =
         ProtocolOutputPayloads::from_slot(TargetPreparedOutputSlot::from_outputs(outputs));
-    let owner = CommandOwnerScope::for_implicit_route(None);
+    let owner = CommandOwnerScope::capture(conn, None);
     let mut command = CommandDispatchContext::default();
     emit_target_lifecycle_events(
         conn,

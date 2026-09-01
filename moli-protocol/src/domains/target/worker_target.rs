@@ -3878,7 +3878,7 @@ mod tests {
     ) -> Vec<crate::conn::BackgroundProtocolEvent> {
         let mut prepared_outputs =
             ProtocolOutputPayloads::from_slot(TargetPreparedOutputSlot::from_outputs(outputs));
-        let owner = CommandOwnerScope::for_implicit_route(None);
+        let owner = CommandOwnerScope::capture(conn, None);
         let mut command_context = crate::conn::CommandDispatchContext::default();
         emit_target_lifecycle_events(
             conn,
@@ -6914,7 +6914,7 @@ mod tests {
         );
         let mut prepared_outputs =
             ProtocolOutputPayloads::from_slot(TargetPreparedOutputSlot::from_outputs(outputs));
-        let owner = CommandOwnerScope::for_implicit_route(None);
+        let owner = CommandOwnerScope::capture(&conn, None);
         let mut command_context = crate::conn::CommandDispatchContext::default();
         emit_target_lifecycle_events(
             &mut conn,

@@ -1132,7 +1132,7 @@ mod tests {
         let mut events = Vec::new();
         let mut conn = CdpConnection::new();
         conn.install_default_browser_target();
-        let owner = crate::conn::CommandOwnerScope::for_implicit_route(None);
+        let owner = crate::conn::CommandOwnerScope::capture(&conn, None);
         emit_network_delivery_snapshot(&mut conn, &mut events, &owner, "FRAME-1", 1.0, snapshot);
         events
             .into_iter()

@@ -236,7 +236,7 @@ mod tests {
         };
         let owner = BidiChannelPageOwner::capture_for_owner(
             &conn,
-            CommandOwnerScope::for_implicit_route(Some(owner_route.clone())),
+            CommandOwnerScope::for_route(owner_route.clone()),
         )
         .expect("implicit owner must capture the scoped Page");
         let caller_route = crate::conn::CdpSessionRoute::Browser;

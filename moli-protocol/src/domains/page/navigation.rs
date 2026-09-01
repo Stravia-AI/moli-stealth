@@ -1092,7 +1092,7 @@ fn start_protocol_neutral_navigation_command(
             is_download: None,
         },
     };
-    let command_owner = CommandOwnerScope::for_implicit_route(Some(route.clone()));
+    let command_owner = CommandOwnerScope::for_route(route.clone());
     let reloaded_after_crash_session_ids = reloaded_after_crash_session_ids(conn, &command_owner);
     let step = match command {
         DevToolsCommand::Navigate(command) => {

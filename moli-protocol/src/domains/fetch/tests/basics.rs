@@ -1073,7 +1073,9 @@ async fn disable_clears_fetch_state() {
             document_navigation_token: None,
             navigation: crate::conn::NavigationDispatchState {
                 navigate_id: Some(1),
-                owner: crate::conn::CommandOwnerScope::for_implicit_route(None),
+                owner: crate::conn::CommandOwnerScope::for_route(
+                    crate::conn::CdpSessionRoute::Browser,
+                ),
                 result_projection: crate::conn::NavigationResultProjection::Cdp(
                     json!({"frameId": "TID-1", "loaderId": "LID-0000000001"}),
                 ),
@@ -1111,7 +1113,9 @@ async fn disable_clears_fetch_state() {
                 document_navigation_token: None,
                 navigation: crate::conn::NavigationDispatchState {
                     navigate_id: Some(1),
-                    owner: crate::conn::CommandOwnerScope::for_implicit_route(None),
+                    owner: crate::conn::CommandOwnerScope::for_route(
+                        crate::conn::CdpSessionRoute::Browser,
+                    ),
                     result_projection: crate::conn::NavigationResultProjection::Cdp(
                         json!({"frameId": "TID-1", "loaderId": "LID-0000000001"}),
                     ),

@@ -147,7 +147,7 @@ async fn ingest_renderer_output_publication(
             owner_route,
             projection,
         } => {
-            let owner = CommandOwnerScope::for_implicit_route(Some(owner_route));
+            let owner = CommandOwnerScope::for_route(owner_route);
             project_renderer_output_records_for_route(
                 conn,
                 &owner,
@@ -275,7 +275,7 @@ mod tests {
             .runtime_slot
             .set_page_attachment_id_for_test(1);
         conn.browser_context = Some(browser_context);
-        let owner = CommandOwnerScope::for_implicit_route(None);
+        let owner = CommandOwnerScope::capture(&conn, None);
 
         assert_eq!(
             renderer_owner_action_owner(&conn, &owner, None).session_id(),

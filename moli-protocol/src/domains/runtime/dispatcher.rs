@@ -4363,7 +4363,7 @@ fn bidi_channel_page_owner_for_runtime_target(
     let exact_owner = owner
         .session_id()
         .map(CommandOwnerScope::for_session)
-        .unwrap_or_else(|| CommandOwnerScope::for_implicit_route(Some(target.route.clone())));
+        .unwrap_or_else(|| CommandOwnerScope::for_route(target.route.clone()));
     BidiChannelPageOwner::capture_for_owner(conn, exact_owner)
 }
 
@@ -4383,7 +4383,7 @@ async fn create_bidi_channel_proxy_and_start_listener_async(
     let listener_owner = bidi_channel_page_owner_for_runtime_target(
         conn,
         target,
-        &CommandOwnerScope::for_implicit_route(Some(target.route.clone())),
+        &CommandOwnerScope::for_route(target.route.clone()),
     )
     .ok_or_else(|| "NoSuchBidiChannelTarget".to_owned())?;
     let channel_object_group = conn.next_bidi_channel_object_group();
@@ -4700,9 +4700,7 @@ async fn start_protocol_neutral_runtime_command(
         )),
     };
     drop(route_scope);
-    step.with_owner_scope(CommandOwnerScope::for_implicit_route(Some(
-        session_owner_route,
-    )))
+    step.with_owner_scope(CommandOwnerScope::for_route(session_owner_route))
 }
 
 fn runtime_inspector_command_json(command_id: u64, method: &str, params: &Value) -> String {
@@ -9193,7 +9191,7 @@ fn start_pending_shared_worker_runtime_inspector_command(
     } else {
         None
     };
-    let session_owner_route = conn.session_route(cmd.session_id);
+    let owner_scope = CommandOwnerScope::capture(conn, cmd.session_id);
     let pre_registered_await = pre_register_runtime_await_if_needed(
         conn,
         await_promise,
@@ -9215,10 +9213,7 @@ fn start_pending_shared_worker_runtime_inspector_command(
         PendingRuntimeCommandDispatch {
             command_id: cmd.id,
             action: action.label(),
-            owner_scope: cmd
-                .session_id
-                .map(CommandOwnerScope::for_session)
-                .unwrap_or_else(|| CommandOwnerScope::for_implicit_route(session_owner_route)),
+            owner_scope,
             object_group,
             release_object_ids,
             release_object_group,
@@ -9258,7 +9253,7 @@ fn start_pending_service_worker_runtime_inspector_command(
     } else {
         None
     };
-    let session_owner_route = conn.session_route(cmd.session_id);
+    let owner_scope = CommandOwnerScope::capture(conn, cmd.session_id);
     let pre_registered_await = pre_register_runtime_await_if_needed(
         conn,
         await_promise,
@@ -9280,10 +9275,7 @@ fn start_pending_service_worker_runtime_inspector_command(
         PendingRuntimeCommandDispatch {
             command_id: cmd.id,
             action: action.label(),
-            owner_scope: cmd
-                .session_id
-                .map(CommandOwnerScope::for_session)
-                .unwrap_or_else(|| CommandOwnerScope::for_implicit_route(session_owner_route)),
+            owner_scope,
             object_group,
             release_object_ids,
             release_object_group,

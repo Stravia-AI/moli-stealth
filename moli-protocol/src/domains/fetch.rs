@@ -229,33 +229,12 @@ impl PendingFetchCommandDispatch {
         kind: PendingFetchCommandKind,
         pending: PendingFetchCommandOperation,
     ) -> Self {
-        // Fetch terminal commands may resume a renderer-initiated navigation.
-        // Such a navigation has no command session of its own, so once this
-        // command crosses an async boundary it needs the issuing Page route as
-        // its implicit owner. Keep that route exact even if another Page or
-        // BrowserContext becomes active before the completion is processed.
-        let session_owner_route =
-            match session_id.and_then(|session_id| conn.session_route(Some(session_id))) {
-                Some(route @ CdpSessionRoute::PageTarget { .. }) => Some(route),
-                Some(
-                    CdpSessionRoute::Browser
-                    | CdpSessionRoute::BrowserContext { .. }
-                    | CdpSessionRoute::TabTarget { .. }
-                    | CdpSessionRoute::SharedWorkerTarget { .. }
-                    | CdpSessionRoute::DedicatedWorkerTarget { .. }
-                    | CdpSessionRoute::ServiceWorkerTarget { .. },
-                ) => None,
-                None if session_id.is_none() => CommandOwnerScope::capture(conn, None)
-                    .session_owner_route()
-                    .cloned(),
-                None => None,
-            };
         Self {
             command_id,
             session_id: session_id.map(str::to_owned),
-            owner_scope: session_id
-                .map(CommandOwnerScope::for_session)
-                .unwrap_or_else(|| CommandOwnerScope::for_implicit_route(session_owner_route)),
+            // Fetch terminal commands may resume renderer-initiated work.
+            // Freeze their owner before crossing that async boundary.
+            owner_scope: CommandOwnerScope::capture(conn, session_id),
             kind,
             pending,
         }

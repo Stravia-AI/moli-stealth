@@ -717,12 +717,13 @@ mod tests {
         let page_owner = conn
             .target_page_residence_identity_for_session(None)
             .expect("active test target should expose a Page residence identity");
+        let owner = CommandOwnerScope::capture(&conn, None);
 
         let mut events = Vec::new();
         super::emit_subresource_fetch_pause_outputs(
             &mut conn,
             &mut events,
-            &CommandOwnerScope::for_implicit_route(None),
+            &owner,
             &[Some("NETWORK-SID".to_owned())],
             vec![
                 fetch_pause_output(
@@ -737,7 +738,7 @@ mod tests {
         super::emit_subresource_fetch_pause_outputs(
             &mut conn,
             &mut events,
-            &CommandOwnerScope::for_implicit_route(None),
+            &owner,
             &[Some("NETWORK-SID".to_owned())],
             Vec::new(),
         );
@@ -795,12 +796,13 @@ mod tests {
         let page_owner = conn
             .target_page_residence_identity_for_session(None)
             .expect("active test target should expose a Page residence identity");
+        let owner = CommandOwnerScope::capture(&conn, None);
         let mut events = Vec::new();
 
         super::emit_subresource_fetch_pause_outputs(
             &mut conn,
             &mut events,
-            &CommandOwnerScope::for_implicit_route(None),
+            &owner,
             &[Some("NETWORK-SID".to_owned())],
             vec![fetch_pause_output_with_cookie_report(
                 page_owner,
@@ -845,12 +847,13 @@ mod tests {
             .active_page_state_mut()
             .runtime_slot
             .replace_page_attachment_id_for_test();
+        let owner = CommandOwnerScope::capture(&conn, None);
 
         let mut events = Vec::new();
         super::emit_subresource_fetch_pause_outputs(
             &mut conn,
             &mut events,
-            &CommandOwnerScope::for_implicit_route(None),
+            &owner,
             &[Some("NETWORK-SID".to_owned())],
             vec![fetch_pause_output(
                 page_owner,

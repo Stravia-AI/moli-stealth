@@ -859,13 +859,9 @@ mod tests {
     #[test]
     fn network_backlog_prepared_outputs_are_absent_without_loaded_observed_page() {
         let mut conn = crate::conn::CdpConnection::default();
+        let owner = CommandOwnerScope::capture(&conn, None);
         assert_eq!(
-            super::network_backlog_prepared_outputs_for_owner(
-                &mut conn,
-                &CommandOwnerScope::for_implicit_route(None),
-                None,
-            )
-            .outputs(),
+            super::network_backlog_prepared_outputs_for_owner(&mut conn, &owner, None,).outputs(),
             &[]
         );
     }

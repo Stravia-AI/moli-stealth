@@ -359,7 +359,7 @@ mod tests {
         assert_eq!(
             ctx.conn
                 .route_current_renderer_inspector_output_for_owner(
-                    &CommandOwnerScope::for_implicit_route(None),
+                    &CommandOwnerScope::capture(&ctx.conn, None),
                     vec![accepted],
                 )
                 .len(),
@@ -414,7 +414,7 @@ mod tests {
         assert!(
             ctx.conn
                 .route_current_renderer_inspector_output_for_owner(
-                    &CommandOwnerScope::for_implicit_route(None),
+                    &CommandOwnerScope::capture(&ctx.conn, None),
                     vec![stale_attachment],
                 )
                 .is_empty()
@@ -426,7 +426,7 @@ mod tests {
         assert!(
             ctx.conn
                 .route_current_renderer_inspector_output_for_owner(
-                    &CommandOwnerScope::for_implicit_route(None),
+                    &CommandOwnerScope::capture(&ctx.conn, None),
                     vec![stale_agent],
                 )
                 .is_empty()
@@ -439,7 +439,7 @@ mod tests {
         assert_eq!(
             ctx.conn
                 .route_current_renderer_inspector_output_for_owner(
-                    &CommandOwnerScope::for_implicit_route(None),
+                    &CommandOwnerScope::capture(&ctx.conn, None),
                     vec![page_creation_batch],
                 )
                 .len(),
