@@ -375,11 +375,11 @@ impl BrowserContext {
 
     #[cfg(test)]
     pub(crate) fn active_page_state(&self) -> &PageTargetHost {
-        self.active_page_target().state()
+        self.active_page_target()
     }
 
     pub(crate) fn active_page_state_mut(&mut self) -> &mut PageTargetHost {
-        self.active_page_target_mut().state_mut()
+        self.active_page_target_mut()
     }
 
     /// Parks a dialog only until the matching lightweight-popup target obtains
@@ -879,7 +879,7 @@ impl BrowserContext {
         let target_host_state_diagnostics = json!({
             "targetHostCount": self.background_target_count(),
             "pageSessionStateCount": self.background_targets()
-                .filter(|target| target.state().has_non_default_session_state())
+                .filter(|target| target.has_non_default_session_state())
                 .count(),
             "targetOwnerStateWithPendingInspectorAwaitCount": self.background_targets()
                 .filter(|target| target.has_pending_inspector_awaits())

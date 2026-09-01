@@ -252,7 +252,7 @@ impl TargetNavigationLoadInputs {
         target_id: &str,
     ) -> Option<Self> {
         let target = browser_context.page_target(target_id)?;
-        let page_state = target.state();
+        let page_state = target;
         let mut document_start_scripts = Vec::new();
         let generated_surface_script = if browser_context.is_active_target(target_id) {
             browser_context.generated_surface_override_script_for_active_target()
@@ -777,7 +777,7 @@ impl<'a> TargetSessionOwnerMut<'a> {
                 let Some(target) = browser_context.page_target_mut(target_id) else {
                     return f(TargetSessionStateMut::NoLoaded);
                 };
-                let state = target.state_mut();
+                let state = target;
                 let devtools_session_state = state
                     .devtools_sessions
                     .routed_mut_or_insert(*is_auxiliary_target_session, session_id.as_deref());
@@ -802,7 +802,7 @@ impl<'a> TargetSessionOwnerMut<'a> {
                 session_id,
                 is_auxiliary_target_session,
             } => Some(f(
-                browser_context.page_target_mut(target_id)?.state_mut(),
+                browser_context.page_target_mut(target_id)?,
                 *is_auxiliary_target_session,
                 session_id.as_deref(),
             )),
@@ -910,7 +910,7 @@ impl<'a> TargetSessionOwnerMut<'a> {
         target.owner_state.target_crash_state.mark_crashed();
         target.owner_state.navigation_history_state.clear();
         target.owner_state.clear_loaded_document_context_state();
-        clear_page_loaded_document_session_state(target.state_mut());
+        clear_page_loaded_document_session_state(target);
         target.fetch_owner.clear_pending();
         target.runtime_slot.clear_document_navigation_state();
         let previous = target
@@ -939,7 +939,7 @@ impl<'a> TargetSessionOwnerMut<'a> {
         target
             .owner_state
             .clear_committed_document_navigation_state();
-        clear_page_loaded_document_session_state(target.state_mut());
+        clear_page_loaded_document_session_state(target);
         target.runtime_slot.clear_document_navigation_state();
         let previous = target
             .runtime_slot
@@ -1213,7 +1213,7 @@ impl<'a> TargetSessionOwnerMut<'a> {
                 is_auxiliary_target_session,
             } => {
                 let target = browser_context.page_target(target_id)?;
-                let page_state = target.state();
+                let page_state = target;
                 let devtools_session_state = page_state
                     .devtools_sessions
                     .routed(*is_auxiliary_target_session, session_id.as_deref());
@@ -1493,7 +1493,7 @@ impl CdpConnection {
         target
             .owner_state
             .clear_committed_document_navigation_state();
-        clear_page_loaded_document_session_state(target.state_mut());
+        clear_page_loaded_document_session_state(target);
         let previous = target.replace_loaded_page(Some(page));
         target.runtime_slot.reset_subresource_cursor();
         target.runtime_slot.clear_websocket_artifacts();
@@ -1605,7 +1605,7 @@ impl CdpConnection {
         }
         CdpConnection::fail_pending_inspector_awaits_from_page_session_state_for_sessions_background_events_into(
             out,
-            target.state_mut(),
+            &mut target,
             primary_session_id.as_deref(),
             &affected_sessions,
             reason,

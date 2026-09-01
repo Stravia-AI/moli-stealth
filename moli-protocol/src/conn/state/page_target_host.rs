@@ -185,14 +185,6 @@ impl PageTargetHost {
         self.session_storage_namespace = namespace;
     }
 
-    pub(crate) fn state(&self) -> &Self {
-        self
-    }
-
-    pub(crate) fn state_mut(&mut self) -> &mut Self {
-        self
-    }
-
     pub(crate) fn navigation_engine(&self) -> Option<&NavigationEngine> {
         self.navigation_engine.as_ref()
     }

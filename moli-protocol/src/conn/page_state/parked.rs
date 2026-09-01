@@ -92,7 +92,7 @@ impl BrowserContext {
         let target_identity = background_target_identity_for_initial_url(&url, creator.as_ref());
         let mut target = PageTargetHost::with_identity(target_id, session_id, target_identity);
         let target_id = target.target_id().to_owned();
-        target.state_mut().owner_state.begin_initial_empty_document(
+        target.owner_state.begin_initial_empty_document(
             target_id,
             initial_empty_document_url.unwrap_or_else(|| url.clone()),
             creator,
@@ -375,7 +375,7 @@ impl BrowserContext {
         let Some(target) = self.page_target_mut(&target_id) else {
             return Ok(false);
         };
-        let state = target.state_mut();
+        let state = target;
         let previous_headers = state.network_policy.extra_headers().to_vec();
         let previous_bypass = state.network_policy.bypass_service_worker();
         let previous_cache_disabled = state.network_policy.cache_disabled();
@@ -529,7 +529,6 @@ impl BrowserContext {
         let cleared_emulated_media = moli_core::page::EmulatedMediaOverrides::default();
         self.background_target_mut(&target_id)
             .expect("background target must exist")
-            .state_mut()
             .clear_session_scoped_state_fields(true);
         self.background_target_mut(&target_id)
             .expect("background target must exist")
@@ -803,7 +802,7 @@ impl BrowserContext {
         let demoted_surface_script = if synchronize_loaded_page {
             previous_active_target_id.as_deref().and_then(|target_id| {
                 let host = self.page_target(target_id)?;
-                self.generated_surface_override_script_for_parked_state(host.state())
+                self.generated_surface_override_script_for_parked_state(host)
             })
         } else {
             None
@@ -836,7 +835,7 @@ impl BrowserContext {
         };
         let surface_script = self
             .page_target(&active_target_id)
-            .and_then(|host| self.generated_surface_override_script_for_parked_state(host.state()));
+            .and_then(|host| self.generated_surface_override_script_for_parked_state(host));
         if let Some(script) = surface_script
             && let Some(page) = self
                 .page_target_mut(&active_target_id)
@@ -855,7 +854,6 @@ impl BrowserContext {
             &mut self
                 .background_target_mut(target_id)
                 .expect("parked target must exist")
-                .state_mut()
                 .owner_state
                 .isolated_worlds,
         )
@@ -865,7 +863,6 @@ impl BrowserContext {
         let owner_state = &mut self
             .background_target_mut(target_id)
             .expect("parked target must exist")
-            .state_mut()
             .owner_state;
         let counter = owner_state.next_document_start_script_id;
         owner_state.next_document_start_script_id = 0;
@@ -879,7 +876,6 @@ impl BrowserContext {
     ) {
         self.background_target_mut(&target_id)
             .expect("parked target must exist")
-            .state_mut()
             .owner_state
             .isolated_worlds = isolated_worlds;
     }
@@ -891,7 +887,6 @@ impl BrowserContext {
     ) {
         self.background_target_mut(&target_id)
             .expect("parked target must exist")
-            .state_mut()
             .owner_state
             .next_document_start_script_id = counter;
     }
@@ -900,7 +895,7 @@ impl BrowserContext {
         &self,
         target_id: &str,
     ) -> Option<&crate::conn::state::PageTargetHost> {
-        let state = self.background_target(target_id)?.state();
+        let state = self.background_target(target_id)?;
         state.has_non_default_session_state().then_some(state)
     }
 
@@ -911,8 +906,7 @@ impl BrowserContext {
     ) -> T {
         mutate(
             self.background_target_mut(target_id)
-                .expect("parked target must exist")
-                .state_mut(),
+                .expect("parked target must exist"),
         )
     }
 
@@ -1809,11 +1803,11 @@ mod tests {
             .expect("page target host should remain registered");
 
         assert_eq!(host.target_id(), "TID-bg");
-        assert_eq!(host.state().owner_state.next_document_start_script_id, 7);
-        assert_eq!(host.state().owner_state.isolated_worlds.len(), 1);
-        assert_eq!(host.state().owner_state.isolated_worlds[0].name, "utility");
+        assert_eq!(host.owner_state.next_document_start_script_id, 7);
+        assert_eq!(host.owner_state.isolated_worlds.len(), 1);
+        assert_eq!(host.owner_state.isolated_worlds[0].name, "utility");
         assert!(
-            host.state().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+            host.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
                 .runtime_session_state
                 .runtime_frontend_enabled
         );
@@ -1944,19 +1938,19 @@ mod tests {
                 .map(|attachment_id| attachment_id.get()),
             Some(42)
         );
-        assert_eq!(host.state().owner_state.document_start_scripts.len(), 1);
+        assert_eq!(host.owner_state.document_start_scripts.len(), 1);
         assert!(
-            host.state().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+            host.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
                 .runtime_session_state
                 .runtime_frontend_enabled
         );
         assert!(
-            host.state().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+            host.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
                 .runtime_session_state
                 .inspector_enabled
         );
-        assert_eq!(host.state().owner_state.next_document_start_script_id, 3);
-        assert_eq!(host.state().owner_state.isolated_worlds.len(), 1);
+        assert_eq!(host.owner_state.next_document_start_script_id, 3);
+        assert_eq!(host.owner_state.isolated_worlds.len(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]

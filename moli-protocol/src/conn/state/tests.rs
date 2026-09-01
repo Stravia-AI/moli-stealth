@@ -50,29 +50,26 @@ fn test_navigation_dispatch_state(fetch_request_id: &str) -> NavigationDispatchS
 }
 
 #[test]
-fn background_target_owns_page_session_state_atomically() {
-    let mut target = PageTargetHost::with_url("TID-A".to_owned(), None, "about:blank".to_owned());
-
-    let mut state = PageTargetHost::empty("TID-state-test".to_owned());
-    state.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary] = DevToolsSessionState {
+fn page_target_host_owns_session_state_directly() {
+    let mut target = PageTargetHost::empty("TID-state-test".to_owned());
+    target.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary] = DevToolsSessionState {
         page_session_state: TargetPageSessionState {
             log_enabled: true,
             ..Default::default()
         },
         ..Default::default()
     };
-    *target.state_mut() = state;
     assert!(
-        target.state().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+        target.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
             .page_session_state
             .log_enabled
     );
 
-    target.state_mut().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+    target.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
         .page_session_state
         .log_enabled = false;
     assert!(
-        !target.state().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+        !target.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
             .page_session_state
             .log_enabled
     );
