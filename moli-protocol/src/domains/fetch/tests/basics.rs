@@ -1073,7 +1073,7 @@ async fn disable_clears_fetch_state() {
             document_navigation_token: None,
             navigation: crate::conn::NavigationDispatchState {
                 navigate_id: Some(1),
-                owner: crate::conn::CommandOwnerScope::from_session_and_owner_route(None, None),
+                owner: crate::conn::CommandOwnerScope::for_implicit_route(None),
                 result_projection: crate::conn::NavigationResultProjection::Cdp(
                     json!({"frameId": "TID-1", "loaderId": "LID-0000000001"}),
                 ),
@@ -1111,7 +1111,7 @@ async fn disable_clears_fetch_state() {
                 document_navigation_token: None,
                 navigation: crate::conn::NavigationDispatchState {
                     navigate_id: Some(1),
-                    owner: crate::conn::CommandOwnerScope::from_session_and_owner_route(None, None),
+                    owner: crate::conn::CommandOwnerScope::for_implicit_route(None),
                     result_projection: crate::conn::NavigationResultProjection::Cdp(
                         json!({"frameId": "TID-1", "loaderId": "LID-0000000001"}),
                     ),
@@ -1335,10 +1335,7 @@ async fn continue_with_auth_rejects_invalid_response_without_consuming_pending_a
                 document_navigation_token: None,
                 navigation: crate::conn::NavigationDispatchState {
                     navigate_id: Some(1),
-                    owner: crate::conn::CommandOwnerScope::from_session_and_owner_route(
-                        Some("SID-1"),
-                        None,
-                    ),
+                    owner: crate::conn::CommandOwnerScope::for_session("SID-1"),
                     result_projection: crate::conn::NavigationResultProjection::Cdp(
                         json!({"frameId": "TID-1", "loaderId": "LID-0000000001"}),
                     ),
@@ -1413,10 +1410,7 @@ async fn continue_with_auth_unsupported_challenge_preserves_pending_auth_navigat
                 document_navigation_token: None,
                 navigation: crate::conn::NavigationDispatchState {
                     navigate_id: Some(1),
-                    owner: crate::conn::CommandOwnerScope::from_session_and_owner_route(
-                        Some("SID-1"),
-                        None,
-                    ),
+                    owner: crate::conn::CommandOwnerScope::for_session("SID-1"),
                     result_projection: crate::conn::NavigationResultProjection::Cdp(
                         json!({"frameId": "TID-1", "loaderId": "LID-0000000001"}),
                     ),
@@ -1588,10 +1582,7 @@ fn emit_auth_required_preserves_request_headers_and_post_data_shape() {
         document_navigation_token: None,
         navigation: crate::conn::NavigationDispatchState {
             navigate_id: Some(1),
-            owner: crate::conn::CommandOwnerScope::from_session_and_owner_route(
-                Some("SID-1"),
-                None,
-            ),
+            owner: crate::conn::CommandOwnerScope::for_session("SID-1"),
             result_projection: crate::conn::NavigationResultProjection::Cdp(
                 json!({"frameId": "TID-1", "loaderId": "LID-0000000001"}),
             ),

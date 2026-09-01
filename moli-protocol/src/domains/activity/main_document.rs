@@ -955,7 +955,7 @@ mod tests {
     fn navigation_state() -> NavigationDispatchState {
         NavigationDispatchState {
             navigate_id: Some(77),
-            owner: CommandOwnerScope::from_session_and_owner_route(Some("SID-nav"), None),
+            owner: CommandOwnerScope::for_session("SID-nav"),
             result_projection: NavigationResultProjection::Cdp(
                 json!({ "frameId": "FRAME-1", "loaderId": "LID-1" }),
             ),

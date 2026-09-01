@@ -2307,10 +2307,7 @@ impl CdpConnection {
             let route = self
                 .target_session_route_for_target_id(target_id.as_str())
                 .or_else(|| self.target_session_route_for_child_frame_id(target_id.as_str()))?;
-            return Some(CommandOwnerScope::from_session_and_owner_route(
-                None,
-                Some(route),
-            ));
+            return Some(CommandOwnerScope::for_implicit_route(Some(route)));
         }
         Some(CommandOwnerScope::capture(
             self,

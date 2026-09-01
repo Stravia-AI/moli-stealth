@@ -1092,7 +1092,7 @@ fn start_protocol_neutral_navigation_command(
             is_download: None,
         },
     };
-    let command_owner = CommandOwnerScope::from_session_and_owner_route(None, Some(route.clone()));
+    let command_owner = CommandOwnerScope::for_implicit_route(Some(route.clone()));
     let reloaded_after_crash_session_ids = reloaded_after_crash_session_ids(conn, &command_owner);
     let step = match command {
         DevToolsCommand::Navigate(command) => {
@@ -3735,16 +3735,14 @@ mod child_frame_attachment_tests {
         );
         let command =
             build_cdp_navigate_command(&cmd, Some("TID-2"), "not a valid navigation url", None);
+        let owner = crate::conn::CommandOwnerScope::capture(&conn, cmd.session_id);
 
         let step = start_devtools_page_command(
             &mut conn,
             cmd.id,
             DevToolsCommand::Navigate(command),
             DevToolsNavigationStartOptions {
-                owner: crate::conn::CommandOwnerScope::from_session_and_owner_route(
-                    cmd.session_id,
-                    None,
-                ),
+                owner,
                 result_projection: NavigationResultProjection::Cdp(json!({})),
                 reloaded_after_crash_session_ids: Vec::new(),
                 allow_background_navigation: true,
@@ -3809,16 +3807,14 @@ mod child_frame_attachment_tests {
             r#"{"id":14,"method":"Page.reload"}"#,
         );
         let command = build_cdp_reload_command(&cmd, Some("TID-4"), Default::default());
+        let owner = crate::conn::CommandOwnerScope::capture(&conn, cmd.session_id);
 
         let step = start_devtools_page_command(
             &mut conn,
             cmd.id,
             DevToolsCommand::Reload(command),
             DevToolsNavigationStartOptions {
-                owner: crate::conn::CommandOwnerScope::from_session_and_owner_route(
-                    cmd.session_id,
-                    None,
-                ),
+                owner,
                 result_projection: NavigationResultProjection::Cdp(json!({})),
                 reloaded_after_crash_session_ids: Vec::new(),
                 allow_background_navigation: true,
@@ -3888,16 +3884,14 @@ mod child_frame_attachment_tests {
             9,
             "https://example.test/history".to_owned(),
         );
+        let owner = crate::conn::CommandOwnerScope::capture(&conn, cmd.session_id);
 
         let step = start_devtools_page_command(
             &mut conn,
             cmd.id,
             DevToolsCommand::TraverseHistory(command),
             DevToolsNavigationStartOptions {
-                owner: crate::conn::CommandOwnerScope::from_session_and_owner_route(
-                    cmd.session_id,
-                    None,
-                ),
+                owner,
                 result_projection: NavigationResultProjection::Cdp(json!({})),
                 reloaded_after_crash_session_ids: Vec::new(),
                 allow_background_navigation: true,

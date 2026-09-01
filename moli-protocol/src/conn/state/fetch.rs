@@ -2373,10 +2373,9 @@ mod tests {
             document_navigation_token: None,
             navigation: NavigationDispatchState {
                 navigate_id: Some(1),
-                owner: crate::conn::CommandOwnerScope::from_session_and_owner_route(
-                    owner_session_id,
-                    None,
-                ),
+                owner: owner_session_id
+                    .map(crate::conn::CommandOwnerScope::for_session)
+                    .unwrap_or_else(|| crate::conn::CommandOwnerScope::for_implicit_route(None)),
                 result_projection: NavigationResultProjection::Cdp(
                     json!({"frameId": "FRAME-1", "loaderId": "LOADER-1"}),
                 ),
