@@ -71,6 +71,17 @@ mod tests {
     }
 
     #[test]
+    fn move_only_path_preserves_its_zero_length_point() {
+        let segments = path_segments("M 1e2,-2E1");
+        assert_eq!(segments.len(), 1);
+        assert_close(segments[0].length(), 0.0);
+
+        let point = point_at_length(&segments, 0.0);
+        assert_close(point.x, 100.0);
+        assert_close(point.y, -20.0);
+    }
+
+    #[test]
     fn path_geometry_handles_relative_commands_and_close_path() {
         let segments = path_segments("m 1 1 l 3 0 v 4 h -3 z");
         let total = segments.iter().map(|segment| segment.length()).sum::<f64>();

@@ -2,7 +2,7 @@ use crate::helpers::svg_number_list;
 use crate::matrix::SvgMatrixComponents;
 use crate::path::path_geometry;
 use kurbo::{
-    Arc, BezPath, Circle, Ellipse, ParamCurve, ParamCurveArclen, ParamCurveExtrema,
+    Arc, BezPath, Circle, Ellipse, Line, ParamCurve, ParamCurveArclen, ParamCurveExtrema,
     ParamCurveNearest, PathEl, PathSeg, Point, Rect, Shape,
 };
 
@@ -98,11 +98,23 @@ pub enum SvgGeometryElement {
 }
 
 pub fn segments_for_element(element: SvgGeometryElement) -> Vec<SvgGeometrySegment> {
-    geometry_path(&element)
-        .unwrap_or_default()
+    let path = geometry_path(&element).unwrap_or_default();
+    let segments = path
         .segments()
         .map(SvgGeometrySegment::new)
-        .collect()
+        .collect::<Vec<_>>();
+    if !segments.is_empty() {
+        return segments;
+    }
+    path.elements()
+        .iter()
+        .find_map(|element| match element {
+            PathEl::MoveTo(point) => Some(vec![SvgGeometrySegment::new(
+                Line::new(*point, *point).into(),
+            )]),
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 pub fn bounding_box_for_segments(segments: &[SvgGeometrySegment]) -> Option<SvgGeometryBox> {
