@@ -125,10 +125,49 @@ const NODE_BRIDGE_DESCRIPTORS: &[BridgeDescriptor] = &[
     ),
     descriptor("SVGFilterElement", Some("SVGElement"), ELEMENT_GROUPS),
     descriptor(
+        "SVGComponentTransferFunctionElement",
+        Some("SVGElement"),
+        ELEMENT_GROUPS,
+    ),
+    descriptor(
+        "SVGFEFuncAElement",
+        Some("SVGComponentTransferFunctionElement"),
+        ELEMENT_GROUPS,
+    ),
+    descriptor(
+        "SVGFEFuncBElement",
+        Some("SVGComponentTransferFunctionElement"),
+        ELEMENT_GROUPS,
+    ),
+    descriptor(
+        "SVGFEFuncGElement",
+        Some("SVGComponentTransferFunctionElement"),
+        ELEMENT_GROUPS,
+    ),
+    descriptor(
+        "SVGFEFuncRElement",
+        Some("SVGComponentTransferFunctionElement"),
+        ELEMENT_GROUPS,
+    ),
+    descriptor("SVGFEBlendElement", Some("SVGElement"), ELEMENT_GROUPS),
+    descriptor(
+        "SVGFEColorMatrixElement",
+        Some("SVGElement"),
+        ELEMENT_GROUPS,
+    ),
+    descriptor("SVGFECompositeElement", Some("SVGElement"), ELEMENT_GROUPS),
+    descriptor(
         "SVGFEConvolveMatrixElement",
         Some("SVGElement"),
         ELEMENT_GROUPS,
     ),
+    descriptor(
+        "SVGFEDisplacementMapElement",
+        Some("SVGElement"),
+        ELEMENT_GROUPS,
+    ),
+    descriptor("SVGFEMorphologyElement", Some("SVGElement"), ELEMENT_GROUPS),
+    descriptor("SVGFETurbulenceElement", Some("SVGElement"), ELEMENT_GROUPS),
     descriptor(
         "SVGForeignObjectElement",
         Some("SVGGraphicsElement"),
@@ -222,6 +261,11 @@ const NODE_BRIDGE_DESCRIPTORS: &[BridgeDescriptor] = &[
     descriptor(
         "SVGTextContentElement",
         Some("SVGGraphicsElement"),
+        ELEMENT_GROUPS,
+    ),
+    descriptor(
+        "SVGTextPathElement",
+        Some("SVGTextContentElement"),
         ELEMENT_GROUPS,
     ),
     descriptor(
