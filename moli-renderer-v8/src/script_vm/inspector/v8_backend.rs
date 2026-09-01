@@ -633,7 +633,7 @@ impl RendererInspectorIsolateBackend {
         }
     }
 
-    pub(super) fn devtools_target(&self) -> RendererDevToolsTargetHandle {
+    pub(in crate::script_vm) fn devtools_target(&self) -> RendererDevToolsTargetHandle {
         self.target.clone()
     }
 
