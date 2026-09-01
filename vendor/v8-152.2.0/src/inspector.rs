@@ -19,6 +19,8 @@ use crate::Isolate;
 use crate::Local;
 use crate::PinScope;
 use crate::StackTrace;
+use crate::String;
+use crate::UnboundScript;
 use crate::Value;
 use crate::crdtp::CppVecU8;
 use crate::isolate::RealIsolate;
@@ -115,6 +117,28 @@ unsafe extern "C" {
   fn v8_inspector__V8InspectorSession__cancelPauseOnNextStatement(
     session: *mut RawV8InspectorSession,
   );
+  fn v8_inspector__V8InspectorSession__breakProgram(
+    session: *mut RawV8InspectorSession,
+    break_reason: StringView,
+    break_details: StringView,
+  );
+  fn v8_inspector__V8InspectorSession__state(
+    session: *mut RawV8InspectorSession,
+  ) -> *mut RawV8InspectorSessionState;
+  fn v8_inspector__V8InspectorSession__State__DELETE(
+    state: *mut RawV8InspectorSessionState,
+  );
+  fn v8_inspector__V8InspectorSession__State__size(
+    state: *const RawV8InspectorSessionState,
+  ) -> usize;
+  fn v8_inspector__V8InspectorSession__State__copy(
+    state: *const RawV8InspectorSessionState,
+    out: *mut u8,
+  );
+  fn v8_inspector__CompileInspectorScript(
+    isolate: *mut RealIsolate,
+    source: *const String,
+  ) -> *const UnboundScript;
   fn v8_inspector__V8InspectorSession__canDispatchMethod(
     method: StringView,
   ) -> bool;
@@ -147,12 +171,20 @@ unsafe extern "C" {
     state: StringView,
     client_trust_level: V8InspectorClientTrustLevel,
   ) -> *mut RawV8InspectorSession;
-  fn v8_inspector__V8Inspector__contextCreated(
+  fn v8_inspector__V8Inspector__contextCreatedWithOrigin(
     this: *mut RawV8Inspector,
     context: *const Context,
     contextGroupId: int,
     humanReadableName: StringView,
+    origin: StringView,
     auxData: StringView,
+  );
+  fn v8_inspector__V8ContextInfo__executionContextId(
+    context: *const Context,
+  ) -> int;
+  fn v8_inspector__V8Inspector__resetContextGroup(
+    this: *mut RawV8Inspector,
+    contextGroupId: int,
   );
   fn v8_inspector__V8Inspector__contextDestroyed(
     this: *mut RawV8Inspector,
@@ -791,6 +823,9 @@ unsafe extern "C" fn v8_inspector__V8InspectorSession__Inspectable__BASE__DROP(
 #[derive(Debug)]
 pub struct RawV8InspectorSession(Opaque);
 
+#[repr(C)]
+struct RawV8InspectorSessionState(Opaque);
+
 pub struct V8InspectorSession {
   raw: UniqueRef<RawV8InspectorSession>,
   // this isn't actually used, but it needs to live
@@ -809,6 +844,17 @@ impl V8InspectorSession {
         self.raw.as_ptr(),
         message,
       );
+    }
+  }
+
+  pub fn state(&self) -> Vec<u8> {
+    unsafe {
+      let state = v8_inspector__V8InspectorSession__state(self.raw.as_ptr());
+      let len = v8_inspector__V8InspectorSession__State__size(state);
+      let mut bytes = vec![0; len];
+      v8_inspector__V8InspectorSession__State__copy(state, bytes.as_mut_ptr());
+      v8_inspector__V8InspectorSession__State__DELETE(state);
+      bytes
     }
   }
 
@@ -929,6 +975,16 @@ impl V8InspectorSession {
     }
   }
 
+  pub fn break_program(&self, reason: StringView, detail: StringView) {
+    unsafe {
+      v8_inspector__V8InspectorSession__breakProgram(
+        self.raw.as_ptr(),
+        reason,
+        detail,
+      );
+    }
+  }
+
   pub fn add_inspected_object(&self, inspectable: Inspectable) {
     unsafe {
       v8_inspector__V8InspectorSession__addInspectedObject(
@@ -936,6 +992,20 @@ impl V8InspectorSession {
         inspectable.raw.into_raw(),
       );
     }
+  }
+}
+
+pub fn compile_inspector_script<'s>(
+  scope: &PinScope<'s, '_>,
+  source: Local<'s, String>,
+) -> Option<Local<'s, UnboundScript>> {
+  unsafe {
+    scope.cast_local(|scope_data| {
+      v8_inspector__CompileInspectorScript(
+        scope_data.get_isolate_ptr(),
+        &*source,
+      )
+    })
   }
 }
 
@@ -1297,17 +1367,32 @@ impl V8Inspector {
     context: Local<Context>,
     context_group_id: i32,
     human_readable_name: StringView,
+    origin: StringView,
     aux_data: StringView,
   ) {
     unsafe {
-      v8_inspector__V8Inspector__contextCreated(
+      v8_inspector__V8Inspector__contextCreatedWithOrigin(
         self.raw(),
         &*context,
         context_group_id,
         human_readable_name,
+        origin,
         aux_data,
       );
     }
+  }
+
+  pub fn reset_context_group(&self, context_group_id: i32) {
+    unsafe {
+      v8_inspector__V8Inspector__resetContextGroup(
+        self.raw(),
+        context_group_id,
+      )
+    }
+  }
+
+  pub fn execution_context_id(context: Local<Context>) -> i32 {
+    unsafe { v8_inspector__V8ContextInfo__executionContextId(&*context) }
   }
 
   pub fn context_destroyed(&self, context: Local<Context>) {
