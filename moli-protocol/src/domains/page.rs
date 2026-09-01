@@ -2329,10 +2329,11 @@ pub(in crate::domains) async fn emit_top_level_history_traversal_activity_backgr
 pub(crate) async fn navigate_page_owned_top_level_location_background_events_async(
     conn: &mut CdpConnection,
     out: &mut Vec<BackgroundProtocolEvent>,
-    session_id: Option<&str>,
+    command_owner: &CommandOwnerScope,
     owner: &crate::conn::TargetPageResidenceIdentity,
     navigation: RendererDocumentSourcedTopLevelLocationNavigation,
 ) {
+    let session_id = command_owner.session_id();
     let source_document = navigation.source_document();
     if !conn.target_page_residence_identity_is_current_for_session(session_id, owner) {
         tracing::debug!(
@@ -2346,11 +2347,10 @@ pub(crate) async fn navigate_page_owned_top_level_location_background_events_asy
         );
         return;
     }
-    let command_owner = CommandOwnerScope::capture(conn, session_id);
     navigate_command_owner_from_renderer_request_background_events_async(
         conn,
         out,
-        command_owner,
+        command_owner.clone(),
         navigation.url(),
         navigation.request_method(),
         navigation.request_body(),
