@@ -2668,7 +2668,7 @@ mod tests {
         }
         assert!(
             active
-                .active_page_state()
+                .active_page_target()
                 .owner_state
                 .target_crash_state
                 .is_crashed()
@@ -2688,7 +2688,7 @@ mod tests {
         }
         assert!(
             parked
-                .parked_target_owner_state_or_default("TID-parked")
+                .background_target_owner_state_or_default_for_test("TID-parked")
                 .target_crash_state
                 .is_crashed()
         );
@@ -2701,7 +2701,7 @@ mod tests {
         browser_context.set_active_target_id("TID-active".to_owned());
         browser_context.attach_active_session("SID-active-primary".to_owned());
         browser_context
-            .active_page_state_mut()
+            .active_page_target_mut()
             .runtime_slot
             .set_page_attachment_id_for_test(1);
         browser_context.insert_page_target_host(crate::conn::PageTargetHost::with_url(
@@ -2801,7 +2801,7 @@ mod tests {
         }
         assert!(
             active
-                .active_page_state()
+                .active_page_target()
                 .fetch_owner
                 .has_pending_subresource_fetch_for_test("FETCH-active")
         );
@@ -2821,7 +2821,7 @@ mod tests {
         }
         assert!(
             parked
-                .parked_fetch_state("TID-parked")
+                .nonempty_background_fetch_state_for_test("TID-parked")
                 .expect("parked fetch state")
                 .has_pending_subresource_fetch_for_test("FETCH-parked")
         );
@@ -2859,14 +2859,14 @@ mod tests {
         }
         assert!(
             !active
-                .active_page_state()
+                .active_page_target()
                 .fetch_owner
                 .config_snapshot()
                 .is_enabled()
         );
         assert!(
             !active
-                .active_page_state()
+                .active_page_target()
                 .fetch_owner
                 .has_pending_subresource_fetch_for_test("FETCH-active")
         );
@@ -2895,17 +2895,21 @@ mod tests {
         }
         assert!(
             parked
-                .parked_page_session_state("TID-parked")
+                .non_default_background_page_target_for_test("TID-parked")
                 .is_none_or(|state| !state.fetch_owner.is_enabled())
         );
-        assert!(parked.parked_fetch_state("TID-parked").is_none());
+        assert!(
+            parked
+                .nonempty_background_fetch_state_for_test("TID-parked")
+                .is_none()
+        );
     }
 
     #[test]
     fn target_session_owner_mut_snapshots_active_and_parked_navigation_history() {
         let mut active = BrowserContext::new_with_page_for_test("BID-active", "TID-active");
         active
-            .active_page_state_mut()
+            .active_page_target_mut()
             .owner_state
             .record_loaded_page_navigation_history((
                 "https://active.example/".to_owned(),
@@ -2927,7 +2931,7 @@ mod tests {
         }
 
         let mut parked = parked_target_context();
-        parked.mutate_parked_target_owner_state("TID-parked", |owner_state| {
+        parked.mutate_background_target_owner_state_for_test("TID-parked", |owner_state| {
             owner_state.record_loaded_page_navigation_history((
                 "https://parked.example/".to_owned(),
                 "parked".to_owned(),
@@ -2953,7 +2957,7 @@ mod tests {
     fn target_session_owner_mut_prepares_active_navigation_request_preflight() {
         let mut active = BrowserContext::new_with_page_for_test("BID-active", "FRAME-0");
         active
-            .active_page_state_mut()
+            .active_page_target_mut()
             .runtime_slot
             .enable_primary_network_events();
         active.record_captured_response_body(
@@ -3014,7 +3018,7 @@ mod tests {
     fn target_session_owner_mut_observes_active_data_url_navigation_with_network_listener() {
         let mut active = BrowserContext::new_with_page_for_test("BID-active", "FRAME-0");
         active
-            .active_page_state_mut()
+            .active_page_target_mut()
             .runtime_slot
             .enable_primary_network_events();
         let mut owner = TargetSessionOwnerMut {
@@ -3052,9 +3056,9 @@ mod tests {
     #[test]
     fn target_session_owner_mut_prepares_background_navigation_request_preflight() {
         let mut parked = BrowserContext::new_with_page_for_test("BID-parked", "TID-active");
-        parked.active_page_state_mut().locale_override = Some("zh-CN".to_owned());
+        parked.active_page_target_mut().locale_override = Some("zh-CN".to_owned());
         parked
-            .active_page_state_mut()
+            .active_page_target_mut()
             .network_policy
             .set_browser_identity_override(test_browser_identity("Active-Only-UA"));
         parked.replace_default_browser_identity_override_for_test(test_browser_identity(
@@ -3065,7 +3069,7 @@ mod tests {
             Some("SID-parked".to_owned()),
             "about:blank".to_owned(),
         ));
-        parked.mutate_parked_page_session_state("TID-parked", |state| {
+        parked.mutate_background_page_target_for_test("TID-parked", |state| {
             state.runtime_slot.enable_primary_network_events();
             state
                 .network_policy
@@ -3172,7 +3176,7 @@ mod tests {
             Some("SID-parked".to_owned()),
             "about:blank".to_owned(),
         ));
-        parked.mutate_parked_page_session_state("TID-parked", |state| {
+        parked.mutate_background_page_target_for_test("TID-parked", |state| {
             state.runtime_slot.enable_primary_network_events();
         });
 
@@ -3212,13 +3216,13 @@ mod tests {
     #[test]
     fn target_session_owner_ref_snapshots_background_navigation_load_inputs() {
         let mut parked = BrowserContext::new_with_page_for_test("BID-parked", "TID-active");
-        parked.active_page_state_mut().locale_override = Some("zh-CN".to_owned());
+        parked.active_page_target_mut().locale_override = Some("zh-CN".to_owned());
         parked.insert_page_target_host(crate::conn::PageTargetHost::with_url(
             "TID-parked".to_owned(),
             Some("SID-parked".to_owned()),
             "https://parked.example/start".to_owned(),
         ));
-        parked.mutate_parked_page_session_state("TID-parked", |state| {
+        parked.mutate_background_page_target_for_test("TID-parked", |state| {
             state.set_base_locale_override(Some("fr-FR".to_owned()));
             state.set_base_timezone_override(Some("Europe/Paris".to_owned()));
             state.http_proxy_override = Some("http://proxy.example:8080".to_owned());
@@ -3246,7 +3250,7 @@ mod tests {
                 }],
             );
         });
-        parked.mutate_parked_target_owner_state("TID-parked", |owner_state| {
+        parked.mutate_background_target_owner_state_for_test("TID-parked", |owner_state| {
             owner_state.document_start_scripts.push((
                 "1".to_owned(),
                 DocumentStartScript {
@@ -3259,7 +3263,7 @@ mod tests {
                 },
             ));
         });
-        parked.mutate_parked_page_session_state("TID-parked", |state| {
+        parked.mutate_background_page_target_for_test("TID-parked", |state| {
             state.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
                 .upsert_runtime_binding_definition(
                     "fromParkedBinding".to_owned(),
@@ -3344,7 +3348,7 @@ mod tests {
             Some("SID-parked".to_owned()),
             "about:blank".to_owned(),
         ));
-        parked.mutate_parked_page_session_state("TID-parked", |state| {
+        parked.mutate_background_page_target_for_test("TID-parked", |state| {
             state.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
                 .page_session_state
                 .page_lifecycle_events = true;
@@ -3435,7 +3439,7 @@ mod tests {
             Some("SID-parked".to_owned()),
             "about:blank".to_owned(),
         ));
-        parked.mutate_parked_target_owner_state("TID-parked", |owner_state| {
+        parked.mutate_background_target_owner_state_for_test("TID-parked", |owner_state| {
             owner_state.record_loaded_page_navigation_history((
                 "https://old.example/".to_owned(),
                 "old".to_owned(),
@@ -3453,15 +3457,16 @@ mod tests {
                 .clear_pending_navigation_history_update()
                 .expect("background history update should clear");
         }
-        parked.mutate_parked_target_owner_state("TID-parked", |owner_state| {
+        parked.mutate_background_target_owner_state_for_test("TID-parked", |owner_state| {
             owner_state.record_loaded_page_navigation_history((
                 "https://new.example/".to_owned(),
                 "new".to_owned(),
             ));
         });
-        let (_, entries) = parked.mutate_parked_target_owner_state("TID-parked", |owner_state| {
-            owner_state.navigation_history_snapshot(None)
-        });
+        let (_, entries) = parked
+            .mutate_background_target_owner_state_for_test("TID-parked", |owner_state| {
+                owner_state.navigation_history_snapshot(None)
+            });
         assert_eq!(
             entries
                 .iter()
@@ -3517,9 +3522,10 @@ mod tests {
             target.page_attachment_id().is_some()
                 && target.page_attachment_id() != initial_attachment_id
         );
-        let (_, entries) = parked.mutate_parked_target_owner_state("TID-parked", |owner_state| {
-            owner_state.navigation_history_snapshot(None)
-        });
+        let (_, entries) = parked
+            .mutate_background_target_owner_state_for_test("TID-parked", |owner_state| {
+                owner_state.navigation_history_snapshot(None)
+            });
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].title, "background commit");
     }
@@ -3647,11 +3653,11 @@ mod tests {
             Some("SID-background".to_owned()),
             "about:blank".to_owned(),
         ));
-        browser_context.active_page_state_mut().devtools_sessions
+        browser_context.active_page_target_mut().devtools_sessions
             [moli_page_types::DevToolsSessionKey::Primary]
             .runtime_session_state
             .runtime_frontend_enabled = true;
-        browser_context.mutate_parked_page_session_state("TID-background", |state| {
+        browser_context.mutate_background_page_target_for_test("TID-background", |state| {
             state.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
                 .runtime_session_state
                 .inspector_enabled = true;
@@ -3763,7 +3769,7 @@ mod tests {
             "SID-runtime-disabled".to_owned(),
         ));
         browser_context
-            .active_page_state_mut()
+            .active_page_target_mut()
             .runtime_slot
             .set_page_attachment_id_for_test(41);
         conn.browser_context = Some(browser_context);
@@ -3857,7 +3863,7 @@ mod tests {
             Some("SID-background".to_owned()),
             "https://background.example/".to_owned(),
         ));
-        active.mutate_parked_page_session_state("TID-background", |state| {
+        active.mutate_background_page_target_for_test("TID-background", |state| {
             state.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
                 .page_session_state
                 .log_enabled = true;
@@ -3873,7 +3879,7 @@ mod tests {
         inactive.set_active_target_id("TID-inactive".to_owned());
         inactive.set_target_url("https://inactive.example/".to_owned());
         inactive
-            .active_page_state_mut()
+            .active_page_target_mut()
             .devtools_sessions
             .ensure_attached("SID-aux-inactive")
             .console_output_session_state
@@ -3986,7 +3992,7 @@ mod tests {
         ));
         assert!(
             browser_context
-                .parked_page_session_state("TID-background-dialog")
+                .non_default_background_page_target_for_test("TID-background-dialog")
                 .is_none(),
             "a background target with default protocol settings should not allocate parked overrides"
         );
@@ -4005,7 +4011,7 @@ mod tests {
         let browser_context = conn.browser_context.as_ref().expect("browser context");
         assert!(
             browser_context
-                .parked_page_session_state("TID-background-dialog")
+                .non_default_background_page_target_for_test("TID-background-dialog")
                 .is_none(),
             "clearing an empty dialog list should fold the temporary session state"
         );

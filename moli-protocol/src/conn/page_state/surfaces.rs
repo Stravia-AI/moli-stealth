@@ -282,9 +282,12 @@ impl BrowserContext {
         self.merged_extra_headers_for_target_policy(target_headers)
     }
 
-    pub(crate) fn effective_parked_extra_headers(&self, target_id: &str) -> Vec<(String, String)> {
+    pub(crate) fn effective_extra_headers_for_target(
+        &self,
+        target_id: &str,
+    ) -> Vec<(String, String)> {
         let target_headers = self
-            .parked_page_session_state(target_id)
+            .page_target(target_id)
             .map(|state| state.network_policy.extra_headers())
             .unwrap_or(&[]);
         self.merged_extra_headers_for_target_policy(target_headers)

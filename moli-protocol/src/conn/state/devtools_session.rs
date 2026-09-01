@@ -79,6 +79,14 @@ impl Default for DevToolsSessionRegistry {
 }
 
 impl DevToolsSessionRegistry {
+    pub(crate) fn key_for_wire_session_id(&self, session_id: &str) -> Option<DevToolsSessionKey> {
+        if self.primary_session_id() == Some(session_id) {
+            return Some(DevToolsSessionKey::Primary);
+        }
+        self.attached(session_id)
+            .map(|_| DevToolsSessionKey::Attached(session_id.to_owned()))
+    }
+
     pub(crate) fn primary_session_id(&self) -> Option<&str> {
         self.primary_session_id.as_deref()
     }

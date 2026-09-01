@@ -886,7 +886,7 @@ mod tests {
     use crate::conn::PageTargetHost;
 
     fn active_session_state_mut(browser_context: &mut BrowserContext) -> TargetSessionStateMut<'_> {
-        let state = browser_context.active_page_state_mut();
+        let state = browser_context.active_page_target_mut();
         TargetSessionStateMut {
             devtools_session_state: &mut state.devtools_sessions
                 [moli_page_types::DevToolsSessionKey::Primary],
@@ -962,7 +962,7 @@ mod tests {
         let mut active = BrowserContext::new_with_page_for_test("BID-active", "TID-active");
         {
             let network = &mut active
-                .active_page_state_mut()
+                .active_page_target_mut()
                 .devtools_sessions
                 .primary_mut()
                 .network_session_state;
@@ -973,7 +973,7 @@ mod tests {
             network.extra_headers = vec![("X-Test".to_owned(), "active".to_owned())];
         }
         active
-            .active_page_state_mut()
+            .active_page_target_mut()
             .refresh_devtools_network_policy();
         let active_offline = active_session_state_mut(&mut active).set_emulated_network_conditions(
             true,
@@ -983,50 +983,50 @@ mod tests {
             Some("cellular3g".to_owned()),
         );
 
-        assert!(active.active_page_state().network_policy.cache_disabled());
+        assert!(active.active_page_target().network_policy.cache_disabled());
         assert!(
             active
-                .active_page_state()
+                .active_page_target()
                 .network_policy
                 .bypass_service_worker()
         );
         assert_eq!(
             active
-                .active_page_state()
+                .active_page_target()
                 .network_policy
                 .blocked_url_patterns(),
             vec!["*://blocked.test/*"]
         );
         assert_eq!(
-            active.active_page_state().network_policy.extra_headers(),
+            active.active_page_target().network_policy.extra_headers(),
             vec![("X-Test".to_owned(), "active".to_owned())]
         );
         assert!(active_offline);
-        assert!(active.active_page_state().network_policy.network_offline());
+        assert!(active.active_page_target().network_policy.network_offline());
         assert_eq!(
             active
-                .active_page_state()
+                .active_page_target()
                 .network_policy
                 .emulated_network_latency(),
             25.0
         );
         assert_eq!(
             active
-                .active_page_state()
+                .active_page_target()
                 .network_policy
                 .emulated_download_throughput(),
             1024.0
         );
         assert_eq!(
             active
-                .active_page_state()
+                .active_page_target()
                 .network_policy
                 .emulated_upload_throughput(),
             256.0
         );
         assert_eq!(
             active
-                .active_page_state()
+                .active_page_target()
                 .network_policy
                 .emulated_connection_type(),
             Some("cellular3g")

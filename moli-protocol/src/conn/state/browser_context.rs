@@ -373,15 +373,6 @@ impl BrowserContext {
             .expect("BrowserContext has no active page target")
     }
 
-    #[cfg(test)]
-    pub(crate) fn active_page_state(&self) -> &PageTargetHost {
-        self.active_page_target()
-    }
-
-    pub(crate) fn active_page_state_mut(&mut self) -> &mut PageTargetHost {
-        self.active_page_target_mut()
-    }
-
     /// Parks a dialog only until the matching lightweight-popup target obtains
     /// a concrete protocol attachment.
     ///
@@ -1626,23 +1617,26 @@ impl BrowserContext {
             .is_some_and(|conditions| !conditions.navigator_online())
     }
 
-    pub(crate) fn effective_parked_network_conditions(
+    pub(crate) fn effective_network_conditions_for_target(
         &self,
         target_id: &str,
     ) -> Option<EmulatedNetworkConditions> {
-        self.parked_page_session_state(target_id)
+        self.page_target(target_id)
             .and_then(|state| state.network_conditions)
             .or(self.default_network_conditions)
             .or(self.global_network_conditions)
     }
 
-    pub(crate) fn effective_parked_network_offline(&self, target_id: &str) -> bool {
-        self.effective_parked_network_conditions(target_id)
+    pub(crate) fn effective_network_offline_for_target(&self, target_id: &str) -> bool {
+        self.effective_network_conditions_for_target(target_id)
             .is_some_and(|conditions| !conditions.navigator_online())
     }
 
-    pub(crate) fn effective_parked_locale_override_owned(&self, target_id: &str) -> Option<String> {
-        self.parked_page_session_state(target_id)
+    pub(crate) fn effective_locale_override_for_target_owned(
+        &self,
+        target_id: &str,
+    ) -> Option<String> {
+        self.page_target(target_id)
             .and_then(|state| state.locale_override.clone())
             .or_else(|| self.default_locale_override.clone())
     }
@@ -1699,10 +1693,9 @@ impl BrowserContext {
             && self.service_worker_targets.is_empty()
     }
 
+    #[cfg(test)]
     pub(crate) fn attach_active_session(&mut self, session_id: impl Into<String>) {
-        self.page_targets
-            .active_mut()
-            .expect("cannot attach a session without an active page target")
+        self.active_page_target_mut()
             .attach_session(session_id.into());
     }
 
@@ -1712,16 +1705,6 @@ impl BrowserContext {
 
     pub(crate) fn target_url(&self) -> &str {
         self.active_page_target().target_identity.url()
-    }
-
-    pub(crate) fn target_security_origin(&self) -> &str {
-        self.active_page_target().target_identity.security_origin()
-    }
-
-    pub(crate) fn target_secure_context_type(&self) -> &str {
-        self.active_page_target()
-            .target_identity
-            .secure_context_type()
     }
 
     pub(crate) fn set_target_url(&mut self, url: String) {

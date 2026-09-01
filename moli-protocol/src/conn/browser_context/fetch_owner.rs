@@ -207,9 +207,11 @@ fn remove_network_intercept_from_browser_context(
         .map(|target| target.target_id().to_owned())
         .collect::<Vec<_>>();
     for target_id in target_ids {
-        let removed = browser_context.mutate_parked_page_session_state(&target_id, |state| {
-            state.fetch_owner.remove_network_intercept(intercept_id)
-        });
+        let removed = browser_context
+            .page_target_mut(&target_id)
+            .expect("background target must remain registered")
+            .fetch_owner
+            .remove_network_intercept(intercept_id);
         if removed {
             return Ok(Some(None));
         }

@@ -1378,7 +1378,7 @@ async fn session_route_finds_browser_active_auxiliary_background_and_inactive_se
             Some("SID-inactive-background"),
             |bc, target_id| {
                 assert_eq!(bc.id, "BID-B");
-                bc.mutate_parked_page_session_state(target_id, |state| {
+                bc.mutate_background_page_target_for_test(target_id, |state| {
                     state.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
                         .console_output_session_state
                         .console_enabled = true;
@@ -1399,7 +1399,7 @@ async fn session_route_finds_browser_active_auxiliary_background_and_inactive_se
             |bc, target_id| {
                 assert_eq!(bc.id, "BID-B");
                 let mut console_enabled = false;
-                bc.mutate_parked_page_session_state(target_id, |state| {
+                bc.mutate_background_page_target_for_test(target_id, |state| {
                     console_enabled = state.devtools_sessions
                         [moli_page_types::DevToolsSessionKey::Primary]
                         .console_output_session_state
@@ -1483,7 +1483,7 @@ async fn attach_to_target_from_browser_session_creates_distinct_auxiliary_sessio
 
     let bc = ctx.conn.browser_context.as_ref().unwrap();
     assert!(
-        bc.active_page_state()
+        bc.active_page_target()
             .runtime_slot
             .has_auxiliary_network_events_for_session(target_session_id)
     );
@@ -1549,19 +1549,19 @@ async fn detach_from_target() {
     ctx.expect_result(11, json!({ "sessionId": sid }), None);
 
     let bc = ctx.conn.browser_context.as_mut().unwrap();
-    bc.active_page_state_mut().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+    bc.active_page_target_mut().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
         .page_session_state
         .page_lifecycle_events = true;
-    bc.active_page_state_mut().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+    bc.active_page_target_mut().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
         .runtime_session_state
         .runtime_frontend_enabled = true;
-    bc.active_page_state_mut().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+    bc.active_page_target_mut().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
         .runtime_session_state
         .inspector_enabled = true;
-    bc.active_page_state_mut()
+    bc.active_page_target_mut()
         .runtime_slot
         .enable_primary_network_events();
-    bc.active_page_state_mut()
+    bc.active_page_target_mut()
         .mutate_devtools_network_session_state(
             &moli_page_types::DevToolsSessionKey::Primary,
             |network| {
@@ -1571,8 +1571,8 @@ async fn detach_from_target() {
                 network.extra_headers = vec![("X-Test".into(), "1".into())];
             },
         );
-    bc.active_page_state_mut().css_enabled = true;
-    bc.active_page_state_mut().fetch_owner.configure(
+    bc.active_page_target_mut().css_enabled = true;
+    bc.active_page_target_mut().fetch_owner.configure(
         None,
         true,
         vec![crate::conn::FetchInterceptionPattern {
@@ -1589,43 +1589,43 @@ async fn detach_from_target() {
     let bc = ctx.conn.browser_context.as_ref().unwrap();
     assert!(!bc.has_active_session());
     assert!(
-        !bc.active_page_state().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+        !bc.active_page_target().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
             .page_session_state
             .page_lifecycle_events
     );
     assert!(
-        !bc.active_page_state().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+        !bc.active_page_target().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
             .runtime_session_state
             .runtime_frontend_enabled
     );
     assert!(
-        !bc.active_page_state().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+        !bc.active_page_target().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
             .runtime_session_state
             .inspector_enabled
     );
     assert!(
-        !bc.active_page_state()
+        !bc.active_page_target()
             .runtime_slot
             .primary_network_events_enabled()
     );
-    assert!(!bc.active_page_state().network_policy.cache_disabled());
+    assert!(!bc.active_page_target().network_policy.cache_disabled());
     assert!(
-        !bc.active_page_state()
+        !bc.active_page_target()
             .network_policy
             .bypass_service_worker()
     );
-    assert!(!bc.active_page_state().css_enabled);
-    assert!(!bc.active_page_state().fetch_owner.is_enabled());
-    assert!(!bc.active_page_state().fetch_owner.handle_auth_requests());
+    assert!(!bc.active_page_target().css_enabled);
+    assert!(!bc.active_page_target().fetch_owner.is_enabled());
+    assert!(!bc.active_page_target().fetch_owner.handle_auth_requests());
     assert!(
-        bc.active_page_state()
+        bc.active_page_target()
             .fetch_owner
             .config_snapshot()
             .patterns()
             .is_empty()
     );
     assert!(
-        bc.active_page_state()
+        bc.active_page_target()
             .network_policy
             .extra_headers()
             .is_empty()
@@ -1908,7 +1908,7 @@ async fn detach_from_target_removes_only_selected_session_document_start_scripts
             .browser_context
             .as_ref()
             .unwrap()
-            .active_page_state()
+            .active_page_target()
             .owner_state;
         assert_eq!(owner_state.document_start_scripts.len(), 2);
         assert!(
@@ -1959,7 +1959,7 @@ async fn detach_from_target_removes_only_selected_session_document_start_scripts
             .browser_context
             .as_ref()
             .unwrap()
-            .active_page_state()
+            .active_page_target()
             .owner_state;
         assert_eq!(owner_state.document_start_scripts.len(), 1);
         assert_eq!(
@@ -2007,7 +2007,7 @@ async fn page_renderer_inspector_session_count(ctx: &mut TestContext) -> u64 {
         .conn
         .browser_context
         .as_mut()
-        .and_then(|bc| bc.active_page_state_mut().runtime_slot.loaded_page_mut())
+        .and_then(|bc| bc.active_page_target_mut().runtime_slot.loaded_page_mut())
         .expect("active target should still have a loaded page")
         .runtime_heap_usage_async()
         .await
@@ -2140,7 +2140,7 @@ async fn detach_from_target_aborts_paused_request_stage_navigation() {
     let mut bc = BrowserContext::new("BID-9".into());
     bc.set_active_target_id("TID-000000000A");
     bc.attach_active_session("SID-1");
-    bc.active_page_state_mut()
+    bc.active_page_target_mut()
         .runtime_slot
         .enable_primary_network_events();
     ctx.conn.browser_context = Some(bc);
@@ -2193,13 +2193,13 @@ async fn detach_from_target_aborts_paused_request_stage_navigation() {
     assert!(!bc.has_active_session());
     assert_eq!(bc.active_target_id(), Some("TID-000000000A"));
     assert!(
-        !bc.active_page_state()
+        !bc.active_page_target()
             .fetch_owner
             .has_pending_fetch_state_for_test()
     );
-    assert!(!bc.active_page_state().fetch_owner.is_enabled());
+    assert!(!bc.active_page_target().fetch_owner.is_enabled());
     assert!(
-        !bc.active_page_state()
+        !bc.active_page_target()
             .runtime_slot
             .primary_network_events_enabled()
     );
@@ -2213,19 +2213,19 @@ async fn set_auto_attach_false_detaches_existing_target() {
     load_bc_with_target(&mut ctx, "BID-9", "TID-000000000D");
     let bc = ctx.conn.browser_context.as_mut().unwrap();
     bc.attach_active_session("SID-1");
-    bc.active_page_state_mut().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+    bc.active_page_target_mut().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
         .page_session_state
         .page_lifecycle_events = true;
-    bc.active_page_state_mut().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+    bc.active_page_target_mut().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
         .runtime_session_state
         .runtime_frontend_enabled = true;
-    bc.active_page_state_mut().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+    bc.active_page_target_mut().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
         .runtime_session_state
         .inspector_enabled = true;
-    bc.active_page_state_mut()
+    bc.active_page_target_mut()
         .runtime_slot
         .enable_primary_network_events();
-    bc.active_page_state_mut()
+    bc.active_page_target_mut()
         .mutate_devtools_network_session_state(
             &moli_page_types::DevToolsSessionKey::Primary,
             |network| {
@@ -2235,8 +2235,8 @@ async fn set_auto_attach_false_detaches_existing_target() {
                 network.extra_headers = vec![("X-Test".into(), "1".into())];
             },
         );
-    bc.active_page_state_mut().css_enabled = true;
-    bc.active_page_state_mut().fetch_owner.configure(
+    bc.active_page_target_mut().css_enabled = true;
+    bc.active_page_target_mut().fetch_owner.configure(
         None,
         true,
         vec![crate::conn::FetchInterceptionPattern {
@@ -2285,43 +2285,43 @@ async fn set_auto_attach_false_detaches_existing_target() {
     assert!(!bc.has_active_session());
     assert_eq!(bc.active_target_id(), Some("TID-000000000D"));
     assert!(
-        !bc.active_page_state().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+        !bc.active_page_target().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
             .page_session_state
             .page_lifecycle_events
     );
     assert!(
-        !bc.active_page_state().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+        !bc.active_page_target().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
             .runtime_session_state
             .runtime_frontend_enabled
     );
     assert!(
-        !bc.active_page_state().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+        !bc.active_page_target().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
             .runtime_session_state
             .inspector_enabled
     );
     assert!(
-        !bc.active_page_state()
+        !bc.active_page_target()
             .runtime_slot
             .primary_network_events_enabled()
     );
-    assert!(!bc.active_page_state().network_policy.cache_disabled());
+    assert!(!bc.active_page_target().network_policy.cache_disabled());
     assert!(
-        !bc.active_page_state()
+        !bc.active_page_target()
             .network_policy
             .bypass_service_worker()
     );
-    assert!(!bc.active_page_state().css_enabled);
-    assert!(!bc.active_page_state().fetch_owner.is_enabled());
-    assert!(!bc.active_page_state().fetch_owner.handle_auth_requests());
+    assert!(!bc.active_page_target().css_enabled);
+    assert!(!bc.active_page_target().fetch_owner.is_enabled());
+    assert!(!bc.active_page_target().fetch_owner.handle_auth_requests());
     assert!(
-        bc.active_page_state()
+        bc.active_page_target()
             .fetch_owner
             .config_snapshot()
             .patterns()
             .is_empty()
     );
     assert!(
-        bc.active_page_state()
+        bc.active_page_target()
             .network_policy
             .extra_headers()
             .is_empty()
