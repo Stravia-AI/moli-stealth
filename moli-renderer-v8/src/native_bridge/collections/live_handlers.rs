@@ -28,7 +28,7 @@ pub(in crate::native_bridge::collections) fn live_collection_indexed_setter(
     index: u32,
     value: v8::Local<'_, v8::Value>,
     args: v8::PropertyCallbackArguments<'_>,
-    mut rv: v8::ReturnValue<'_, ()>,
+    mut rv: v8::ReturnValue<'_, v8::Boolean>,
 ) -> v8::Intercepted {
     let Ok((_runtime_ptr, descriptor)) =
         live_collection_descriptor_from_object(scope, args.holder())
@@ -121,7 +121,7 @@ pub(in crate::native_bridge::collections) fn live_collection_indexed_definer(
     index: u32,
     descriptor: &v8::PropertyDescriptor,
     args: v8::PropertyCallbackArguments<'_>,
-    mut rv: v8::ReturnValue<'_, ()>,
+    mut rv: v8::ReturnValue<'_, v8::Boolean>,
 ) -> v8::Intercepted {
     let Ok((runtime_ptr, collection)) =
         live_collection_descriptor_from_object(scope, args.holder())
@@ -258,7 +258,7 @@ pub(in crate::native_bridge::collections) fn live_collection_named_setter(
     key: v8::Local<'_, v8::Name>,
     _value: v8::Local<'_, v8::Value>,
     args: v8::PropertyCallbackArguments<'_>,
-    mut rv: v8::ReturnValue<'_, ()>,
+    mut rv: v8::ReturnValue<'_, v8::Boolean>,
 ) -> v8::Intercepted {
     if !live_collection_has_named_property(scope, key, args.holder()) {
         return v8::Intercepted::kNo;
@@ -317,7 +317,7 @@ pub(in crate::native_bridge::collections) fn live_collection_named_definer(
     key: v8::Local<'_, v8::Name>,
     _descriptor: &v8::PropertyDescriptor,
     args: v8::PropertyCallbackArguments<'_>,
-    mut rv: v8::ReturnValue<'_, ()>,
+    mut rv: v8::ReturnValue<'_, v8::Boolean>,
 ) -> v8::Intercepted {
     if !live_collection_has_named_property(scope, key, args.holder()) {
         return v8::Intercepted::kNo;
@@ -424,7 +424,7 @@ pub(in crate::native_bridge::collections) fn static_handle_collection_indexed_se
     _index: u32,
     _value: v8::Local<'_, v8::Value>,
     _args: v8::PropertyCallbackArguments<'_>,
-    mut rv: v8::ReturnValue<'_, ()>,
+    mut rv: v8::ReturnValue<'_, v8::Boolean>,
 ) -> v8::Intercepted {
     rv.set_bool(false);
     v8::Intercepted::kYes
@@ -478,7 +478,7 @@ pub(in crate::native_bridge::collections) fn static_handle_collection_indexed_de
     _index: u32,
     _descriptor: &v8::PropertyDescriptor,
     _args: v8::PropertyCallbackArguments<'_>,
-    mut rv: v8::ReturnValue<'_, ()>,
+    mut rv: v8::ReturnValue<'_, v8::Boolean>,
 ) -> v8::Intercepted {
     rv.set_bool(false);
     v8::Intercepted::kYes

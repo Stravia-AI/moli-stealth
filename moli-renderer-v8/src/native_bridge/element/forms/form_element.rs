@@ -693,7 +693,7 @@ pub(in crate::native_bridge) fn form_named_definer(
     key: v8::Local<'_, v8::Name>,
     _desc: &v8::PropertyDescriptor,
     args: v8::PropertyCallbackArguments<'_>,
-    _rv: v8::ReturnValue<'_, ()>,
+    _rv: v8::ReturnValue<'_, v8::Boolean>,
 ) -> v8::Intercepted {
     let Ok((runtime_ptr, handle)) = node_runtime_and_handle_from_object(scope, args.holder())
     else {
@@ -849,7 +849,7 @@ pub(in crate::native_bridge) fn form_indexed_setter(
     index: u32,
     _value: v8::Local<'_, v8::Value>,
     args: v8::PropertyCallbackArguments<'_>,
-    mut rv: v8::ReturnValue<'_, ()>,
+    mut rv: v8::ReturnValue<'_, v8::Boolean>,
 ) -> v8::Intercepted {
     let Ok((runtime_ptr, form_handle)) = node_runtime_and_handle_from_object(scope, args.holder())
     else {
@@ -932,7 +932,7 @@ pub(in crate::native_bridge) fn form_indexed_definer(
     index: u32,
     _desc: &v8::PropertyDescriptor,
     args: v8::PropertyCallbackArguments<'_>,
-    mut rv: v8::ReturnValue<'_, ()>,
+    mut rv: v8::ReturnValue<'_, v8::Boolean>,
 ) -> v8::Intercepted {
     let Ok((runtime_ptr, form_handle)) = node_runtime_and_handle_from_object(scope, args.holder())
     else {

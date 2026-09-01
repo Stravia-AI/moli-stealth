@@ -23,7 +23,7 @@ impl ScriptVm {
                     inspector,
                     PageInspectorSessionTarget::Frontend(inspector_session_id),
                     |session, _, _| {
-                        let unwrapped = session
+                        let (value, context, _object_group) = session
                             .unwrap_object(
                                 scope,
                                 v8::inspector::StringView::from(object_id.as_bytes()),
@@ -36,10 +36,10 @@ impl ScriptVm {
                                     .unwrap_or_else(|| "Invalid remote object id".to_owned());
                                 anyhow!(message)
                             })?;
-                        let Ok(object) = v8::Local::<v8::Object>::try_from(unwrapped.value) else {
+                        let Ok(object) = v8::Local::<v8::Object>::try_from(value) else {
                             bail!("Object id doesn't reference a Blob");
                         };
-                        let scope = &mut v8::ContextScope::new(scope, unwrapped.context);
+                        let scope = &mut v8::ContextScope::new(scope, context);
                         crate::blob::blob_uuid_from_object(scope, object)
                             .ok_or_else(|| anyhow!("Object id doesn't reference a Blob"))
                     },

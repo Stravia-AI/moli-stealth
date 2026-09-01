@@ -141,18 +141,16 @@ pub(super) unsafe extern "C" fn wasm_code_generation_check_callback(
     host.allows_wasm_code_generation_by_csp(scope)
 }
 
-pub(super) unsafe extern "C" fn string_code_generation_check_callback(
-    context: v8::Local<'_, v8::Context>,
-    source: v8::Local<'_, v8::Value>,
+pub(super) fn string_code_generation_check_callback<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    source: v8::Local<'s, v8::Value>,
     is_code_like: bool,
-    modified_source: *mut *const v8::String,
-) -> bool {
-    v8::callback_scope!(unsafe scope, context);
+) -> v8::ModifyCodeGenerationFromStringsResult<'s> {
     let Some(host_ptr) = context_host_ptr_from_global_bridge(scope) else {
-        return true;
+        return code_generation_result(true, None);
     };
     if crate::context_bootstrap::consume_internal_javascript_url_eval(scope) {
-        return true;
+        return code_generation_result(true, None);
     }
     let requires_trusted_types_for_script =
         unsafe { &*host_ptr }.requires_trusted_types_for_script(scope);
@@ -215,7 +213,7 @@ pub(super) unsafe extern "C" fn string_code_generation_check_callback(
             }
         }
     };
-    match action {
+    let codegen_allowed = match action {
         StringCodeGenerationPolicyAction::AllowWithoutCsp => true,
         StringCodeGenerationPolicyAction::CheckCsp {
             allow_trusted_types_eval,
@@ -224,21 +222,31 @@ pub(super) unsafe extern "C" fn string_code_generation_check_callback(
             if !unsafe { &mut *host_ptr }
                 .allows_eval_code_generation_by_csp(scope, allow_trusted_types_eval)
             {
-                return false;
+                return code_generation_result(false, None);
             }
-            if let Some(replacement) = replacement {
-                let Some(replacement) = v8::String::new(scope, &replacement) else {
-                    return false;
-                };
-                if !modified_source.is_null() {
-                    unsafe {
-                        *modified_source = &*replacement;
-                    }
+            let replacement = match replacement {
+                Some(replacement) => {
+                    let Some(replacement) = v8::String::new(scope, &replacement) else {
+                        return code_generation_result(false, None);
+                    };
+                    Some(replacement)
                 }
-            }
-            true
+                None => None,
+            };
+            return code_generation_result(true, replacement);
         }
         StringCodeGenerationPolicyAction::Block => false,
+    };
+    code_generation_result(codegen_allowed, None)
+}
+
+fn code_generation_result<'s>(
+    codegen_allowed: bool,
+    modified_source: Option<v8::Local<'s, v8::String>>,
+) -> v8::ModifyCodeGenerationFromStringsResult<'s> {
+    v8::ModifyCodeGenerationFromStringsResult {
+        codegen_allowed,
+        modified_source,
     }
 }
 

@@ -8,7 +8,7 @@ edition = "2024"
 moli-v8-util = { path = "../moli-v8-util" }
 moli-webidl-callback = { path = "../moli-webidl-callback" }
 moli-webidl-derive = { path = "../moli-webidl-derive" }
-v8 = "146.8.0"
+v8 = "152.2.0"
 
 [dev-dependencies]
 moli-v8-test-util = { path = "../moli-v8-test-util" }

@@ -176,7 +176,7 @@ pub(in crate::native_bridge::collections) fn options_collection_indexed_setter(
     index: u32,
     value: v8::Local<'_, v8::Value>,
     args: v8::PropertyCallbackArguments<'_>,
-    _rv: v8::ReturnValue<'_, ()>,
+    _rv: v8::ReturnValue<'_, v8::Boolean>,
 ) -> v8::Intercepted {
     let Ok((runtime_ptr, descriptor)) =
         live_collection_descriptor_from_object(scope, args.holder())

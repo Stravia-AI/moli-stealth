@@ -230,7 +230,7 @@ pub(in crate::native_bridge) fn select_indexed_setter<'s>(
     index: u32,
     value: v8::Local<'s, v8::Value>,
     args: v8::PropertyCallbackArguments<'s>,
-    _rv: v8::ReturnValue<'_, ()>,
+    _rv: v8::ReturnValue<'_, v8::Boolean>,
 ) -> v8::Intercepted {
     let Ok((runtime_ptr, select_handle)) =
         node_runtime_and_handle_from_object_or_detached(scope, args.holder())
@@ -350,7 +350,7 @@ pub(in crate::native_bridge) fn select_indexed_definer<'s>(
     index: u32,
     descriptor: &v8::PropertyDescriptor,
     args: v8::PropertyCallbackArguments<'s>,
-    mut rv: v8::ReturnValue<'_, ()>,
+    mut rv: v8::ReturnValue<'_, v8::Boolean>,
 ) -> v8::Intercepted {
     let Ok((runtime_ptr, select_handle)) =
         node_runtime_and_handle_from_object_or_detached(scope, args.holder())

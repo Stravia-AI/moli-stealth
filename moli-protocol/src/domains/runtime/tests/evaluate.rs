@@ -549,11 +549,17 @@ async fn runtime_agent_configuration_is_restored_on_replacement_page_isolate() {
         .browser_context
         .as_ref()
         .expect("browser context should exist");
+    let v8_state_before_navigation = browser_context.devtools_sessions
+        [moli_page_types::DevToolsSessionKey::Primary]
+        .inspector_session_state
+        .v8_state
+        .clone()
+        .expect("successful Runtime agent commands must persist an opaque V8 state cookie");
     assert!(
-        browser_context.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
-            .inspector_session_state
-            .v8_state
-            .is_some(),
+        v8_state_before_navigation
+            .as_bytes()
+            .windows(b"customObjectFormatterEnabled".len())
+            .any(|window| window == b"customObjectFormatterEnabled"),
         "successful Runtime agent commands must persist an opaque V8 state cookie"
     );
 
@@ -568,11 +574,27 @@ async fn runtime_agent_configuration_is_restored_on_replacement_page_isolate() {
         navigate["result"]["frameId"].is_string(),
         "navigation should rebuild the Inspector backend with Runtime configuration: {navigate:?}"
     );
+    let v8_state_after_navigation = ctx
+        .conn
+        .browser_context
+        .as_ref()
+        .expect("browser context should exist")
+        .devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+        .inspector_session_state
+        .v8_state
+        .as_ref()
+        .expect("replacement Inspector session should publish its restored state");
+    assert_eq!(
+        v8_state_after_navigation.as_bytes(),
+        v8_state_before_navigation.as_bytes(),
+        "replacement V8 session should preserve the opaque Runtime configuration cookie"
+    );
 
     ctx.process_async(json!({
         "id": 11_022,
         "method": "Runtime.evaluate",
         "params": {
+            "generatePreview": true,
             "expression": r#"(() => {
   globalThis.devtoolsFormatters = [{
     header(value) {

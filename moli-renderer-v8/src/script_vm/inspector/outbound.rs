@@ -1,4 +1,3 @@
-use super::remote_objects::InspectorRemoteObjectCompleter;
 use crate::devtools::pause::{
     RendererInspectorPauseNotificationRoute, RendererInspectorPausePrefaceGuard,
     RendererInspectorSessionOutboundRoute,
@@ -68,7 +67,6 @@ pub(in crate::script_vm) struct InspectorOutbound {
     output_journal: Option<RendererTurnOutputJournal>,
     messages: SharedInspectorOutboundMessageState,
     response_routing: SharedInspectorResponseRoutingState,
-    remote_objects: InspectorRemoteObjectCompleter,
     session_route: Rc<RefCell<Option<RendererInspectorSessionOutboundRoute>>>,
 }
 
@@ -86,7 +84,6 @@ impl InspectorOutbound {
             output_journal: None,
             messages: Rc::new(RefCell::new(InspectorOutboundMessageState::default())),
             response_routing: Rc::new(RefCell::new(InspectorResponseRoutingState::default())),
-            remote_objects: InspectorRemoteObjectCompleter::default(),
             session_route: Rc::new(RefCell::new(None)),
         }
     }
@@ -110,10 +107,6 @@ impl InspectorOutbound {
     ) -> Self {
         self.output_journal = output_journal;
         self
-    }
-
-    pub(super) fn bind_inspector_session(&self, session: &Rc<v8::inspector::V8InspectorSession>) {
-        self.remote_objects.bind_session(session);
     }
 }
 
@@ -152,7 +145,6 @@ impl InspectorOutbound {
         }
         let mut messages = self.messages.borrow_mut();
         messages.messages.clear();
-        self.remote_objects.clear_session();
         if let Some(route) = self.session_route.borrow_mut().take() {
             route.detach_session();
         }
@@ -166,10 +158,7 @@ impl InspectorOutbound {
         let message_units = view.len();
         let message_width = if view.is_8bit() { 8 } else { 16 };
         match moli_v8_util::decode_inspector_protocol_message(view) {
-            Ok(mut value) => {
-                self.remote_objects.complete_message(&mut value);
-                self.push_value(value);
-            }
+            Ok(value) => self.push_value(value),
             Err(error) => {
                 let raw = moli_v8_util::inspector_protocol_message_text(view);
                 tracing::warn!(target: "moli::cdp::inspector",
@@ -191,10 +180,7 @@ impl InspectorOutbound {
         let message_units = view.len();
         let message_width = if view.is_8bit() { 8 } else { 16 };
         match moli_v8_util::decode_inspector_protocol_message(view) {
-            Ok(mut value) => {
-                self.remote_objects.complete_message(&mut value);
-                self.push_response_value(call_id, value);
-            }
+            Ok(value) => self.push_response_value(call_id, value),
             Err(error) => {
                 let raw = moli_v8_util::inspector_protocol_message_text(view);
                 tracing::warn!(target: "moli::cdp::inspector",

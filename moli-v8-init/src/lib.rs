@@ -25,7 +25,7 @@ pub fn ensure_v8_initialized_with_flags(
         if let Some(flags) = flags {
             v8::V8::set_flags_from_string(flags);
         }
-        v8::icu::set_common_data_77(deno_core_icudata::ICU_DATA)
+        v8::icu::set_common_data_78(deno_core_icudata::ICU_DATA)
             .expect("V8 ICU data should initialize");
         let platform = create_platform();
         v8::V8::initialize_platform(platform);

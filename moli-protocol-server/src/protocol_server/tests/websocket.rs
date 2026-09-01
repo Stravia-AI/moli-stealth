@@ -4868,6 +4868,7 @@ async fn websocket_cdp_pending_awaitpromise_does_not_block_later_command() {
                 "params": {
                     "expression": "new Promise(() => {})",
                     "awaitPromise": true,
+                    "objectGroup": "pending-await-gc",
                     "returnByValue": true
                 }
             })
@@ -4914,6 +4915,33 @@ async fn websocket_cdp_pending_awaitpromise_does_not_block_later_command() {
         .send(WsMessage::Text(
             json!({
                 "id": 8_u64,
+                "method": "Runtime.releaseObjectGroup",
+                "sessionId": session_id,
+                "params": {
+                    "objectGroup": "pending-await-gc"
+                }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .expect("release the pending Runtime.evaluate object group");
+    messages.extend(
+        timeout(Duration::from_secs(1), recv_until_id(&mut socket, 8))
+            .await
+            .expect("Runtime.releaseObjectGroup should complete"),
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| { message["id"] == json!(8_u64) && message["result"] == json!({}) }),
+        "Runtime.releaseObjectGroup should succeed while awaitPromise remains pending: {messages:#?}"
+    );
+
+    socket
+        .send(WsMessage::Text(
+            json!({
+                "id": 9_u64,
                 "method": "HeapProfiler.collectGarbage",
                 "sessionId": session_id
             })
@@ -4923,7 +4951,7 @@ async fn websocket_cdp_pending_awaitpromise_does_not_block_later_command() {
         .await
         .expect("collect an unreachable pending Runtime.evaluate promise");
     messages.extend(
-        timeout(Duration::from_secs(1), recv_until_id(&mut socket, 8))
+        timeout(Duration::from_secs(1), recv_until_id(&mut socket, 9))
             .await
             .expect("HeapProfiler.collectGarbage should complete"),
     );
@@ -4936,7 +4964,7 @@ async fn websocket_cdp_pending_awaitpromise_does_not_block_later_command() {
     assert_eq!(
         collected_responses.len(),
         1,
-        "an unreachable pending promise should receive exactly one terminal response after explicit GC: {messages:#?}"
+        "a released unreachable pending promise should receive exactly one terminal response after explicit GC: {messages:#?}"
     );
     let (collected_index, collected) = collected_responses[0];
     assert_eq!(collected["error"]["code"], json!(-32000), "{collected:?}");
@@ -4947,7 +4975,7 @@ async fn websocket_cdp_pending_awaitpromise_does_not_block_later_command() {
     );
     let garbage_collection_index = messages
         .iter()
-        .position(|message| message["id"] == json!(8_u64))
+        .position(|message| message["id"] == json!(9_u64))
         .expect("HeapProfiler.collectGarbage response");
     assert!(
         collected_index < garbage_collection_index,
@@ -9474,6 +9502,103 @@ async fn websocket_cdp_runtime_awaitpromise_same_owner_turn_style_node_keeps_nod
         json!("node"),
         "same-turn deferred Runtime response must preserve DOM node subtype: {response:#?}"
     );
+
+    let _ = socket.close(None).await;
+    protocol_server.abort();
+}
+
+#[tokio::test]
+async fn websocket_cdp_remote_objects_classify_cross_frame_nodes_at_v8_boundary() {
+    async fn parent() -> impl IntoResponse {
+        (
+            [(axum::http::header::CONTENT_TYPE.as_str(), "text/html")],
+            "<!doctype html><html><body><iframe src=\"/child\"></iframe></body></html>",
+        )
+    }
+
+    async fn child() -> impl IntoResponse {
+        (
+            [(axum::http::header::CONTENT_TYPE.as_str(), "text/html")],
+            "<!doctype html><html><body id=\"child-body\">child</body></html>",
+        )
+    }
+
+    let fixture_app = Router::new()
+        .route("/parent", get(parent))
+        .route("/child", get(child));
+    let (fixture_addr, _fixture_server) =
+        spawn_dedicated_fixture_server(fixture_app, "runtime-cross-frame-node-subtype");
+
+    let (cdp_addr, protocol_server) = spawn_test_protocol_server().await;
+    let (mut socket, _) = connect_async(format!(
+        "ws://{cdp_addr}/devtools/browser/{DEFAULT_BROWSER_ID}"
+    ))
+    .await
+    .expect("connect to cdp websocket");
+    let page_url = format!("http://{fixture_addr}/parent");
+    let session_id = cdp_create_default_session_and_navigate(&mut socket, &page_url).await;
+
+    let direct = send_cdp_command(
+        &mut socket,
+        20,
+        "Runtime.evaluate",
+        Some(&session_id),
+        json!({
+            "expression": "document.querySelector('iframe').contentDocument.body"
+        }),
+    )
+    .await;
+    let direct = direct
+        .iter()
+        .find(|message| message["id"] == json!(20_u64))
+        .expect("cross-frame Runtime.evaluate response");
+    let direct_object = &direct["result"]["result"];
+    assert_eq!(direct_object["type"], json!("object"));
+    assert_eq!(direct_object["subtype"], json!("node"));
+    assert_eq!(direct_object["className"], json!("HTMLBodyElement"));
+    assert_eq!(direct_object["description"], json!("HTMLBodyElement"));
+    assert!(direct_object["objectId"].is_string());
+
+    let container = send_cdp_command(
+        &mut socket,
+        21,
+        "Runtime.evaluate",
+        Some(&session_id),
+        json!({
+            "expression": "({ child: document.querySelector('iframe').contentDocument.body })"
+        }),
+    )
+    .await;
+    let container_id = container
+        .iter()
+        .find(|message| message["id"] == json!(21_u64))
+        .and_then(|message| message["result"]["result"]["objectId"].as_str())
+        .expect("container objectId")
+        .to_owned();
+    let properties = send_cdp_command(
+        &mut socket,
+        22,
+        "Runtime.getProperties",
+        Some(&session_id),
+        json!({ "objectId": container_id, "ownProperties": true }),
+    )
+    .await;
+    let child = properties
+        .iter()
+        .find(|message| message["id"] == json!(22_u64))
+        .and_then(|message| message["result"]["result"].as_array())
+        .and_then(|properties| {
+            properties
+                .iter()
+                .find(|property| property["name"] == json!("child"))
+        })
+        .map(|property| &property["value"])
+        .expect("cross-frame child property");
+    assert_eq!(child["type"], json!("object"));
+    assert_eq!(child["subtype"], json!("node"));
+    assert_eq!(child["className"], json!("HTMLBodyElement"));
+    assert_eq!(child["description"], json!("HTMLBodyElement"));
+    assert!(child["objectId"].is_string());
 
     let _ = socket.close(None).await;
     protocol_server.abort();

@@ -406,6 +406,20 @@ fn build_moli_v8_ext(sources: &[PathBuf]) {
     .include("v8/include")
     .std("c++20")
     .flag_if_supported("-w");
+  // These definitions change V8's public header ABI and must match the
+  // prebuilt archive (or the GN configuration used for a source build).
+  if env::var("CARGO_FEATURE_V8_ENABLE_POINTER_COMPRESSION").is_ok() {
+    build
+      .define("V8_COMPRESS_POINTERS", None)
+      .define("V8_COMPRESS_POINTERS_IN_SHARED_CAGE", None)
+      .define("V8_31BIT_SMIS_ON_64BIT_ARCH", None);
+  }
+  if env::var("CARGO_FEATURE_V8_ENABLE_SANDBOX").is_ok() {
+    build.define("V8_ENABLE_SANDBOX", None);
+  }
+  if env::var("CARGO_FEATURE_V8_ENABLE_V8_CHECKS").is_ok() {
+    build.define("V8_ENABLE_CHECKS", None);
+  }
   let compiler = build.get_compiler();
   if compiler.is_like_msvc() && !compiler.is_like_clang_cl() {
     build.flag("/Zc:__cplusplus");

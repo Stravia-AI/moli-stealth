@@ -9,7 +9,7 @@ crossbeam-utils = "0.8.21"
 parking_lot = "0.12"
 tokio = { version = "1.51.0", features = ["rt", "sync", "time"] }
 tracing = "0.1.41"
-v8 = "146.8.0"
+v8 = "152.2.0"
 
 [dev-dependencies]
 moli-v8-init = { path = "../moli-v8-init" }

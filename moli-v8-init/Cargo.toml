@@ -5,8 +5,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-deno_core_icudata = "0.77.0"
-v8 = "146.8.0"
+deno_core_icudata = "0.78.0"
+v8 = "152.2.0"
 
 [lints]
 workspace = true

@@ -597,7 +597,7 @@ unsafe extern "C" fn window_access_check_callback(
     accessed_object: v8::Local<'_, v8::Object>,
     _data: v8::Local<'_, v8::Value>,
 ) -> bool {
-    let scope = std::pin::pin!(unsafe { v8::CallbackScope::new(accessed_object) });
+    let scope = std::pin::pin!(unsafe { v8::CallbackScope::new(accessing_context) });
     let scope = &mut scope.init();
     let Some(accessed_context) = accessed_object.get_creation_context(scope) else {
         return false;
@@ -2211,7 +2211,7 @@ fn child_window_cross_origin_named_setter<'s>(
     key: v8::Local<'s, v8::Name>,
     value: v8::Local<'s, v8::Value>,
     args: v8::PropertyCallbackArguments<'s>,
-    _rv: v8::ReturnValue<'_, ()>,
+    _rv: v8::ReturnValue<'_, v8::Boolean>,
 ) -> v8::Intercepted {
     let Some(surface) = child_window_cross_origin_access_surface(scope, args.holder()) else {
         return v8::Intercepted::kNo;
@@ -2310,7 +2310,7 @@ fn child_window_cross_origin_indexed_setter<'s>(
     _index: u32,
     _value: v8::Local<'s, v8::Value>,
     _args: v8::PropertyCallbackArguments<'s>,
-    _rv: v8::ReturnValue<'_, ()>,
+    _rv: v8::ReturnValue<'_, v8::Boolean>,
 ) -> v8::Intercepted {
     let _ = scope;
     v8::Intercepted::kNo

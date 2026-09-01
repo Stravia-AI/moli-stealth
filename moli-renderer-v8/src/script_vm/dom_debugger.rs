@@ -51,7 +51,7 @@ impl ScriptVm {
                     inspector,
                     PageInspectorSessionTarget::Frontend(inspector_session_id),
                     |session, outbound, _| {
-                        let unwrapped = match session.unwrap_object(
+                        let (value, source_context, object_group) = match session.unwrap_object(
                             scope,
                             v8::inspector::StringView::from(object_id.as_bytes()),
                         ) {
@@ -62,15 +62,12 @@ impl ScriptVm {
                                 ));
                             }
                         };
-                        let object_group = unwrapped
-                            .object_group
+                        let object_group = object_group
                             .as_ref()
                             .map(|group| format!("{}", group.string()))
                             .unwrap_or_default();
-                        let source_context = unwrapped.context;
                         let scope = &mut v8::ContextScope::new(scope, source_context);
-                        let Ok(source_object) =
-                            v8::Local::<v8::Object>::try_from(unwrapped.value)
+                        let Ok(source_object) = v8::Local::<v8::Object>::try_from(value)
                         else {
                             return Ok(RendererDomDebuggerEventListenersResolution::Found(
                                 Vec::new(),

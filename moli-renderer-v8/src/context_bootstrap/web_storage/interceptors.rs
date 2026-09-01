@@ -73,7 +73,7 @@ pub(super) fn storage_named_setter(
     key: v8::Local<'_, v8::Name>,
     value: v8::Local<'_, v8::Value>,
     args: v8::PropertyCallbackArguments<'_>,
-    _rv: v8::ReturnValue<'_, ()>,
+    _rv: v8::ReturnValue<'_, v8::Boolean>,
 ) -> v8::Intercepted {
     let Ok(key_string) = v8::Local::<v8::String>::try_from(key) else {
         return v8::Intercepted::kNo;
@@ -188,7 +188,7 @@ pub(super) fn storage_named_definer(
     key: v8::Local<'_, v8::Name>,
     desc: &v8::PropertyDescriptor,
     args: v8::PropertyCallbackArguments<'_>,
-    _rv: v8::ReturnValue<'_, ()>,
+    _rv: v8::ReturnValue<'_, v8::Boolean>,
 ) -> v8::Intercepted {
     let Ok(key_string) = v8::Local::<v8::String>::try_from(key) else {
         return v8::Intercepted::kNo;
@@ -224,7 +224,7 @@ pub(super) fn storage_indexed_setter(
     index: u32,
     value: v8::Local<'_, v8::Value>,
     args: v8::PropertyCallbackArguments<'_>,
-    rv: v8::ReturnValue<'_, ()>,
+    rv: v8::ReturnValue<'_, v8::Boolean>,
 ) -> v8::Intercepted {
     let Some(key) = v8_string(scope, &index.to_string()) else {
         return v8::Intercepted::kNo;
@@ -281,7 +281,7 @@ pub(super) fn storage_indexed_definer(
     index: u32,
     desc: &v8::PropertyDescriptor,
     args: v8::PropertyCallbackArguments<'_>,
-    rv: v8::ReturnValue<'_, ()>,
+    rv: v8::ReturnValue<'_, v8::Boolean>,
 ) -> v8::Intercepted {
     let Some(key) = v8_string(scope, &index.to_string()) else {
         return v8::Intercepted::kNo;
@@ -306,7 +306,7 @@ pub(super) fn storage_prototype_indexed_setter<'s>(
     index: u32,
     value: v8::Local<'s, v8::Value>,
     _args: v8::PropertyCallbackArguments<'_>,
-    _rv: v8::ReturnValue<'_, ()>,
+    _rv: v8::ReturnValue<'_, v8::Boolean>,
 ) -> v8::Intercepted {
     let Some(descriptor) = storage_value_property_descriptor(scope, value) else {
         return v8::Intercepted::kNo;
@@ -345,7 +345,7 @@ pub(super) fn storage_prototype_indexed_definer(
     index: u32,
     desc: &v8::PropertyDescriptor,
     _args: v8::PropertyCallbackArguments<'_>,
-    _rv: v8::ReturnValue<'_, ()>,
+    _rv: v8::ReturnValue<'_, v8::Boolean>,
 ) -> v8::Intercepted {
     let Some(descriptor) = storage_descriptor_object_from_property_descriptor(scope, desc) else {
         return v8::Intercepted::kNo;

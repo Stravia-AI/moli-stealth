@@ -522,6 +522,22 @@ impl RendererInspectorClient {
 }
 
 impl v8::inspector::V8InspectorClientImpl for RendererInspectorClient {
+    fn value_subtype<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        value: v8::Local<'s, v8::Value>,
+    ) -> Option<v8::UniquePtr<v8::inspector::StringBuffer>> {
+        super::remote_objects::subtype(scope, value)
+    }
+
+    fn description_for_value_subtype<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        value: v8::Local<'s, v8::Value>,
+    ) -> Option<v8::UniquePtr<v8::inspector::StringBuffer>> {
+        super::remote_objects::description(scope, value)
+    }
+
     fn run_message_loop_on_pause(&self, context_group_id: i32) {
         // A pause may originate in an ordinary page task, outside the guarded
         // frontend dispatch path. Keep every nested pause-loop command under

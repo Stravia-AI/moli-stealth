@@ -7,7 +7,7 @@ edition = "2024"
 [dependencies]
 moli-v8-util = { path = "../moli-v8-util" }
 moli-webapi-declare-derive = { path = "../moli-webapi-declare-derive" }
-v8 = "146.8.0"
+v8 = "152.2.0"
 
 [dev-dependencies]
 moli-v8-test-util = { path = "../moli-v8-test-util" }

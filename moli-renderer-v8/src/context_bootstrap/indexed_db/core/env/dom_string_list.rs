@@ -176,7 +176,7 @@ fn dom_string_list_indexed_setter(
     _index: u32,
     _value: v8::Local<'_, v8::Value>,
     _args: v8::PropertyCallbackArguments<'_>,
-    mut rv: v8::ReturnValue<'_, ()>,
+    mut rv: v8::ReturnValue<'_, v8::Boolean>,
 ) -> v8::Intercepted {
     rv.set_bool(false);
     v8::Intercepted::kYes
@@ -203,7 +203,7 @@ fn dom_string_list_indexed_definer(
     _index: u32,
     _descriptor: &v8::PropertyDescriptor,
     _args: v8::PropertyCallbackArguments<'_>,
-    mut rv: v8::ReturnValue<'_, ()>,
+    mut rv: v8::ReturnValue<'_, v8::Boolean>,
 ) -> v8::Intercepted {
     rv.set_bool(false);
     v8::Intercepted::kYes

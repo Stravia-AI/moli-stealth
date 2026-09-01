@@ -93,7 +93,7 @@ markup5ever = "0.39.0"
 xml5ever = "0.39.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
-serde_v8 = "=0.302.0"
+serde_v8 = "=0.320.0"
 strum = { version = "0.28.0", features = ["derive"] }
 tokio = { version = "1.51.0", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = "0.1.41"
@@ -108,12 +108,12 @@ wasm_dep_analyzer = { git = "https://github.com/ldm0/wasm_dep_analyzer", branch 
 # rusty_v8 publishes pointer-compressed archives for these targets. Those
 # archives also provide the process-wide PartitionAlloc allocator shim.
 [target.'cfg(any(all(target_os = "linux", target_env = "gnu", target_arch = "x86_64"), all(target_os = "macos", any(target_arch = "x86_64", target_arch = "aarch64"))))'.dependencies]
-v8 = { version = "146.8.0", features = ["v8_enable_pointer_compression"] }
+v8 = { version = "152.2.0", features = ["v8_enable_pointer_compression"] }
 
 # Keep the upstream V8 configuration on targets without an official
 # pointer-compressed archive.
 [target.'cfg(not(any(all(target_os = "linux", target_env = "gnu", target_arch = "x86_64"), all(target_os = "macos", any(target_arch = "x86_64", target_arch = "aarch64")))))'.dependencies]
-v8 = "146.8.0"
+v8 = "152.2.0"
 
 [dev-dependencies]
 moli-fetch = { path = "../moli-fetch", features = ["test-support"] }

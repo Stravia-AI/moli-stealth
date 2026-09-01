@@ -365,7 +365,6 @@ impl RendererDevToolsSession {
             state,
         );
         let session = Rc::new(session);
-        outbound.bind_inspector_session(&session);
         let executor_registration = frontend_session_route.map(|(agent_token, session_key)| {
             backend.register_session_executor_route(
                 context_group_id,
@@ -580,6 +579,13 @@ mod tests {
             &dispatch(&first_attach, r#"{"id":3,"method":"Profiler.enable"}"#),
             3,
         );
+        assert_successful_response(
+            &dispatch(
+                &first_attach,
+                r#"{"id":4,"method":"Runtime.setCustomObjectFormatterEnabled","params":{"enabled":true}}"#,
+            ),
+            4,
+        );
 
         let state = first_attach.v8_state();
         assert!(
@@ -591,7 +597,8 @@ mod tests {
         assert!(
             initial_state_text.contains("runtime")
                 && initial_state_text.contains("profiler")
-                && initial_state_text.contains("937"),
+                && initial_state_text.contains("937")
+                && initial_state_text.contains("customObjectFormatterEnabled"),
             "state should contain Runtime and Profiler options: {initial_state_json}"
         );
         drop(first_attach);
@@ -618,6 +625,37 @@ mod tests {
         assert_eq!(
             restored_context["params"]["context"]["origin"], "https://example.test",
             "V8ContextInfo must carry the embedder-bound origin without outbound JSON rewriting"
+        );
+        let formatter_probe = serde_json::json!({
+            "id": 5,
+            "method": "Runtime.evaluate",
+            "params": {
+                "generatePreview": true,
+                "expression": r#"(() => {
+                  globalThis.devtoolsFormatters = [{
+                    header(value) {
+                      return value && value.restored
+                        ? ["span", {}, "restored-formatter"]
+                        : null;
+                    },
+                    hasBody() { return false; },
+                    body() { return null; }
+                  }];
+                  return {restored: true};
+                })()"#
+            }
+        })
+        .to_string();
+        let formatter_messages = dispatch(&restored, &formatter_probe);
+        let formatter_response = formatter_messages
+            .iter()
+            .find(|message| message.get("id").and_then(Value::as_u64) == Some(5))
+            .unwrap_or_else(|| panic!("missing formatter probe response: {formatter_messages:?}"));
+        assert!(
+            formatter_response["result"]["result"]["customPreview"]["header"]
+                .as_str()
+                .is_some_and(|header| header.contains("restored-formatter")),
+            "V8 should apply the restored custom formatter setting: {formatter_response:?}"
         );
         let restored_state = restored.v8_state();
         assert_eq!(

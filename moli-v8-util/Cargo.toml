@@ -7,7 +7,7 @@ edition = "2024"
 [dependencies]
 moli-web-errors = { path = "../moli-web-errors" }
 serde_json = "1.0.145"
-v8 = "146.8.0"
+v8 = "152.2.0"
 
 [dev-dependencies]
 moli-v8-test-util = { path = "../moli-v8-test-util" }
