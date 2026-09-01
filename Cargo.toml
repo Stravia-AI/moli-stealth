@@ -92,13 +92,13 @@ curl = { git = "https://github.com/ldm0/curl-rust", branch = "moli" }
 curl-sys = { git = "https://github.com/ldm0/curl-rust", branch = "moli" }
 cookie = { git = "https://github.com/ldm0/cookie-rs", branch = "priority" }
 v8 = { path = "vendor/v8-146.9.0" }
-selectors = { git = "https://github.com/ldm0/stylo", rev = "32c3de3f2aab3340c51f03f2a0878d1e4eed7fd6" }
-stylo = { git = "https://github.com/ldm0/stylo", rev = "32c3de3f2aab3340c51f03f2a0878d1e4eed7fd6" }
-stylo_atoms = { git = "https://github.com/ldm0/stylo", rev = "32c3de3f2aab3340c51f03f2a0878d1e4eed7fd6" }
-stylo_dom = { git = "https://github.com/ldm0/stylo", rev = "32c3de3f2aab3340c51f03f2a0878d1e4eed7fd6" }
-stylo_static_prefs = { git = "https://github.com/ldm0/stylo", rev = "32c3de3f2aab3340c51f03f2a0878d1e4eed7fd6" }
-stylo_traits = { git = "https://github.com/ldm0/stylo", rev = "32c3de3f2aab3340c51f03f2a0878d1e4eed7fd6" }
-taffy = { git = "https://github.com/ldm0/taffy", rev = "e64061ca979c4d841e898b2d61244bf9313a950d" }
+selectors = { git = "https://github.com/ldm0/stylo", rev = "6ef5858e77e6520990f78cd1d0f387c4b51bf6ba" }
+stylo = { git = "https://github.com/ldm0/stylo", rev = "6ef5858e77e6520990f78cd1d0f387c4b51bf6ba" }
+stylo_atoms = { git = "https://github.com/ldm0/stylo", rev = "6ef5858e77e6520990f78cd1d0f387c4b51bf6ba" }
+stylo_dom = { git = "https://github.com/ldm0/stylo", rev = "6ef5858e77e6520990f78cd1d0f387c4b51bf6ba" }
+stylo_static_prefs = { git = "https://github.com/ldm0/stylo", rev = "6ef5858e77e6520990f78cd1d0f387c4b51bf6ba" }
+stylo_traits = { git = "https://github.com/ldm0/stylo", rev = "6ef5858e77e6520990f78cd1d0f387c4b51bf6ba" }
+taffy = { git = "https://github.com/ldm0/taffy", rev = "470aa4beeb604127c22b475fadb0daa624983d0d" }
 
 [workspace.lints.clippy]
 disallowed_methods = "deny"
