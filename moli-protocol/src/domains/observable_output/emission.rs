@@ -876,7 +876,7 @@ mod tests {
                 .browser_context
                 .as_mut()
                 .expect("browser context")
-                .promote_background_target_to_active_slot_async("TID-promoted")
+                .select_page_target_async("TID-promoted")
                 .await
                 .expect("target promotion should succeed")
         );

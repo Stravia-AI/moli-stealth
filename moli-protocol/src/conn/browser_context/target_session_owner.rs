@@ -248,7 +248,7 @@ impl TargetNavigationLoadInputs {
         let generated_surface_script = if browser_context.is_active_target(target_id) {
             browser_context.generated_surface_override_script_for_active_target()
         } else {
-            browser_context.generated_surface_override_script_for_parked_state(page_state)
+            browser_context.generated_surface_override_script_for_background_state(page_state)
         };
         if let Some(script) = generated_surface_script {
             document_start_scripts.push(script);
@@ -1413,18 +1413,16 @@ impl CdpConnection {
         let closed = self
             .close_page_target_for_target_close_async(&target_id, out, reason)
             .await?;
-        let promoted_target_id = if let Some(browser_context) = self.browser_context.as_mut() {
-            browser_context
-                .promote_last_background_target_to_active_async()
-                .await
+        let selected_target_id = if let Some(browser_context) = self.browser_context.as_mut() {
+            browser_context.select_last_background_target_async().await
         } else {
             None
         };
         self.refresh_active_browser_context_loader_async().await;
-        if let Some(promoted_target_id) = promoted_target_id {
-            self.notify_target_host_activated(&promoted_target_id);
+        if let Some(selected_target_id) = selected_target_id {
+            self.notify_target_host_activated(&selected_target_id);
             out.extend(
-                self.page_screencast_session_ids_for_target(&promoted_target_id)
+                self.page_screencast_session_ids_for_target(&selected_target_id)
                     .into_iter()
                     .map(|session_id| {
                         BackgroundProtocolEvent::page_screencast_visibility_changed(

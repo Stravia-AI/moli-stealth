@@ -32,9 +32,9 @@ use super::{
     javascript_dialog::TargetPreparedJavaScriptDialog,
     page_slot::{DocumentNavigationToken, DocumentStartScript},
     page_target_host::{PageTargetHost, PageTargetRegistry},
-    parking::TargetOwnerState,
     service_worker_target::ServiceWorkerTargetState,
     shared_worker_target::SharedWorkerTargetState,
+    target_state::TargetOwnerState,
 };
 
 pub struct BrowserContext {

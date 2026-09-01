@@ -8218,12 +8218,10 @@ async fn pending_emulation_viewport_keeps_original_page_when_active_target_chang
     };
 
     assert!(
-        conn.promote_background_target_to_active_for_connection_async(
-            "TID-emulation-viewport-replacement",
-        )
-        .await
-        .expect("target activation should succeed")
-        .is_some()
+        conn.select_page_target_for_connection_async("TID-emulation-viewport-replacement",)
+            .await
+            .expect("target activation should succeed")
+            .is_some()
     );
     let messages = complete_command_task_for_test(&mut conn, *pending).await;
 

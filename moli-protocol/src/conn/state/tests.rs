@@ -17,7 +17,7 @@ use super::navigation_outcome::{NavigationDispatchState, NavigationResultProject
 use super::page_slot::DocumentStartScript;
 use super::runtime_slot::TargetRuntimeSlot;
 use super::session::TargetPageSessionState;
-use super::{PageTargetHost, parking::TargetOwnerState};
+use super::{PageTargetHost, target_state::TargetOwnerState};
 
 use serde_json::json;
 use std::collections::HashMap;

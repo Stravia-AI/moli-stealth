@@ -14,10 +14,10 @@ use super::{
     fetch::TargetFetchOwner,
     identity::TargetIdentityState,
     page_slot::TargetPageSlot,
-    parking::TargetOwnerState,
     runtime_slot::TargetRuntimeSlot,
     session::TargetNetworkPolicyState,
     session_storage::TargetSessionStorageNamespace,
+    target_state::TargetOwnerState,
 };
 use crate::conn::cookie_manager_surface::BrowserContextCookieManagerSurface;
 
