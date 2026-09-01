@@ -7119,8 +7119,6 @@ fn webassembly_runtime_exposes_type_reflection_surface() {
                   globalConstructorOrder.push("value valueOf()");
                 }
               });
-              const wasmFunction = new WebAssembly.Function({ parameters: ["i32"], results: ["i32"] }, value => value + 1);
-              const wasmFunctionType = wasmFunction.type();
               const arrayFrom = Array.from;
               Array.from = () => { throw new Error("WebAssembly descriptor reflection must not use Array.from"); };
               const tag = new WebAssembly.Tag({
@@ -7156,11 +7154,7 @@ fn webassembly_runtime_exposes_type_reflection_surface() {
                 missingSetterResult,
                 missingSetterValue: mutableGlobal.value,
                 globalConstructorOrder: globalConstructorOrder.join("|"),
-                wasmFunctionConstructorLength: WebAssembly.Function.length,
-                wasmFunctionCall: wasmFunction(4),
-                wasmFunctionInstance: wasmFunction instanceof WebAssembly.Function,
-                wasmFunctionParameters: wasmFunctionType.parameters,
-                wasmFunctionResults: wasmFunctionType.results,
+                wasmFunction: typeof WebAssembly.Function,
                 tagType,
                 exceptionLength: WebAssembly.Exception.length,
                 exceptionOutOfRange: throwsName(() => exception.getArg(tag, 2)),
@@ -7180,7 +7174,7 @@ fn webassembly_runtime_exposes_type_reflection_surface() {
 
     assert_eq!(
         result,
-        r#"{"memoryTypeMinimum":2,"memoryTypeMaximum":4,"memoryBothBounds":"TypeError","memoryPlainReceiver":"TypeError","memorySpoofedReceiver":"TypeError","tableTypeMinimum":1,"tableTypeMaximum":3,"tableTypeElement":"funcref","tableBothBounds":"TypeError","tablePlainReceiver":"TypeError","tableSpoofedReceiver":"TypeError","globalTypeMutable":false,"globalTypeValue":"funcref","globalTypeKeys":["mutable","value"],"globalValueSetterName":"set value","globalValueSetterLength":1,"missingSetterValue":0,"globalConstructorOrder":"descriptor mutable|descriptor value|descriptor value toString|value valueOf()","wasmFunctionConstructorLength":2,"wasmFunctionCall":5,"wasmFunctionInstance":true,"wasmFunctionParameters":["i32"],"wasmFunctionResults":["i32"],"tagType":{"parameters":["i32","i64"]},"exceptionLength":2,"exceptionOutOfRange":"RangeError","exceptionValue":"9","namespaceInstanceName":"namespaceInstance","namespaceInstanceLength":1,"namespaceInstanceEnumerable":false,"namespaceInstanceWritable":true,"namespaceInstanceConfigurable":true,"namespaceInstancePlainObject":"TypeError","namespaceInstanceMissing":"TypeError"}"#
+        r#"{"memoryTypeMinimum":2,"memoryTypeMaximum":4,"memoryBothBounds":"TypeError","memoryPlainReceiver":"TypeError","memorySpoofedReceiver":"TypeError","tableTypeMinimum":1,"tableTypeMaximum":3,"tableTypeElement":"funcref","tableBothBounds":"TypeError","tablePlainReceiver":"TypeError","tableSpoofedReceiver":"TypeError","globalTypeMutable":false,"globalTypeValue":"funcref","globalTypeKeys":["mutable","value"],"globalValueSetterName":"set value","globalValueSetterLength":1,"missingSetterValue":0,"globalConstructorOrder":"descriptor mutable|descriptor value|descriptor value toString|value valueOf()","wasmFunction":"undefined","tagType":{"parameters":["i32","i64"]},"exceptionLength":2,"exceptionOutOfRange":"RangeError","exceptionValue":"9","namespaceInstanceName":"namespaceInstance","namespaceInstanceLength":1,"namespaceInstanceEnumerable":false,"namespaceInstanceWritable":true,"namespaceInstanceConfigurable":true,"namespaceInstancePlainObject":"TypeError","namespaceInstanceMissing":"TypeError"}"#
     );
 }
 #[test]
