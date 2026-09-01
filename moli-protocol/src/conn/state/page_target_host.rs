@@ -1,14 +1,25 @@
+use std::collections::HashMap;
+
 use indexmap::IndexMap;
 use moli_core::network::SharedWebStorageStore;
 use moli_core::runtime::NavigationEngine;
+use serde_json::Value;
 
 use super::{
+    devtools_session::DevToolsSessionRegistry,
+    emulation::{
+        EmulatedDeviceMetrics, EmulatedGeolocationOverrideState, EmulatedMediaOverrides,
+        EmulatedNetworkConditions,
+    },
+    fetch::TargetFetchOwner,
     identity::TargetIdentityState,
     page_slot::TargetPageSlot,
+    parking::TargetOwnerState,
     runtime_slot::TargetRuntimeSlot,
-    session::{ActiveTargetState, TargetPageState},
+    session::TargetNetworkPolicyState,
     session_storage::TargetSessionStorageNamespace,
 };
+use crate::conn::cookie_manager_surface::BrowserContextCookieManagerSurface;
 
 /// The stable owner of all state that belongs to one page target.
 ///
@@ -18,16 +29,70 @@ use super::{
 #[derive(Debug)]
 pub struct PageTargetHost {
     target_id: String,
-    state: Box<TargetPageState>,
     navigation_engine: Option<NavigationEngine>,
+    pub(crate) target_identity: TargetIdentityState,
+    pub(crate) devtools_sessions: DevToolsSessionRegistry,
+    pub(crate) network_policy: TargetNetworkPolicyState,
+    pub(crate) http_proxy_override: Option<String>,
+    pub(crate) http_no_proxy_override: Option<String>,
+    pub(crate) tls_verify_host_override: Option<bool>,
+    pub(crate) base_locale_override: Option<String>,
+    pub(crate) base_timezone_override: Option<String>,
+    pub(crate) locale_override: Option<String>,
+    pub(crate) timezone_override: Option<String>,
+    pub(crate) network_conditions: Option<EmulatedNetworkConditions>,
+    pub(crate) geolocation_override: Option<EmulatedGeolocationOverrideState>,
+    pub(crate) emulated_media: EmulatedMediaOverrides,
+    pub(crate) emulated_device_metrics: Option<EmulatedDeviceMetrics>,
+    pub(crate) cpu_throttling_rate: f64,
+    pub(crate) input_intercept_drags_enabled: bool,
+    pub(crate) input_drag_intercepted: bool,
+    pub(crate) touch_emulation_enabled: bool,
+    pub(crate) emit_touch_events_for_mouse: bool,
+    pub(crate) focus_emulation_enabled: bool,
+    pub(crate) script_execution_disabled: bool,
+    pub(crate) css_enabled: bool,
+    pub(crate) document_cookie_manager_surface: BrowserContextCookieManagerSurface,
+    pub(crate) dom_remote_object_node_cache: HashMap<String, Value>,
+    pub(crate) runtime_slot: TargetRuntimeSlot,
+    pub(crate) fetch_owner: TargetFetchOwner,
+    pub(crate) owner_state: TargetOwnerState,
+    pub(crate) session_storage_namespace: TargetSessionStorageNamespace,
 }
 
 impl PageTargetHost {
     pub(crate) fn empty(target_id: String) -> Self {
         Self {
             target_id,
-            state: Box::default(),
             navigation_engine: None,
+            target_identity: TargetIdentityState::about_blank(),
+            devtools_sessions: DevToolsSessionRegistry::default(),
+            network_policy: TargetNetworkPolicyState::default(),
+            http_proxy_override: None,
+            http_no_proxy_override: None,
+            tls_verify_host_override: None,
+            base_locale_override: None,
+            base_timezone_override: None,
+            locale_override: None,
+            timezone_override: None,
+            network_conditions: None,
+            geolocation_override: None,
+            emulated_media: EmulatedMediaOverrides::default(),
+            emulated_device_metrics: None,
+            cpu_throttling_rate: 1.0,
+            input_intercept_drags_enabled: false,
+            input_drag_intercepted: false,
+            touch_emulation_enabled: false,
+            emit_touch_events_for_mouse: false,
+            focus_emulation_enabled: false,
+            script_execution_disabled: false,
+            css_enabled: false,
+            document_cookie_manager_surface: BrowserContextCookieManagerSurface::default(),
+            dom_remote_object_node_cache: HashMap::new(),
+            runtime_slot: TargetRuntimeSlot::default(),
+            fetch_owner: TargetFetchOwner::default(),
+            owner_state: TargetOwnerState::default(),
+            session_storage_namespace: TargetSessionStorageNamespace::default(),
         }
     }
 
@@ -37,18 +102,9 @@ impl PageTargetHost {
         target_identity: TargetIdentityState,
         target_page_slot: TargetPageSlot,
     ) -> Self {
-        let mut host = Self {
-            target_id,
-            state: Box::new(TargetPageState {
-                target_identity,
-                active_target: ActiveTargetState {
-                    runtime_slot: TargetRuntimeSlot::from_page_slot(target_page_slot),
-                    ..Default::default()
-                },
-                ..Default::default()
-            }),
-            navigation_engine: None,
-        };
+        let mut host = Self::empty(target_id);
+        host.target_identity = target_identity;
+        host.runtime_slot = TargetRuntimeSlot::from_page_slot(target_page_slot);
         if let Some(session_id) = primary_session_id {
             host.devtools_sessions.attach_primary(session_id);
         }
@@ -129,12 +185,12 @@ impl PageTargetHost {
         self.session_storage_namespace = namespace;
     }
 
-    pub(crate) fn state(&self) -> &TargetPageState {
-        &self.state
+    pub(crate) fn state(&self) -> &Self {
+        self
     }
 
-    pub(crate) fn state_mut(&mut self) -> &mut TargetPageState {
-        &mut self.state
+    pub(crate) fn state_mut(&mut self) -> &mut Self {
+        self
     }
 
     pub(crate) fn navigation_engine(&self) -> Option<&NavigationEngine> {
@@ -166,17 +222,13 @@ impl PageTargetHost {
         &mut self,
     ) -> Option<(&mut NavigationEngine, &mut TargetRuntimeSlot)> {
         let engine = self.navigation_engine.as_mut()?;
-        Some((engine, &mut self.state.active_target.runtime_slot))
+        Some((engine, &mut self.runtime_slot))
     }
 
     pub(crate) fn has_page_domain_enabled_session(&self) -> bool {
         self.devtools_sessions
             .states()
             .any(|session| session.page_session_state.page_domain_enabled)
-    }
-
-    pub(crate) fn has_pending_javascript_dialog(&self) -> bool {
-        self.state.has_pending_javascript_dialog()
     }
 
     pub(crate) fn has_pending_inspector_awaits(&self) -> bool {
@@ -212,20 +264,6 @@ impl PageTargetHost {
                 Some(session_id) != devtools_session_id
                     && session_state.has_runtime_remote_object_id(object_id)
             })
-    }
-}
-
-impl std::ops::Deref for PageTargetHost {
-    type Target = TargetPageState;
-
-    fn deref(&self) -> &Self::Target {
-        &self.state
-    }
-}
-
-impl std::ops::DerefMut for PageTargetHost {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.state
     }
 }
 

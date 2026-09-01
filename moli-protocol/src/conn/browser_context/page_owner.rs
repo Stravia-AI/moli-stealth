@@ -1064,7 +1064,7 @@ mod tests {
                 .enabled()
         );
 
-        let mut parked = TargetPageState::default();
+        let mut parked = TargetPageState::empty("TID-page-owner-test".to_owned());
         parked_session_state_mut(&mut parked).set_console_enabled(true);
         parked_session_state_mut(&mut parked).set_log_enabled(true);
         parked_session_state_mut(&mut parked).set_page_file_chooser_opened_event_enabled(true);

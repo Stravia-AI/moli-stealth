@@ -1148,7 +1148,7 @@ mod tests {
             Some("cellular3g")
         );
 
-        let mut parked = TargetPageState::default();
+        let mut parked = TargetPageState::empty("TID-network-owner-test".to_owned());
         {
             let network = &mut parked.devtools_sessions.primary_mut().network_session_state;
             network.network_enabled = true;

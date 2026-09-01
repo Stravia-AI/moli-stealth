@@ -1597,7 +1597,6 @@ impl CdpConnection {
                 browser_context.remove_auxiliary_sessions_for_target(&target_id);
             let collected_network_data_artifacts = browser_context
                 .active_page_target()
-                .active_target
                 .runtime_slot
                 .collected_network_data_artifacts();
             browser_context.clear_active_target_session_scoped_state_without_loaded_page();
@@ -2667,7 +2666,6 @@ mod tests {
         assert!(
             active
                 .active_page_state()
-                .active_target
                 .owner_state
                 .target_crash_state
                 .is_crashed()
@@ -2709,7 +2707,6 @@ mod tests {
         browser_context.attach_active_session("SID-active-primary".to_owned());
         browser_context
             .active_page_state_mut()
-            .active_target
             .runtime_slot
             .set_page_attachment_id_for_test(1);
         browser_context.insert_page_target_host(crate::conn::PageTargetHost::with_url(
@@ -2810,7 +2807,6 @@ mod tests {
         assert!(
             active
                 .active_page_state()
-                .active_target
                 .fetch_owner
                 .has_pending_subresource_fetch_for_test("FETCH-active")
         );
@@ -2876,7 +2872,6 @@ mod tests {
         assert!(
             !active
                 .active_page_state()
-                .active_target
                 .fetch_owner
                 .config_snapshot()
                 .is_enabled()
@@ -2884,7 +2879,6 @@ mod tests {
         assert!(
             !active
                 .active_page_state()
-                .active_target
                 .fetch_owner
                 .has_pending_subresource_fetch_for_test("FETCH-active")
         );
@@ -2936,7 +2930,6 @@ mod tests {
         let mut active = BrowserContext::new_with_page_for_test("BID-active", "TID-active");
         active
             .active_page_state_mut()
-            .active_target
             .owner_state
             .record_loaded_page_navigation_history((
                 "https://active.example/".to_owned(),
@@ -2988,7 +2981,6 @@ mod tests {
         let mut active = BrowserContext::new_with_page_for_test("BID-active", "FRAME-0");
         active
             .active_page_state_mut()
-            .active_target
             .runtime_slot
             .enable_primary_network_events();
         active.record_captured_response_body(
@@ -3050,7 +3042,6 @@ mod tests {
         let mut active = BrowserContext::new_with_page_for_test("BID-active", "FRAME-0");
         active
             .active_page_state_mut()
-            .active_target
             .runtime_slot
             .enable_primary_network_events();
         let mut owner = TargetSessionOwnerMut::PageTarget {
@@ -3793,7 +3784,6 @@ mod tests {
         ));
         browser_context
             .active_page_state_mut()
-            .active_target
             .runtime_slot
             .set_page_attachment_id_for_test(41);
         conn.browser_context = Some(browser_context);

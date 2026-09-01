@@ -70,7 +70,6 @@ impl BrowserContext {
             if self.is_active_target(creator.target_id()) {
                 return Some(
                     self.active_page_target()
-                        .active_target
                         .session_storage_namespace
                         .deep_clone(),
                 );
@@ -144,7 +143,6 @@ impl BrowserContext {
 
     pub(crate) fn has_attached_child_frame_id(&self, frame_id: &str) -> bool {
         self.active_page_target()
-            .active_target
             .owner_state
             .has_attached_child_frame_id(frame_id)
             || self.background_targets().any(|target| {
@@ -240,7 +238,6 @@ impl BrowserContext {
         if self.is_active_target(target_id) {
             self.set_target_url(url);
             self.active_page_target_mut()
-                .active_target
                 .owner_state
                 .target_crash_state
                 .clear();
@@ -456,10 +453,7 @@ impl BrowserContext {
             )
         };
         let page = if self.is_active_target(&target_id) {
-            self.active_page_target_mut()
-                .active_target
-                .runtime_slot
-                .loaded_page_mut()
+            self.active_page_target_mut().runtime_slot.loaded_page_mut()
         } else {
             self.background_target_mut(&target_id)
                 .and_then(|target| target.runtime_slot.loaded_page_mut())
@@ -625,7 +619,6 @@ impl BrowserContext {
     pub(crate) fn enable_auxiliary_network_events(&mut self, session_id: &str) {
         if self.auxiliary_target_id_for_session(session_id).is_some() {
             self.active_page_state_mut()
-                .active_target
                 .runtime_slot
                 .enable_auxiliary_network_events(session_id);
         }
@@ -634,7 +627,6 @@ impl BrowserContext {
     #[cfg(test)]
     pub(crate) fn has_network_event_listeners(&self) -> bool {
         self.active_page_state()
-            .active_target
             .runtime_slot
             .has_network_event_listeners()
     }
@@ -645,7 +637,6 @@ impl BrowserContext {
         trigger_session_id: Option<&str>,
     ) -> Vec<Option<String>> {
         self.active_page_state()
-            .active_target
             .runtime_slot
             .network_event_session_ids(trigger_session_id, self.active_session_id())
     }
@@ -684,12 +675,7 @@ impl BrowserContext {
             .as_deref()
             .map(|target_id| self.auxiliary_session_ids_for_target(target_id))
             .unwrap_or_default();
-        if let Some(page) = self
-            .active_page_target_mut()
-            .active_target
-            .runtime_slot
-            .loaded_page_mut()
-        {
+        if let Some(page) = self.active_page_target_mut().runtime_slot.loaded_page_mut() {
             for session_id in &auxiliary_inspector_session_ids {
                 page.detach_runtime_inspector_session_async(Some(session_id))
                     .await
@@ -708,7 +694,6 @@ impl BrowserContext {
         self.detach_active_session();
         for session_id in auxiliary_inspector_session_ids {
             self.active_page_target_mut()
-                .active_target
                 .runtime_slot
                 .remove_auxiliary_network_session(&session_id);
         }
@@ -734,7 +719,6 @@ impl BrowserContext {
     ) -> bool {
         if self.active_session_id() == Some(session_id) {
             self.active_page_target_mut()
-                .active_target
                 .runtime_slot
                 .disable_primary_network_events();
             self.detach_active_session();
@@ -945,11 +929,9 @@ impl BrowserContext {
             return;
         };
         self.active_page_target_mut()
-            .active_target
             .runtime_slot
             .mark_loaded_page_absent(TargetPageAbsenceReason::InitialDocumentPageBuildPending);
         self.active_page_target_mut()
-            .active_target
             .owner_state
             .begin_initial_empty_document(target_id, initial_url, None, storage_key);
     }
@@ -997,9 +979,7 @@ impl BrowserContext {
         mutate: impl FnOnce(&mut ParkedTargetOwnerState) -> T,
     ) -> Option<T> {
         if self.is_active_target(target_id) {
-            return Some(mutate(
-                &mut self.active_page_target_mut().active_target.owner_state,
-            ));
+            return Some(mutate(&mut self.active_page_target_mut().owner_state));
         }
         self.background_target(target_id)?;
         Some(self.mutate_parked_target_owner_state(target_id, mutate))
@@ -1014,7 +994,6 @@ impl BrowserContext {
             &mut self
                 .background_target_mut(target_id)
                 .expect("parked target must exist")
-                .active_target
                 .owner_state,
         )
     }
@@ -1023,7 +1002,7 @@ impl BrowserContext {
         &self,
         target_id: &str,
     ) -> Option<&ParkedTargetOwnerState> {
-        let state = &self.background_target(target_id)?.active_target.owner_state;
+        let state = &self.background_target(target_id)?.owner_state;
         (!state.is_default()).then_some(state)
     }
 
@@ -1033,7 +1012,7 @@ impl BrowserContext {
         target_id: &str,
     ) -> ParkedTargetOwnerState {
         self.background_target(target_id)
-            .map(|target| target.active_target.owner_state.clone())
+            .map(|target| target.owner_state.clone())
             .unwrap_or_default()
     }
 
@@ -1044,7 +1023,6 @@ impl BrowserContext {
     ) -> Option<&crate::conn::state::TargetFetchState> {
         let state = self
             .background_target(target_id)?
-            .active_target
             .fetch_owner
             .pending_state();
         (!state.is_empty()).then_some(state)
@@ -1065,7 +1043,6 @@ impl BrowserContext {
                 kind: DevToolsTargetKind::Page,
                 title: self
                     .active_page_target()
-                    .active_target
                     .owner_state
                     .committed_document_title()
                     .map(str::to_owned)
@@ -1289,19 +1266,15 @@ impl BrowserContext {
             return false;
         }
         let current_attachment = match expected.target_id() {
-            Some(target_id) if self.is_active_target(target_id) => self
-                .active_page_target()
-                .active_target
-                .runtime_slot
-                .page_attachment_id(),
+            Some(target_id) if self.is_active_target(target_id) => {
+                self.active_page_target().runtime_slot.page_attachment_id()
+            }
             Some(target_id) => self
                 .background_target(target_id)
                 .and_then(|target| target.runtime_slot.page_attachment_id()),
-            None if self.active_target_id().is_none() => self
-                .active_page_target()
-                .active_target
-                .runtime_slot
-                .page_attachment_id(),
+            None if self.active_target_id().is_none() => {
+                self.active_page_target().runtime_slot.page_attachment_id()
+            }
             None => None,
         };
         current_attachment == Some(expected.page_attachment_id())
@@ -1873,23 +1846,18 @@ mod tests {
             context.assign_auxiliary_session_to_target("TID-active", "SID-aux".to_owned()),
             "auxiliary session should attach to active target"
         );
-        context
-            .active_page_state_mut()
-            .active_target
-            .fetch_owner
-            .configure(
-                Some("SID-aux".to_owned()),
-                false,
-                vec![FetchInterceptionPattern {
-                    url_pattern: "*".to_owned(),
-                    resource_type_filter: None,
-                    request_stage: FetchRequestStage::Request,
-                }],
-            );
+        context.active_page_state_mut().fetch_owner.configure(
+            Some("SID-aux".to_owned()),
+            false,
+            vec![FetchInterceptionPattern {
+                url_pattern: "*".to_owned(),
+                resource_type_filter: None,
+                request_stage: FetchRequestStage::Request,
+            }],
+        );
         assert!(
             context
                 .active_page_state()
-                .active_target
                 .fetch_owner
                 .config_snapshot()
                 .is_enabled()
@@ -1903,7 +1871,6 @@ mod tests {
         assert!(
             !context
                 .active_page_state()
-                .active_target
                 .fetch_owner
                 .config_snapshot()
                 .is_enabled(),
@@ -1921,7 +1888,6 @@ mod tests {
         context.set_target_secure_context_type("Secure".to_owned());
         context
             .active_page_state_mut()
-            .active_target
             .runtime_slot
             .set_page_attachment_id_for_test(42);
         context.active_page_state_mut().devtools_sessions
@@ -1934,12 +1900,10 @@ mod tests {
             .inspector_enabled = true;
         context
             .active_page_state_mut()
-            .active_target
             .owner_state
             .next_document_start_script_id = 3;
         context
             .active_page_state_mut()
-            .active_target
             .owner_state
             .isolated_worlds
             .push(IsolatedWorldDefinition {
@@ -1948,7 +1912,6 @@ mod tests {
             });
         context
             .active_page_state_mut()
-            .active_target
             .owner_state
             .document_start_scripts
             .push((
@@ -2046,17 +2009,14 @@ mod tests {
             .page_intercept_file_chooser_dialog_enabled = true;
         context
             .active_page_state_mut()
-            .active_target
             .runtime_slot
             .set_primary_network_events_enabled(true);
         context
             .active_page_state_mut()
-            .active_target
             .owner_state
             .next_document_start_script_id = 9;
         context
             .active_page_state_mut()
-            .active_target
             .owner_state
             .document_start_scripts
             .push((
@@ -2072,18 +2032,15 @@ mod tests {
             ));
         context
             .active_page_state_mut()
-            .active_target
             .runtime_slot
             .set_network_request_counters_for_test(77, 88);
         context
             .active_page_state_mut()
-            .active_target
             .runtime_slot
             .mark_subresource_records_emitted(None, 0, 3);
         context.set_loaded_page_async(active_page).await;
         let active_attachment = context
             .active_page_state()
-            .active_target
             .runtime_slot
             .current_renderer_attachment()
             .expect("loaded active page should have a renderer attachment");
@@ -2297,7 +2254,6 @@ mod tests {
         assert_eq!(
             context
                 .active_page_state()
-                .active_target
                 .runtime_slot
                 .moli_memory_diagnostics()["loadedPageAbsenceReason"],
             json!("initial-document-page-build-pending"),
@@ -2326,7 +2282,6 @@ mod tests {
         assert_eq!(
             context
                 .active_page_state()
-                .active_target
                 .runtime_slot
                 .moli_memory_diagnostics()["loadedPageAbsenceReason"],
             json!("initial-document-page-build-pending"),
@@ -2406,7 +2361,6 @@ mod tests {
         assert_eq!(
             context
                 .active_page_state()
-                .active_target
                 .runtime_slot
                 .current_renderer_attachment()
                 .map(|attachment| attachment.id()),
@@ -2459,7 +2413,6 @@ mod tests {
             .replace_loaded_page(Some(background_page));
         let active_attachment = context
             .active_page_state()
-            .active_target
             .runtime_slot
             .current_renderer_attachment()
             .expect("active attachment");
@@ -2478,7 +2431,6 @@ mod tests {
         assert_eq!(
             context
                 .active_page_state()
-                .active_target
                 .runtime_slot
                 .current_renderer_attachment()
                 .map(|attachment| attachment.id()),
@@ -2560,7 +2512,6 @@ mod tests {
         assert_eq!(
             context
                 .active_page_state()
-                .active_target
                 .runtime_slot
                 .emitted_subresource_record_count_for_session_for_test(None),
             4,
@@ -2569,7 +2520,6 @@ mod tests {
         assert_eq!(
             context
                 .active_page_state()
-                .active_target
                 .runtime_slot
                 .emitted_websocket_event_count_for_session_for_test(None),
             5,

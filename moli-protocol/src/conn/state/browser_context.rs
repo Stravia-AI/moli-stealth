@@ -1291,7 +1291,6 @@ impl BrowserContext {
     #[cfg(test)]
     pub(crate) fn clear_document_navigation_state_for_active_target(&mut self) {
         self.active_page_target_mut()
-            .active_target
             .runtime_slot
             .clear_document_navigation_state();
     }
@@ -1437,10 +1436,7 @@ impl BrowserContext {
 
     #[cfg(test)]
     pub(crate) fn session_storage_store_for_test(&self) -> &SharedWebStorageStore {
-        self.active_page_target()
-            .active_target
-            .session_storage_namespace
-            .store()
+        self.active_page_target().session_storage_namespace.store()
     }
 
     #[cfg(test)]
