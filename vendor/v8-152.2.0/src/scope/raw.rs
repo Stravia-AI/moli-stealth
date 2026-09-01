@@ -36,6 +36,36 @@ impl Drop for ContextScope {
   }
 }
 
+#[repr(C)]
+#[derive(Debug)]
+pub(super) struct BackupIncumbentScope([MaybeUninit<usize>; 3]);
+
+impl BackupIncumbentScope {
+  /// Creates uninitialized storage for V8's stack-address-sensitive scope.
+  ///
+  /// The returned value must be pinned before `init()` constructs the C++
+  /// object in place.
+  pub unsafe fn uninit() -> Self {
+    Self(unsafe { MaybeUninit::uninit().assume_init() })
+  }
+
+  /// # Safety
+  ///
+  /// `self` must be pinned at its final address and initialized exactly once.
+  pub unsafe fn init(&mut self, context: Local<Context>) {
+    unsafe {
+      v8__Context__BackupIncumbentScope__CONSTRUCT(self, &*context);
+    }
+  }
+
+  /// # Safety
+  ///
+  /// `self` must have been initialized by `init()` and must not have moved.
+  pub unsafe fn deinit(&mut self) {
+    unsafe { v8__Context__BackupIncumbentScope__DESTRUCT(self) };
+  }
+}
+
 #[cfg(feature = "v8_enable_v8_checks")]
 pub const HANDLE_SCOPE_SIZE: usize = 4;
 #[cfg(not(feature = "v8_enable_v8_checks"))]
@@ -227,6 +257,9 @@ unsafe extern "C" {
   pub(super) fn v8__Isolate__GetEnteredOrMicrotaskContext(
     isolate: *mut RealIsolate,
   ) -> *const Context;
+  pub(super) fn v8__Isolate__GetIncumbentContext(
+    isolate: *mut RealIsolate,
+  ) -> *const Context;
   pub(super) fn v8__Isolate__ThrowException(
     isolate: *mut RealIsolate,
     exception: *const Value,
@@ -241,6 +274,13 @@ unsafe extern "C" {
 
   pub(super) fn v8__Context__Enter(this: *const Context);
   pub(super) fn v8__Context__Exit(this: *const Context);
+  pub(super) fn v8__Context__BackupIncumbentScope__CONSTRUCT(
+    buf: *mut BackupIncumbentScope,
+    context: *const Context,
+  );
+  pub(super) fn v8__Context__BackupIncumbentScope__DESTRUCT(
+    this: *mut BackupIncumbentScope,
+  );
   pub(super) fn v8__Context__GetDataFromSnapshotOnce(
     this: *const Context,
     index: usize,

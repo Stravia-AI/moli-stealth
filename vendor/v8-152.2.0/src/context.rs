@@ -28,6 +28,7 @@ unsafe extern "C" {
   ) -> *const Context;
   fn v8__Isolate__GetCurrent() -> *mut RealIsolate;
   fn v8__Context__Global(this: *const Context) -> *const Object;
+  fn v8__Context__DetachGlobal(this: *const Context);
   fn v8__Context__GetExtrasBindingObject(this: *const Context)
   -> *const Object;
   fn v8__Context__GetNumberOfEmbedderDataFields(this: *const Context) -> u32;
@@ -141,6 +142,13 @@ impl Context {
   #[inline(always)]
   pub fn global<'s>(&self, scope: &PinScope<'s, '_, ()>) -> Local<'s, Object> {
     unsafe { scope.cast_local(|_| v8__Context__Global(self)) }.unwrap()
+  }
+
+  /// Detaches this context's global proxy so its identity can be reused by a
+  /// subsequently created context.
+  #[inline(always)]
+  pub fn detach_global(&self) {
+    unsafe { v8__Context__DetachGlobal(self) }
   }
 
   /// Returns the microtask queue associated with this context.

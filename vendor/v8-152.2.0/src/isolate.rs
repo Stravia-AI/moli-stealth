@@ -82,9 +82,22 @@ use std::sync::atomic::AtomicUsize;
 #[repr(C)]
 pub enum MicrotasksPolicy {
   Explicit = 0,
-  // Scoped = 1 (RAII) is omitted for now, doesn't quite map to idiomatic Rust.
+  Scoped = 1,
   Auto = 2,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub enum AccessType {
+  Get,
+  Set,
+  Has,
+  Delete,
+  Keys,
+}
+
+pub type FailedAccessCheckCallback =
+  unsafe extern "C" fn(Local<Object>, AccessType, Local<Value>);
 
 /// Memory pressure level for the MemoryPressureNotification.
 /// None hints V8 that there is no memory pressure.
@@ -819,6 +832,10 @@ unsafe extern "C" {
     isolate: *mut RealIsolate,
     callback: RawModifyCodeGenerationFromStringsCallback,
   );
+  fn v8__Isolate__SetFailedAccessCheckCallbackFunction(
+    isolate: *mut RealIsolate,
+    callback: FailedAccessCheckCallback,
+  );
   fn v8__Isolate__RequestInterrupt(
     isolate: *const RealIsolate,
     callback: InterruptCallback,
@@ -905,6 +922,21 @@ impl UnsafeRawIsolatePtr {
 pub struct RealIsolate(Opaque);
 
 impl Isolate {
+  /// Installs the callback invoked when an object access check fails and no
+  /// failed-access interceptor handles the operation.
+  #[inline(always)]
+  pub fn set_failed_access_check_callback_function(
+    &mut self,
+    callback: FailedAccessCheckCallback,
+  ) {
+    unsafe {
+      v8__Isolate__SetFailedAccessCheckCallbackFunction(
+        self.as_real_ptr(),
+        callback,
+      )
+    }
+  }
+
   pub(crate) fn as_real_ptr(&self) -> *mut RealIsolate {
     self.0.as_ptr()
   }

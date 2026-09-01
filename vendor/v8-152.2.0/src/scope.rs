@@ -340,6 +340,12 @@ mod get_isolate_impls {
     }
   }
 
+  impl GetIsolate for Local<'_, Object> {
+    fn get_isolate_ptr(&self) -> *mut RealIsolate {
+      unsafe { raw::v8__Isolate__GetCurrent() }
+    }
+  }
+
   impl GetIsolate for Local<'_, Message> {
     fn get_isolate_ptr(&self) -> *mut RealIsolate {
       unsafe { raw::v8__Isolate__GetCurrent() }
@@ -561,6 +567,15 @@ impl<'s> PinnedRef<'s, HandleScope<'_>> {
       raw::v8__Isolate__GetEnteredOrMicrotaskContext(self.0.isolate.as_ptr())
     };
     unsafe { Local::from_raw_unchecked(context_ptr) }
+  }
+
+  /// Returns the context corresponding to the incumbent Realm in the HTML
+  /// specification.
+  pub fn get_incumbent_context(&self) -> Option<Local<'s, Context>> {
+    let context_ptr = unsafe {
+      raw::v8__Isolate__GetIncumbentContext(self.0.isolate.as_ptr())
+    };
+    unsafe { Local::from_raw(context_ptr) }
   }
 
   /// Return data that was previously attached to the isolate snapshot via
@@ -788,6 +803,42 @@ impl<P: ClearCachedContext> DerefMut for ContextScope<'_, '_, P> {
 
 impl<P: ClearCachedContext> sealed::Sealed for ContextScope<'_, '_, P> {}
 impl<P: ClearCachedContext> Scope for ContextScope<'_, '_, P> {}
+
+/// Pushes a context onto V8's backup incumbent settings object stack.
+///
+/// V8 links this object into an isolate-owned stack by its address. Pin the
+/// returned `ScopeStorage` before calling `init()` and keep it alive until the
+/// callback invocation completes.
+pub struct BackupIncumbentScope<'s> {
+  raw: raw::BackupIncumbentScope,
+  context: Local<'s, Context>,
+  _pinned: PhantomPinned,
+}
+
+impl<'s> BackupIncumbentScope<'s> {
+  pub fn new(context: Local<'s, Context>) -> ScopeStorage<Self> {
+    ScopeStorage::new(Self {
+      raw: unsafe { raw::BackupIncumbentScope::uninit() },
+      context,
+      _pinned: PhantomPinned,
+    })
+  }
+}
+
+impl ScopeInit for BackupIncumbentScope<'_> {
+  fn init_stack(storage: Pin<&mut ScopeStorage<Self>>) -> Pin<&mut Self> {
+    let storage_mut = unsafe { storage.get_unchecked_mut() };
+    let context = storage_mut.scope.context;
+    unsafe {
+      storage_mut.scope.raw.init(context);
+      Pin::new_unchecked(&mut storage_mut.scope)
+    }
+  }
+
+  unsafe fn deinit(me: &mut Self) {
+    unsafe { me.raw.deinit() };
+  }
+}
 
 mod new_context_scope {
 
