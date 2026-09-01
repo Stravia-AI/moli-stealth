@@ -224,19 +224,15 @@ async fn ensure_initial_document_for_target_id_for_test(
     let route = conn
         .target_session_route_for_target_id(target_id.as_str())
         .unwrap_or_else(|| panic!("target route should exist for {}", target_id.as_str()));
-    let pending = {
-        let previous_route = conn.replace_none_session_owner_route_override(Some(route));
-        let pending = conn
-            .start_initial_document_page_ensure_for_session_owner(None)
-            .unwrap_or_else(|message| {
-                panic!(
-                    "target lifecycle ensure should start for {}: {message}",
-                    target_id.as_str()
-                )
-            });
-        conn.replace_none_session_owner_route_override(previous_route);
-        pending
-    };
+    let owner = CommandOwnerScope::for_route(route);
+    let pending = conn
+        .start_initial_document_page_ensure_for_owner(&owner)
+        .unwrap_or_else(|message| {
+            panic!(
+                "target lifecycle ensure should start for {}: {message}",
+                target_id.as_str()
+            )
+        });
     let Some(pending) = pending else {
         return;
     };
@@ -374,6 +370,27 @@ async fn complete_command_task_for_test(
             CdpCommandTaskStep::Pending(next) => pending = *next,
         }
     }
+}
+
+async fn attach_page_session_for_test(conn: &mut CdpConnection, target_id: &str) -> String {
+    let raw = serde_json::to_string(&json!({
+        "id": 9_900_001,
+        "method": "Target.attachToTarget",
+        "params": { "targetId": target_id, "flatten": true }
+    }))
+    .expect("attach command should serialize");
+    let messages = match conn.start_command_dispatch(&raw) {
+        CdpCommandTaskStep::Pending(pending) => {
+            complete_command_task_for_test(conn, *pending).await
+        }
+        CdpCommandTaskStep::Complete(outcome) => outcome.into_parts().0,
+    };
+    messages
+        .iter()
+        .find(|message| message["id"] == json!(9_900_001))
+        .and_then(|message| message["result"]["sessionId"].as_str())
+        .unwrap_or_else(|| panic!("attachToTarget should return a session: {messages:?}"))
+        .to_owned()
 }
 
 #[tokio::test]
@@ -611,16 +628,10 @@ async fn devtools_script_navigation_exact_cursor_rejects_replaced_page_owner_act
         .conn
         .target_session_route_for_target_id(target_id.as_str())
         .expect("created target route");
-    {
-        let mut route_scope = ctx
-            .conn
-            .scoped_none_session_owner_route_override(route.clone());
-        route_scope
-            .conn_mut()
-            .runtime_session_owner_slot_mut(None)
-            .expect("created target runtime slot")
-            .replace_page_attachment_id_for_test();
-    }
+    ctx.conn
+        .runtime_session_owner_slot_mut_for_route(None, Some(&route))
+        .expect("created target runtime slot")
+        .replace_page_attachment_id_for_test();
 
     let sent_start = ctx.sent.len();
     ctx.route_direct_command_renderer_predecessor_for_test(predecessor)
@@ -1912,28 +1923,22 @@ async fn pending_runtime_binding_page_phase_keeps_background_owner_route_across_
         "background"
     );
 
-    let background_route = conn
-        .target_session_route_for_target_id(second_target_id.as_str())
-        .expect("background target route");
+    let background_session =
+        attach_page_session_for_test(&mut conn, second_target_id.as_str()).await;
     let raw = serde_json::to_string(&json!({
         "id": 1269,
         "method": "Runtime.addBinding",
-        "params": { "name": "backgroundRouteBinding" }
+        "params": { "name": "backgroundRouteBinding" },
+        "sessionId": background_session
     }))
     .unwrap();
-    let pending = {
-        let previous_route =
-            conn.replace_none_session_owner_route_override(Some(background_route.clone()));
-        let step = conn.start_command_dispatch(&raw);
-        conn.replace_none_session_owner_route_override(previous_route);
-        match step {
-            CdpCommandTaskStep::Pending(pending) => pending,
-            CdpCommandTaskStep::Complete(outcome) => {
-                panic!(
-                    "background Runtime.addBinding should pend through renderer binding state apply: {:?}",
-                    outcome.into_parts().0
-                )
-            }
+    let pending = match conn.start_command_dispatch(&raw) {
+        CdpCommandTaskStep::Pending(pending) => pending,
+        CdpCommandTaskStep::Complete(outcome) => {
+            panic!(
+                "background Runtime.addBinding should pend through renderer binding state apply: {:?}",
+                outcome.into_parts().0
+            )
         }
     };
 
@@ -1953,7 +1958,7 @@ async fn pending_runtime_binding_page_phase_keeps_background_owner_route_across_
         "binding state apply completion must not write the active owner"
     );
     assert!(
-        conn.target_devtools_session_state_for_route(None, Some(&background_route))
+        conn.target_devtools_session_state_for_session(Some(&background_session))
             .is_some_and(|state| state
                 .runtime_bindings
                 .iter()
@@ -1971,7 +1976,7 @@ async fn pending_runtime_binding_page_phase_keeps_background_owner_route_across_
 }
 
 #[tokio::test]
-async fn runtime_enable_uses_background_initial_document_without_adapter() {
+async fn runtime_enable_uses_background_initial_document_through_attached_session() {
     let mut conn = CdpConnection::new();
     let context = DevToolsCommandContext {
         protocol: DevToolsProtocol::WebDriverBidi,
@@ -2017,16 +2022,11 @@ async fn runtime_enable_uses_background_initial_document_without_adapter() {
     let background_route = conn
         .target_session_route_for_target_id(second_target_id.as_str())
         .expect("background target route");
-    let pending_initial_document = {
-        let previous_route =
-            conn.replace_none_session_owner_route_override(Some(background_route.clone()));
-        let pending = conn
-            .start_initial_document_page_ensure_for_session_owner(None)
-            .expect("background target lifecycle ensure should start")
-            .expect("fresh background target should need an initial document page build");
-        conn.replace_none_session_owner_route_override(previous_route);
-        pending
-    };
+    let background_owner = CommandOwnerScope::for_route(background_route.clone());
+    let pending_initial_document = conn
+        .start_initial_document_page_ensure_for_owner(&background_owner)
+        .expect("background target lifecycle ensure should start")
+        .expect("fresh background target should need an initial document page build");
     let completed_initial_document = pending_initial_document
         .wait()
         .await
@@ -2035,24 +2035,21 @@ async fn runtime_enable_uses_background_initial_document_without_adapter() {
         .await
         .expect("background initial document should install on captured owner");
 
+    let background_session =
+        attach_page_session_for_test(&mut conn, second_target_id.as_str()).await;
     let raw = serde_json::to_string(&json!({
         "id": 1270,
-        "method": "Runtime.enable"
+        "method": "Runtime.enable",
+        "sessionId": background_session
     }))
     .unwrap();
-    let pending = {
-        let previous_route =
-            conn.replace_none_session_owner_route_override(Some(background_route.clone()));
-        let step = conn.start_command_dispatch(&raw);
-        conn.replace_none_session_owner_route_override(previous_route);
-        match step {
-            CdpCommandTaskStep::Pending(pending) => pending,
-            CdpCommandTaskStep::Complete(outcome) => {
-                panic!(
-                    "background Runtime.enable should replay the existing initial context through V8: {:?}",
-                    outcome.into_parts().0
-                )
-            }
+    let pending = match conn.start_command_dispatch(&raw) {
+        CdpCommandTaskStep::Pending(pending) => pending,
+        CdpCommandTaskStep::Complete(outcome) => {
+            panic!(
+                "background Runtime.enable should replay the existing initial context through V8: {:?}",
+                outcome.into_parts().0
+            )
         }
     };
 
@@ -2087,17 +2084,15 @@ async fn runtime_enable_uses_background_initial_document_without_adapter() {
             .is_none_or(|state| !state.runtime_frontend_enabled),
         "Runtime.enable completion must not enable Runtime on the active owner"
     );
-    let previous_route = conn.replace_none_session_owner_route_override(Some(background_route));
     assert!(
-        conn.target_runtime_session_state_for_session(None)
+        conn.target_runtime_session_state_for_session(Some(&background_session))
             .is_some_and(|state| state.runtime_frontend_enabled),
         "Runtime.enable completion should enable Runtime on the original background owner"
     );
-    conn.replace_none_session_owner_route_override(previous_route);
 }
 
 #[tokio::test]
-async fn page_enable_uses_background_initial_document_without_adapter() {
+async fn page_enable_uses_background_initial_document_through_attached_session() {
     let mut conn = CdpConnection::new();
     let context = DevToolsCommandContext {
         protocol: DevToolsProtocol::WebDriverBidi,
@@ -2143,16 +2138,11 @@ async fn page_enable_uses_background_initial_document_without_adapter() {
     let background_route = conn
         .target_session_route_for_target_id(second_target_id.as_str())
         .expect("background target route");
-    let pending_initial_document = {
-        let previous_route =
-            conn.replace_none_session_owner_route_override(Some(background_route.clone()));
-        let pending = conn
-            .start_initial_document_page_ensure_for_session_owner(None)
-            .expect("background target lifecycle ensure should start")
-            .expect("fresh background target should need an initial document page build");
-        conn.replace_none_session_owner_route_override(previous_route);
-        pending
-    };
+    let background_owner = CommandOwnerScope::for_route(background_route.clone());
+    let pending_initial_document = conn
+        .start_initial_document_page_ensure_for_owner(&background_owner)
+        .expect("background target lifecycle ensure should start")
+        .expect("fresh background target should need an initial document page build");
     let completed_initial_document = pending_initial_document
         .wait()
         .await
@@ -2161,23 +2151,19 @@ async fn page_enable_uses_background_initial_document_without_adapter() {
         .await
         .expect("background initial document should install on captured owner");
 
+    let background_session =
+        attach_page_session_for_test(&mut conn, second_target_id.as_str()).await;
     let raw = serde_json::to_string(&json!({
         "id": 1268,
-        "method": "Page.enable"
+        "method": "Page.enable",
+        "sessionId": background_session
     }))
     .unwrap();
-    let pending = {
-        let previous_route = conn.replace_none_session_owner_route_override(Some(background_route));
-        let step = conn.start_command_dispatch(&raw);
-        conn.replace_none_session_owner_route_override(previous_route);
-        match step {
-            CdpCommandTaskStep::Pending(_) => {
-                panic!(
-                    "background Page.enable should not start a pending initial document page build"
-                )
-            }
-            CdpCommandTaskStep::Complete(outcome) => outcome,
+    let pending = match conn.start_command_dispatch(&raw) {
+        CdpCommandTaskStep::Pending(_) => {
+            panic!("background Page.enable should not start a pending initial document page build")
         }
+        CdpCommandTaskStep::Complete(outcome) => outcome,
     };
     let messages = pending.into_parts().0;
     assert!(
@@ -2254,20 +2240,12 @@ async fn initial_document_page_ensure_completion_uses_captured_owner() {
     let background_route = conn
         .target_session_route_for_target_id(second_target_id.as_str())
         .expect("background target route");
-    let pending = {
-        let previous_route = conn.replace_none_session_owner_route_override(Some(background_route));
-        let pending = conn
-            .start_initial_document_page_ensure_for_session_owner(None)
-            .expect("background initial document page ensure should start")
-            .expect("background initial document page ensure should pend");
-        conn.replace_none_session_owner_route_override(previous_route);
-        pending
-    };
+    let background_owner = CommandOwnerScope::for_route(background_route);
+    let pending = conn
+        .start_initial_document_page_ensure_for_owner(&background_owner)
+        .expect("background initial document page ensure should start")
+        .expect("background initial document page ensure should pend");
 
-    let active_route = conn
-        .target_session_route_for_target_id(first_target_id.as_str())
-        .expect("active target route");
-    let previous_route = conn.replace_none_session_owner_route_override(Some(active_route));
     let completed = pending
         .wait()
         .await
@@ -2275,7 +2253,6 @@ async fn initial_document_page_ensure_completion_uses_captured_owner() {
     conn.complete_initial_document_page_build_for_owner(completed)
         .await
         .expect("completion should install on captured owner");
-    conn.replace_none_session_owner_route_override(previous_route);
 
     let browser_context = conn.browser_context.as_ref().expect("browser context");
     assert_eq!(
@@ -2671,12 +2648,11 @@ async fn target_lifecycle_ensure_installs_initial_about_blank_page_for_backgroun
     let background_route = conn
         .target_session_route_for_target_id(second_target_id.as_str())
         .expect("background target route");
-    let previous_route = conn.replace_none_session_owner_route_override(Some(background_route));
+    let background_owner = CommandOwnerScope::for_route(background_route);
     let pending = conn
-        .start_initial_document_page_ensure_for_session_owner(None)
+        .start_initial_document_page_ensure_for_owner(&background_owner)
         .expect("target lifecycle ensure should start background initial page")
         .expect("fresh background initial target should pend initial document page build");
-    conn.replace_none_session_owner_route_override(previous_route);
 
     let completed = pending
         .wait()
@@ -3214,11 +3190,6 @@ async fn devtools_create_target_can_activate_created_target() {
         .into_parts();
     first_realms_before_second_navigation
         .expect("demoted first target realms should remain readable before second navigation");
-    assert!(
-        conn.none_session_owner_route_override().is_none(),
-        "realm lookup must restore the ambient target route"
-    );
-
     let (second_navigate, _, _, _) = conn
         .execute_devtools_command(DevToolsCommand::Navigate(DevToolsNavigateCommand {
             context: DevToolsCommandContext {
@@ -3899,9 +3870,10 @@ async fn bidi_node_remote_value_registers_renderer_shared_node_binding() {
     ctx.conn
         .clear_runtime_remote_object_tracking_for_session_owner(None);
 
+    let owner = CommandOwnerScope::capture(&ctx.conn, None);
     let renderer_binding = ctx
         .conn
-        .document_bidi_node_binding_for_session_owner_async(None, shared_id.as_str())
+        .document_bidi_node_binding_for_owner_async(&owner, shared_id.as_str())
         .await
         .expect("renderer BiDi shared-node binding lookup should run");
     assert_eq!(
@@ -4060,9 +4032,10 @@ async fn bidi_node_remote_value_registers_child_shared_node_bindings() {
     ctx.conn
         .clear_runtime_remote_object_tracking_for_session_owner(None);
 
+    let owner = CommandOwnerScope::capture(&ctx.conn, None);
     let renderer_binding = ctx
         .conn
-        .document_bidi_node_binding_for_session_owner_async(None, &child_shared_id)
+        .document_bidi_node_binding_for_owner_async(&owner, &child_shared_id)
         .await
         .expect("child shared-node binding lookup should run");
     assert!(
@@ -4666,11 +4639,9 @@ async fn devtools_command_applies_known_user_context_viewport_default() {
     let route = conn
         .target_session_route_for_target_id(create_result.target_id.as_str())
         .expect("created target route");
-    let previous_route = conn.replace_none_session_owner_route_override(Some(route));
     let inherited_metrics = conn
-        .target_session_owner_emulated_device_metrics(None)
+        .target_session_owner_emulated_device_metrics_for_route(None, Some(&route))
         .expect("new target should inherit userContext default metrics");
-    conn.replace_none_session_owner_route_override(previous_route);
     assert_eq!(
         (
             inherited_metrics.width,
@@ -8164,12 +8135,7 @@ async fn pending_emulation_user_agent_loader_keeps_active_owner_route_across_com
         }
     };
 
-    let background_route = conn
-        .target_session_route_for_target_id("TID-emulation-ua-background")
-        .expect("background target route");
-    let previous_route = conn.replace_none_session_owner_route_override(Some(background_route));
     let messages = complete_command_task_for_test(&mut conn, *pending).await;
-    conn.replace_none_session_owner_route_override(previous_route);
 
     assert_eq!(messages, vec![json!({ "id": 688, "result": {} })]);
     let browser_context = conn.browser_context.as_ref().expect("browser context");
@@ -8319,36 +8285,35 @@ async fn pending_emulation_timezone_keeps_background_owner_route_across_completi
     let background_route = conn
         .target_session_route_for_target_id("TID-emulation-timezone-background")
         .expect("background target route");
+    let background_session =
+        attach_page_session_for_test(&mut conn, "TID-emulation-timezone-background").await;
     let raw = serde_json::to_string(&json!({
         "id": 689,
         "method": "Emulation.setTimezoneOverride",
-        "params": { "timezoneId": "UTC" }
+        "params": { "timezoneId": "UTC" },
+        "sessionId": background_session
     }))
     .unwrap();
-    let pending = {
-        let previous_route =
-            conn.replace_none_session_owner_route_override(Some(background_route.clone()));
-        let step = conn.start_command_dispatch(&raw);
-        conn.replace_none_session_owner_route_override(previous_route);
-        match step {
-            CdpCommandTaskStep::Pending(pending) => pending,
-            CdpCommandTaskStep::Complete(outcome) => {
-                panic!(
-                    "background Emulation.setTimezoneOverride should update the live background page: {:?}",
-                    outcome.into_parts().0
-                )
-            }
+    let pending = match conn.start_command_dispatch(&raw) {
+        CdpCommandTaskStep::Pending(pending) => pending,
+        CdpCommandTaskStep::Complete(outcome) => {
+            panic!(
+                "background Emulation.setTimezoneOverride should update the live background page: {:?}",
+                outcome.into_parts().0
+            )
         }
     };
 
-    let active_route = conn
-        .target_session_route_for_target_id("TID-emulation-timezone-active")
-        .expect("active target route");
-    let previous_route = conn.replace_none_session_owner_route_override(Some(active_route));
     let messages = complete_command_task_for_test(&mut conn, *pending).await;
-    conn.replace_none_session_owner_route_override(previous_route);
 
-    assert_eq!(messages, vec![json!({ "id": 689, "result": {} })]);
+    assert_eq!(
+        messages,
+        vec![json!({
+            "id": 689,
+            "result": {},
+            "sessionId": background_session
+        })]
+    );
     let browser_context = conn.browser_context.as_ref().expect("browser context");
     assert_eq!(
         browser_context
@@ -8482,39 +8447,35 @@ async fn pending_security_tls_keeps_background_owner_route_across_completion() {
         .replace_loaded_page(Some(background_page));
     conn.browser_context = Some(browser_context);
 
-    let background_route = conn
-        .target_session_route_for_target_id("TID-security-background")
-        .expect("background target route");
+    let background_session =
+        attach_page_session_for_test(&mut conn, "TID-security-background").await;
     let raw = serde_json::to_string(&json!({
         "id": 687,
         "method": "Security.setIgnoreCertificateErrors",
-        "params": { "ignore": true }
+        "params": { "ignore": true },
+        "sessionId": background_session
     }))
     .unwrap();
-    let pending = {
-        let previous_route =
-            conn.replace_none_session_owner_route_override(Some(background_route.clone()));
-        let step = conn.start_command_dispatch(&raw);
-        conn.replace_none_session_owner_route_override(previous_route);
-        match step {
-            CdpCommandTaskStep::Pending(pending) => pending,
-            CdpCommandTaskStep::Complete(outcome) => {
-                panic!(
-                    "background Security.setIgnoreCertificateErrors should update the live background page loader: {:?}",
-                    outcome.into_parts().0
-                )
-            }
+    let pending = match conn.start_command_dispatch(&raw) {
+        CdpCommandTaskStep::Pending(pending) => pending,
+        CdpCommandTaskStep::Complete(outcome) => {
+            panic!(
+                "background Security.setIgnoreCertificateErrors should update the live background page loader: {:?}",
+                outcome.into_parts().0
+            )
         }
     };
 
-    let active_route = conn
-        .target_session_route_for_target_id("TID-security-active")
-        .expect("active target route");
-    let previous_route = conn.replace_none_session_owner_route_override(Some(active_route));
     let messages = complete_command_task_for_test(&mut conn, *pending).await;
-    conn.replace_none_session_owner_route_override(previous_route);
 
-    assert_eq!(messages, vec![json!({ "id": 687, "result": {} })]);
+    assert_eq!(
+        messages,
+        vec![json!({
+            "id": 687,
+            "result": {},
+            "sessionId": background_session
+        })]
+    );
     let browser_context = conn.browser_context.as_ref().expect("browser context");
     assert_eq!(
         browser_context
@@ -8533,7 +8494,20 @@ async fn pending_security_tls_keeps_background_owner_route_across_completion() {
         "background tls",
         "background Security completion should preserve the original background page snapshot"
     );
-    assert!(!conn.tls_verify_host());
+    assert!(
+        conn.tls_verify_host(),
+        "the background session override must not change the active target"
+    );
+    assert_eq!(
+        conn.browser_context
+            .as_ref()
+            .and_then(|browser_context| {
+                browser_context.background_target("TID-security-background")
+            })
+            .and_then(|target| target.tls_verify_host_override),
+        Some(false),
+        "the attached background session should update only its target"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

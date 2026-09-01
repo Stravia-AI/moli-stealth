@@ -3211,10 +3211,11 @@ fn route_worker_runtime_inspector_messages_into(
     response_events: &mut Vec<BackgroundProtocolEvent>,
     background_events: &mut Vec<BackgroundProtocolEvent>,
 ) -> bool {
-    conn.route_renderer_runtime_inspector_messages_with_background_events_into(
+    let owner = crate::conn::CommandOwnerScope::for_session(session_id);
+    conn.route_renderer_runtime_inspector_messages_for_owner_with_background_events_into(
         messages,
         None,
-        Some(session_id),
+        &owner,
         response_events,
         background_events,
     )

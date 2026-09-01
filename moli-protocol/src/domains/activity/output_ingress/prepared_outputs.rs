@@ -182,12 +182,10 @@ impl PreparedProtocolOutputs {
 
     pub(in crate::domains::activity) async fn from_protocol_local_command_boundary(
         conn: &mut CdpConnection,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
     ) -> Self {
         let mut outputs = Self::empty();
-        outputs
-            .append_protocol_local_outputs(conn, session_id)
-            .await;
+        outputs.append_protocol_local_outputs(conn, owner).await;
         outputs
     }
 
@@ -541,10 +539,10 @@ impl PreparedProtocolOutputs {
     async fn append_protocol_local_outputs(
         &mut self,
         conn: &mut CdpConnection,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
     ) {
-        crate::domains::dom_storage::append_pending_dom_storage_outputs_for_session_owner(
-            conn, session_id, self,
+        crate::domains::dom_storage::append_pending_dom_storage_outputs_for_owner(
+            conn, owner, self,
         );
     }
 }

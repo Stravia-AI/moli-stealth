@@ -613,8 +613,9 @@ mod tests {
             request_stage_chain: None,
         };
         assert!(
-            conn.register_in_flight_subresource_fetch_request_for_session_owner(
+            conn.register_in_flight_subresource_fetch_request_for_route(
                 Some("SID-1"),
+                None,
                 Some("fetch-req-1".to_owned()),
                 pending,
             ),
@@ -693,13 +694,12 @@ mod tests {
             .target_page_residence_identity_for_session(Some("SID-collision"))
             .expect("old Page residence should exist");
         let reused_handle = SubresourceNetworkRequestHandle::new(9);
-        assert!(
-            conn.register_in_flight_subresource_fetch_request_for_session_owner(
-                Some("SID-collision"),
-                Some("FETCH-old".to_owned()),
-                pending_request_for_page(old_owner, 7, "NETWORK-old", reused_handle),
-            )
-        );
+        assert!(conn.register_in_flight_subresource_fetch_request_for_route(
+            Some("SID-collision"),
+            None,
+            Some("FETCH-old".to_owned()),
+            pending_request_for_page(old_owner, 7, "NETWORK-old", reused_handle),
+        ));
         let event =
             PendingSubresourceContinueEvent::ResponsePaused(PendingSubresourceResponseInfo {
                 internal_id: 7,
@@ -730,13 +730,12 @@ mod tests {
         let replacement_owner = conn
             .target_page_residence_identity_for_session(Some("SID-collision"))
             .expect("replacement Page residence should exist");
-        assert!(
-            conn.register_in_flight_subresource_fetch_request_for_session_owner(
-                Some("SID-collision"),
-                Some("FETCH-new".to_owned()),
-                pending_request_for_page(replacement_owner, 7, "NETWORK-new", reused_handle),
-            )
-        );
+        assert!(conn.register_in_flight_subresource_fetch_request_for_route(
+            Some("SID-collision"),
+            None,
+            Some("FETCH-new".to_owned()),
+            pending_request_for_page(replacement_owner, 7, "NETWORK-new", reused_handle),
+        ));
 
         let mut out = Vec::new();
         let command_owner = CommandOwnerScope::for_session("SID-collision");

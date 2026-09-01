@@ -1782,20 +1782,22 @@ impl CdpConnection {
             .runtime_session_state()
     }
 
-    pub(crate) fn target_runtime_bindings_for_renderer_session_owner(
+    pub(crate) fn target_runtime_bindings_for_renderer_route(
         &self,
         session_id: Option<&str>,
+        owner_route: Option<&CdpSessionRoute>,
     ) -> Vec<RuntimeBindingDefinition> {
-        self.target_session_owner_ref(session_id)
+        self.target_session_owner_ref_for_route(session_id, owner_route)
             .map(|owner| owner.runtime_bindings_for_renderer())
             .unwrap_or_default()
     }
 
-    pub(crate) fn target_runtime_bindings_for_current_inspector_session_owner(
+    pub(crate) fn target_runtime_bindings_for_current_inspector_route(
         &self,
         session_id: Option<&str>,
+        owner_route: Option<&CdpSessionRoute>,
     ) -> Vec<RuntimeBindingDefinition> {
-        self.target_session_owner_ref(session_id)
+        self.target_session_owner_ref_for_route(session_id, owner_route)
             .and_then(|owner| owner.devtools_session_state())
             .map(|state| state.runtime_bindings.clone())
             .unwrap_or_default()
@@ -1950,8 +1952,7 @@ impl CdpConnection {
         &self,
         session_id: Option<&str>,
     ) -> Option<TargetPageResidenceIdentity> {
-        let none_session_owner_route = self.none_session_owner_route_override();
-        self.target_page_residence_identity_for_route(session_id, none_session_owner_route.as_ref())
+        self.target_page_residence_identity_for_route(session_id, None)
     }
 
     pub(crate) fn target_page_residence_identity_for_route(
@@ -2047,17 +2048,12 @@ impl CdpConnection {
             })
     }
 
-    /// Captures the lifetime of the concrete Page attachment currently
-    /// addressed by `session_id`.
-    ///
-    /// The returned token is owned by that attachment rather than by a numeric
-    /// slot generation. Moving the whole target slot preserves it; replacing
-    /// or clearing the installed Page terminates it directly.
-    pub(crate) fn capture_target_page_residence_token_for_session(
+    pub(crate) fn capture_target_page_residence_token_for_route(
         &mut self,
         session_id: Option<&str>,
+        owner_route: Option<&CdpSessionRoute>,
     ) -> Option<crate::conn::TargetPageResidenceToken> {
-        self.runtime_session_owner_slot_mut(session_id)
+        self.runtime_session_owner_slot_mut_for_route(session_id, owner_route)
             .ok()?
             .page_slot_mut()
             .page_residence_token()
@@ -2085,15 +2081,14 @@ impl CdpConnection {
     /// Captures the renderer-side identity of the Page currently addressed by
     /// `session_id`.
     ///
-    /// Callers must capture this while any `None`-session owner-route override
-    /// is active. The returned identity is self-contained and must not be
-    /// reconstructed later from a session that may then address another Page.
+    /// The returned identity is self-contained and must not be reconstructed
+    /// later from a session that may then address another Page.
+    #[cfg(test)]
     pub(crate) fn renderer_page_residence_identity_for_session_owner(
         &self,
         session_id: Option<&str>,
     ) -> Option<crate::conn::RendererPageResidenceIdentity> {
-        let owner_route = self.none_session_owner_route_override();
-        self.renderer_page_residence_identity_for_route(session_id, owner_route.as_ref())
+        self.renderer_page_residence_identity_for_route(session_id, None)
     }
 
     pub(crate) fn renderer_page_residence_identity_for_route(
@@ -2316,8 +2311,7 @@ impl CdpConnection {
         &mut self,
         session_id: Option<&str>,
     ) -> Result<&mut TargetRuntimeSlot, String> {
-        let none_session_owner_route = self.none_session_owner_route_override();
-        self.runtime_session_owner_slot_mut_for_route(session_id, none_session_owner_route.as_ref())
+        self.runtime_session_owner_slot_mut_for_route(session_id, None)
     }
 
     pub(crate) fn runtime_session_owner_slot_mut_for_route(
@@ -2341,8 +2335,7 @@ impl CdpConnection {
         &self,
         session_id: Option<&str>,
     ) -> Result<&TargetRuntimeSlot, String> {
-        let none_session_owner_route = self.none_session_owner_route_override();
-        self.runtime_session_owner_slot_for_route(session_id, none_session_owner_route.as_ref())
+        self.runtime_session_owner_slot_for_route(session_id, None)
     }
 
     pub(crate) fn runtime_session_owner_slot_for_route(
@@ -2446,17 +2439,21 @@ impl CdpConnection {
     /// identities, but must never call `page_event_session_ids_for_session_owner`
     /// again: doing so could route an old Page's historical event through a
     /// replacement Page or a newly active implicit attachment.
-    pub(crate) fn page_event_protocol_attachments_for_session_owner(
+    pub(crate) fn page_event_protocol_attachments_for_route(
         &self,
         session_id: Option<&str>,
+        owner_route: Option<&CdpSessionRoute>,
     ) -> Option<Vec<crate::conn::TargetPageProtocolAttachmentIdentity>> {
-        let source = self.target_page_protocol_attachment_identity_for_session(session_id)?;
+        let source =
+            self.target_page_protocol_attachment_identity_for_route(session_id, owner_route)?;
         let attachments = self
-            .subscribed_page_event_session_ids_for_session_owner(session_id)
+            .subscribed_page_event_session_ids_for_route(session_id, owner_route)
             .into_iter()
             .map(|event_session_id| {
-                self.target_page_protocol_attachment_identity_for_session(
+                let event_owner_route = event_session_id.is_none().then_some(owner_route).flatten();
+                self.target_page_protocol_attachment_identity_for_route(
                     event_session_id.as_deref(),
+                    event_owner_route,
                 )
             })
             .collect::<Option<Vec<_>>>()?;
@@ -2705,8 +2702,7 @@ impl CdpConnection {
         &mut self,
         session_id: Option<&str>,
     ) -> Option<TargetSessionOwnerMut<'_>> {
-        let none_session_owner_route = self.none_session_owner_route_override();
-        self.target_session_owner_mut_for_route(session_id, none_session_owner_route.as_ref())
+        self.target_session_owner_mut_for_route(session_id, None)
     }
 
     pub(super) fn target_session_owner_mut_for_route(
@@ -2737,8 +2733,7 @@ impl CdpConnection {
         &self,
         session_id: Option<&str>,
     ) -> Option<TargetSessionOwnerRef<'_>> {
-        let none_session_owner_route = self.none_session_owner_route_override();
-        self.target_session_owner_ref_for_route(session_id, none_session_owner_route.as_ref())
+        self.target_session_owner_ref_for_route(session_id, None)
     }
 
     pub(super) fn target_session_owner_ref_for_route(

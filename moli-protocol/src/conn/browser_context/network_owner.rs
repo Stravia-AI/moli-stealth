@@ -922,9 +922,7 @@ impl CdpConnection {
             self.session_route(session_id),
             Some(CdpSessionRoute::Browser)
         );
-        let is_pre_context_root = session_id.is_none()
-            && self.none_session_owner_route_override().is_none()
-            && self.browser_context.is_none();
+        let is_pre_context_root = session_id.is_none() && self.browser_context.is_none();
         if !is_browser_session && !is_pre_context_root {
             return None;
         }

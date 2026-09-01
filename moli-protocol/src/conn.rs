@@ -1183,7 +1183,6 @@ pub struct CdpConnection {
     next_page_domain_subscription_generation: u64,
     next_internal_runtime_command_id: u64,
     network_request_id_allocator: ConnectionNetworkRequestIdAllocator,
-    none_session_owner_route_override: Option<CdpSessionRoute>,
     pending_runtime_await_jobs: HashMap<PendingRendererCommandKey, RuntimeAwaitJob>,
     claimed_pending_inspector_await_owners:
         HashMap<PendingRendererCommandKey, ClaimedPendingInspectorAwaitOwner>,
@@ -1517,7 +1516,6 @@ impl CdpConnection {
             scheduler_hooks: CdpSchedulerHooks::default(),
             target_host_lifecycle_observer: None,
             scheduler_state: CdpConnectionSchedulerState::default(),
-            none_session_owner_route_override: None,
             standalone_navigation_engine,
         }
     }
@@ -1696,11 +1694,7 @@ impl CdpConnection {
         &self,
         session_id: Option<&str>,
     ) -> bool {
-        let none_session_owner_route = self.none_session_owner_route_override();
-        self.has_pending_document_navigation_for_route(
-            session_id,
-            none_session_owner_route.as_ref(),
-        )
+        self.has_pending_document_navigation_for_route(session_id, None)
     }
 
     pub(crate) fn has_pending_document_navigation_for_route(
@@ -1799,8 +1793,7 @@ impl CdpConnection {
         &self,
         session_id: Option<&str>,
     ) -> Result<(), String> {
-        let none_session_owner_route = self.none_session_owner_route_override();
-        self.ensure_document_accessible_for_route(session_id, none_session_owner_route.as_ref())
+        self.ensure_document_accessible_for_route(session_id, None)
     }
 
     pub(crate) fn ensure_document_accessible_for_route(
@@ -1880,11 +1873,7 @@ impl CdpConnection {
         &mut self,
         session_id: Option<&str>,
     ) -> Result<&mut Page, String> {
-        let none_session_owner_route = self.none_session_owner_route_override();
-        self.loaded_page_mut_for_protocol_access_for_route(
-            session_id,
-            none_session_owner_route.as_ref(),
-        )
+        self.loaded_page_mut_for_protocol_access_for_route(session_id, None)
     }
 
     pub(crate) fn loaded_page_mut_for_protocol_access_for_route(
@@ -1910,11 +1899,7 @@ impl CdpConnection {
         &mut self,
         session_id: Option<&str>,
     ) -> Result<&mut Page, String> {
-        let none_session_owner_route = self.none_session_owner_route_override();
-        self.loaded_page_mut_for_target_configuration_for_route(
-            session_id,
-            none_session_owner_route.as_ref(),
-        )
+        self.loaded_page_mut_for_target_configuration_for_route(session_id, None)
     }
 
     pub(crate) fn loaded_page_mut_for_target_configuration_for_route(
@@ -1938,11 +1923,7 @@ impl CdpConnection {
         &mut self,
         session_id: Option<&str>,
     ) -> Result<&mut Page, String> {
-        let none_session_owner_route = self.none_session_owner_route_override();
-        self.loaded_page_mut_for_interruptible_protocol_access_for_route(
-            session_id,
-            none_session_owner_route.as_ref(),
-        )
+        self.loaded_page_mut_for_interruptible_protocol_access_for_route(session_id, None)
     }
 
     pub(crate) fn loaded_page_mut_for_interruptible_protocol_access_for_route(
@@ -2138,16 +2119,19 @@ impl CdpConnection {
         .release_renderer_document_load_visibility_barrier(loader_id)
     }
 
-    pub(crate) fn cancel_renderer_document_load_visibility_barrier_for_session_owner(
+    pub(crate) fn cancel_renderer_document_load_visibility_barrier_for_owner(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         loader_id: &str,
     ) -> bool {
-        self.runtime_session_owner_slot_mut(session_id)
-            .is_ok_and(|slot| {
-                slot.page_slot_mut()
-                    .cancel_renderer_document_load_visibility_barrier(loader_id)
-            })
+        self.runtime_session_owner_slot_mut_for_route(
+            owner.session_id(),
+            owner.session_owner_route(),
+        )
+        .is_ok_and(|slot| {
+            slot.page_slot_mut()
+                .cancel_renderer_document_load_visibility_barrier(loader_id)
+        })
     }
 
     #[cfg(test)]
@@ -2168,9 +2152,9 @@ impl CdpConnection {
         ))
     }
 
-    pub(crate) fn register_exact_renderer_document_lifecycle_observer_for_session_owner(
+    pub(crate) fn register_exact_renderer_document_lifecycle_observer_for_owner(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         expected_binding: Option<&CommittedRendererDocumentBinding>,
         milestone: moli_core::page::RendererDocumentLifecycleMilestone,
     ) -> RendererDocumentLifecycleObserver {
@@ -2179,7 +2163,10 @@ impl CdpConnection {
                 RendererDocumentLifecycleObservation::Unavailable,
             );
         };
-        let Ok(slot) = self.runtime_session_owner_slot_mut(session_id) else {
+        let Ok(slot) = self.runtime_session_owner_slot_mut_for_route(
+            owner.session_id(),
+            owner.session_owner_route(),
+        ) else {
             return RendererDocumentLifecycleObserver::resolved(
                 RendererDocumentLifecycleObservation::Unavailable,
             );
@@ -2227,9 +2214,9 @@ impl CdpConnection {
     /// Having no `Page` subscriber is a normal terminal outcome. The binding
     /// must still be consumed so enabling `Page` later cannot replay a
     /// historical event from an earlier navigation.
-    pub(crate) fn settle_root_frame_stopped_loading_observation(
+    pub(crate) fn settle_root_frame_stopped_loading_observation_for_owner(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
     ) -> Result<
         crate::domains::activity::RootFrameStoppedLoadingSettlement,
         crate::domains::activity::RootFrameStoppedLoadingSettlementError,
@@ -2240,7 +2227,10 @@ impl CdpConnection {
         };
 
         let binding = self
-            .runtime_session_owner_slot_mut(session_id)
+            .runtime_session_owner_slot_mut_for_route(
+                owner.session_id(),
+                owner.session_owner_route(),
+            )
             .ok()
             .and_then(|slot| {
                 slot.page_slot_mut()
@@ -2250,13 +2240,19 @@ impl CdpConnection {
             return Err(SettlementError::MissingArmedObservation);
         };
         if self
-            .subscribed_page_event_session_ids_for_session_owner(session_id)
+            .subscribed_page_event_session_ids_for_route(
+                owner.session_id(),
+                owner.session_owner_route(),
+            )
             .is_empty()
         {
             return Ok(Settlement::Unobserved);
         }
         let attachments = self
-            .page_event_protocol_attachments_for_session_owner(session_id)
+            .page_event_protocol_attachments_for_route(
+                owner.session_id(),
+                owner.session_owner_route(),
+            )
             .ok_or(SettlementError::SubscribedAttachmentUnavailable)?;
         let publish_sequence = self
             .scheduler_state
@@ -2526,15 +2522,6 @@ impl CdpConnection {
         }));
     }
 
-    pub(crate) fn background_navigation_completion_sender_for_session_owner(
-        &self,
-        session_id: Option<&str>,
-    ) -> Option<
-        tokio::sync::mpsc::UnboundedSender<crate::domains::page::BackgroundNavigationCompletion>,
-    > {
-        self.background_navigation_completion_sender_for_route(session_id, None)
-    }
-
     pub(crate) fn background_navigation_completion_sender_for_route(
         &self,
         session_id: Option<&str>,
@@ -2735,14 +2722,10 @@ impl CdpConnection {
             );
             return;
         }
-        let owner_scope = admission.owner_scope().clone();
         let observation_id = self
             .scheduler_state
             .allocate_deferred_main_document_load_observation_id();
-        let completion = {
-            let mut route_scope = owner_scope.enter(self);
-            admission.bind_lifecycle_observer(route_scope.conn_mut(), observation_id)
-        };
+        let completion = admission.bind_lifecycle_observer(self, observation_id);
         let publish_sequence = self
             .scheduler_state
             .allocate_protocol_work_publish_sequence();
@@ -2840,15 +2823,8 @@ impl CdpConnection {
         &mut self,
         completion: CompletedDeferredMainDocumentLoadCompletion,
     ) -> CdpTurnOutcome {
-        let owner_scope = completion.inner.owner_scope().clone();
         let mut output = BackgroundProtocolEventBuffer::default();
-        {
-            let mut route_scope = owner_scope.enter(self);
-            completion
-                .inner
-                .emit_async(route_scope.conn_mut(), &mut output)
-                .await;
-        }
+        completion.inner.emit_async(self, &mut output).await;
         CdpTurnOutcome::new_with_protocol_and_post_response_events(
             output.into_events(),
             Vec::new(),
@@ -3006,31 +2982,6 @@ impl CdpConnection {
                 phase_ms = started.elapsed().as_millis(),
             );
         }
-    }
-
-    pub(crate) fn none_session_owner_route_override(&self) -> Option<CdpSessionRoute> {
-        self.none_session_owner_route_override.clone()
-    }
-
-    pub(crate) fn replace_none_session_owner_route_override(
-        &mut self,
-        route: Option<CdpSessionRoute>,
-    ) -> Option<CdpSessionRoute> {
-        std::mem::replace(&mut self.none_session_owner_route_override, route)
-    }
-
-    pub(crate) fn scoped_none_session_owner_route_override(
-        &mut self,
-        route: CdpSessionRoute,
-    ) -> NoneSessionOwnerRouteOverrideScope<'_> {
-        NoneSessionOwnerRouteOverrideScope::enter(self, Some(route))
-    }
-
-    pub(crate) fn scoped_optional_none_session_owner_route_override(
-        &mut self,
-        route: Option<CdpSessionRoute>,
-    ) -> NoneSessionOwnerRouteOverrideScope<'_> {
-        NoneSessionOwnerRouteOverrideScope::enter(self, route)
     }
 
     pub(crate) fn response_body_materialize_limit(&self) -> usize {
@@ -4169,38 +4120,6 @@ impl CdpConnection {
                 target_id: tab_target_id.to_owned(),
             });
         }
-    }
-}
-
-pub(crate) struct NoneSessionOwnerRouteOverrideScope<'a> {
-    conn: &'a mut CdpConnection,
-    previous_route: Option<Option<CdpSessionRoute>>,
-}
-
-impl<'a> NoneSessionOwnerRouteOverrideScope<'a> {
-    fn enter(conn: &'a mut CdpConnection, target_route: Option<CdpSessionRoute>) -> Self {
-        let previous_route = conn.replace_none_session_owner_route_override(target_route);
-        Self {
-            conn,
-            previous_route: Some(previous_route),
-        }
-    }
-
-    pub(crate) fn conn_mut(&mut self) -> &mut CdpConnection {
-        self.conn
-    }
-
-    pub(crate) fn restore(&mut self) {
-        if let Some(previous_route) = self.previous_route.take() {
-            self.conn
-                .replace_none_session_owner_route_override(previous_route);
-        }
-    }
-}
-
-impl Drop for NoneSessionOwnerRouteOverrideScope<'_> {
-    fn drop(&mut self) {
-        self.restore();
     }
 }
 

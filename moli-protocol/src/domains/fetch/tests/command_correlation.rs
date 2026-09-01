@@ -275,8 +275,9 @@ async fn pending_fetch_command_state_is_bound_to_page_attachment() {
         .replace_page_attachment_id_for_test();
     assert!(
         ctx.conn
-            .take_pending_subresource_fetch_request_for_action_session_owner(
+            .take_pending_subresource_fetch_request_for_route(
                 Some("SID-1"),
+                None,
                 Some("SID-1"),
                 "INT-collision",
             )
@@ -300,8 +301,9 @@ async fn pending_fetch_command_state_is_bound_to_page_attachment() {
     );
     assert_eq!(
         ctx.conn
-            .take_pending_subresource_fetch_request_for_action_session_owner(
+            .take_pending_subresource_fetch_request_for_route(
                 Some("SID-1"),
+                None,
                 Some("SID-1"),
                 "INT-collision",
             )
@@ -371,8 +373,9 @@ async fn completed_continue_atomically_claims_a_pause_still_pending_publication(
     let replacement = pending_request(&replacement_owner, 75);
     assert!(
         ctx.conn
-            .register_in_flight_subresource_fetch_request_for_session_owner(
+            .register_in_flight_subresource_fetch_request_for_route(
                 Some("SID-1"),
+                None,
                 Some("INT-replacement".to_owned()),
                 replacement,
             )
@@ -407,8 +410,9 @@ async fn continuation_claim_preserves_state_owned_by_a_different_page_residence(
         .expect("initial Page residence should exist");
     assert!(
         ctx.conn
-            .register_in_flight_subresource_fetch_request_for_session_owner(
+            .register_in_flight_subresource_fetch_request_for_route(
                 Some("SID-1"),
+                None,
                 Some("INT-retired-in-flight".to_owned()),
                 pending_request(&retired_owner, 76),
             )
@@ -510,8 +514,9 @@ async fn pending_fetch_auth_state_is_bound_to_page_attachment() {
         .replace_page_attachment_id_for_test();
     assert!(
         ctx.conn
-            .take_pending_subresource_fetch_auth_request_for_action_session_owner(
+            .take_pending_subresource_fetch_auth_request_for_route(
                 Some("SID-1"),
+                None,
                 Some("SID-1"),
                 "AUTH-collision",
             )
@@ -535,8 +540,9 @@ async fn pending_fetch_auth_state_is_bound_to_page_attachment() {
     );
     assert_eq!(
         ctx.conn
-            .take_pending_subresource_fetch_auth_request_for_action_session_owner(
+            .take_pending_subresource_fetch_auth_request_for_route(
                 Some("SID-1"),
+                None,
                 Some("SID-1"),
                 "AUTH-collision",
             )
@@ -568,8 +574,9 @@ async fn pending_fetch_response_state_is_bound_to_page_attachment() {
         .replace_page_attachment_id_for_test();
     assert!(
         ctx.conn
-            .take_pending_subresource_fetch_response_request_for_action_session_owner(
+            .take_pending_subresource_fetch_response_request_for_route(
                 Some("SID-1"),
+                None,
                 Some("SID-1"),
                 "RESPONSE-collision",
             )
@@ -593,8 +600,9 @@ async fn pending_fetch_response_state_is_bound_to_page_attachment() {
     );
     assert_eq!(
         ctx.conn
-            .take_pending_subresource_fetch_response_request_for_action_session_owner(
+            .take_pending_subresource_fetch_response_request_for_route(
                 Some("SID-1"),
+                None,
                 Some("SID-1"),
                 "RESPONSE-collision",
             )

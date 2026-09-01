@@ -2641,7 +2641,7 @@ fn single_pending_emulation_dispatch(
 
 fn emulation_command_is_context_wide(conn: &CdpConnection, session_id: Option<&str>) -> bool {
     match session_id {
-        None => conn.none_session_owner_route_override().is_none(),
+        None => true,
         Some(session_id) => matches!(
             conn.session_route(Some(session_id)),
             Some(CdpSessionRoute::Browser)

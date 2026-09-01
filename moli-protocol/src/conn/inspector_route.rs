@@ -465,13 +465,15 @@ mod tests {
             Vec::new(),
         );
         let mut ordered_events = Vec::new();
+        let owner = CommandOwnerScope::capture(&ctx.conn, None);
         assert!(
-            !ctx.conn.route_renderer_runtime_command_output_into(
-                output,
-                Some(77),
-                None,
-                &mut ordered_events,
-            ),
+            !ctx.conn
+                .route_renderer_runtime_command_output_for_owner_into(
+                    output,
+                    Some(77),
+                    &owner,
+                    &mut ordered_events,
+                ),
             "a validated state-only response must not invent a frontend completion"
         );
         assert!(ordered_events.is_empty());

@@ -1,6 +1,6 @@
 use super::{
-    CdpConnection, CdpSessionRoute, NoneSessionOwnerRouteOverrideScope,
-    TargetPageProtocolAttachmentIdentity, TargetPageResidenceIdentity,
+    CdpConnection, CdpSessionRoute, TargetPageProtocolAttachmentIdentity,
+    TargetPageResidenceIdentity,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,9 +35,6 @@ impl CommandOwnerScope {
     }
 
     fn capture_default_route(conn: &CdpConnection) -> CdpSessionRoute {
-        if let Some(route) = conn.none_session_owner_route_override() {
-            return route;
-        }
         let Some(browser_context) = conn.browser_context.as_ref() else {
             return CdpSessionRoute::Browser;
         };
@@ -105,13 +102,6 @@ impl CommandOwnerScope {
             CommandOwnerIdentity::Route(route) => Some(route),
             CommandOwnerIdentity::Session(_) => None,
         }
-    }
-
-    pub(crate) fn enter<'a>(
-        &self,
-        conn: &'a mut CdpConnection,
-    ) -> NoneSessionOwnerRouteOverrideScope<'a> {
-        conn.scoped_optional_none_session_owner_route_override(self.session_owner_route().cloned())
     }
 }
 

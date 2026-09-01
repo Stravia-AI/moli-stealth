@@ -1758,7 +1758,6 @@ fn devtools_target_context_resolves_background_page_without_ambient_route() {
         browser_context_id: None,
     };
 
-    assert_eq!(conn.none_session_owner_route_override(), None);
     let residence = conn
         .page_residence_identity_for_devtools_context(&context)
         .expect("explicit target context should resolve its Page");
@@ -1766,11 +1765,6 @@ fn devtools_target_context_resolves_background_page_without_ambient_route() {
     assert_eq!(
         conn.devtools_context_document_navigation_state(&context),
         crate::DevToolsDocumentNavigationState::PendingNavigation
-    );
-    assert_eq!(
-        conn.none_session_owner_route_override(),
-        None,
-        "explicit lookup must not mutate connection-global routing state"
     );
 }
 

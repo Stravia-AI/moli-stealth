@@ -228,13 +228,6 @@ fn remove_network_intercept_from_browser_context(
 }
 
 impl CdpConnection {
-    pub(crate) fn target_fetch_subresource_interception_snapshot_for_session_owner(
-        &self,
-        session_id: Option<&str>,
-    ) -> Option<TargetFetchSubresourceInterceptionSnapshot> {
-        self.target_fetch_subresource_interception_snapshot_for_route(session_id, None)
-    }
-
     pub(crate) fn target_fetch_subresource_interception_snapshot_for_route(
         &self,
         session_id: Option<&str>,
@@ -261,11 +254,12 @@ impl CdpConnection {
             .and_then(|config| config.session_id().map(str::to_owned))
     }
 
-    pub(crate) fn target_fetch_handle_auth_requests_for_session_owner(
+    pub(crate) fn target_fetch_handle_auth_requests_for_route(
         &self,
         session_id: Option<&str>,
+        owner_route: Option<&CdpSessionRoute>,
     ) -> bool {
-        self.target_session_owner_aggregate_fetch_config(session_id)
+        self.target_session_owner_aggregate_fetch_config_for_route(session_id, owner_route)
             .is_some_and(|config| config.handle_auth_requests())
     }
 
@@ -380,12 +374,7 @@ impl CdpConnection {
         session_id: Option<&str>,
         body: CapturedBody,
     ) -> Result<String, String> {
-        let none_session_owner_route = self.none_session_owner_route_override();
-        self.open_io_stream_body_source_for_route(
-            session_id,
-            none_session_owner_route.as_ref(),
-            body,
-        )
+        self.open_io_stream_body_source_for_route(session_id, None, body)
     }
 
     pub(crate) fn open_io_stream_body_source_for_route(
@@ -422,14 +411,17 @@ impl CdpConnection {
             .read_io_stream(handle, offset, size)
     }
 
-    pub(crate) fn register_synthetic_websocket_request_for_session_owner(
+    pub(crate) fn register_synthetic_websocket_request_for_route(
         &mut self,
         session_id: Option<&str>,
+        owner_route: Option<&CdpSessionRoute>,
         request_id: String,
         network_request_id: String,
         socket_id: u64,
     ) -> bool {
-        let Ok(runtime_slot) = self.runtime_session_owner_slot_mut(session_id) else {
+        let Ok(runtime_slot) =
+            self.runtime_session_owner_slot_mut_for_route(session_id, owner_route)
+        else {
             return false;
         };
         runtime_slot.register_synthetic_websocket_request(
@@ -445,7 +437,16 @@ impl CdpConnection {
         session_id: Option<&str>,
         request_id: &str,
     ) -> Option<u64> {
-        self.runtime_session_owner_slot(session_id)
+        self.synthetic_websocket_socket_id_for_route(session_id, None, request_id)
+    }
+
+    pub(crate) fn synthetic_websocket_socket_id_for_route(
+        &self,
+        session_id: Option<&str>,
+        owner_route: Option<&CdpSessionRoute>,
+        request_id: &str,
+    ) -> Option<u64> {
+        self.runtime_session_owner_slot_for_route(session_id, owner_route)
             .ok()
             .and_then(|runtime_slot| {
                 runtime_slot.synthetic_websocket_socket_id_for_request(request_id)
@@ -502,32 +503,35 @@ impl CdpConnection {
             )
     }
 
-    pub(crate) fn consume_pending_request_action_for_session_owner(
+    pub(crate) fn consume_pending_request_action_for_route(
         &mut self,
         session_id: Option<&str>,
+        owner_route: Option<&CdpSessionRoute>,
         request_id: &str,
     ) -> Option<Result<(), &'static str>> {
-        self.target_session_owner_mut(session_id)?
+        self.target_session_owner_mut_for_route(session_id, owner_route)?
             .consume_pending_request_action(request_id)
     }
 
-    pub(crate) fn take_pending_fetch_navigation_for_session_owner(
+    pub(crate) fn take_pending_fetch_navigation_for_route(
         &mut self,
         owner_session_id: Option<&str>,
+        owner_route: Option<&CdpSessionRoute>,
         action_session_id: Option<&str>,
         request_id: &str,
     ) -> Option<PendingFetchNavigation> {
-        self.target_session_owner_mut(owner_session_id)?
+        self.target_session_owner_mut_for_route(owner_session_id, owner_route)?
             .take_pending_fetch_navigation_for_action_session(request_id, action_session_id)
     }
 
-    pub(crate) fn take_pending_fetch_auth_navigation_for_action_session_owner(
+    pub(crate) fn take_pending_fetch_auth_navigation_for_route(
         &mut self,
         owner_session_id: Option<&str>,
+        owner_route: Option<&CdpSessionRoute>,
         action_session_id: Option<&str>,
         request_id: &str,
     ) -> Option<PendingFetchAuthNavigation> {
-        self.target_session_owner_mut(owner_session_id)?
+        self.target_session_owner_mut_for_route(owner_session_id, owner_route)?
             .take_pending_fetch_auth_navigation_for_action_session(request_id, action_session_id)
     }
 
@@ -537,13 +541,7 @@ impl CdpConnection {
         request_id: String,
         pending: PendingFetchAuthNavigation,
     ) -> bool {
-        let owner_route = self.none_session_owner_route_override();
-        self.register_pending_fetch_auth_navigation_for_route(
-            session_id,
-            owner_route.as_ref(),
-            request_id,
-            pending,
-        )
+        self.register_pending_fetch_auth_navigation_for_route(session_id, None, request_id, pending)
     }
 
     pub(crate) fn register_pending_fetch_auth_navigation_for_route(
@@ -578,53 +576,58 @@ impl CdpConnection {
             })
     }
 
-    pub(crate) fn take_pending_fetch_response_transfer_for_terminal_action_for_session_owner(
+    pub(crate) fn take_pending_fetch_response_transfer_for_terminal_action_for_route(
         &mut self,
         session_id: Option<&str>,
+        owner_route: Option<&CdpSessionRoute>,
         request_id: &str,
     ) -> Option<PausedDocumentTransfer> {
-        self.target_session_owner_mut(session_id)?
+        self.target_session_owner_mut_for_route(session_id, owner_route)?
             .take_pending_fetch_response_transfer_for_terminal_action(request_id)
     }
 
-    pub(crate) fn take_pending_fetch_response_transfer_for_body_read_for_session_owner(
+    pub(crate) fn take_pending_fetch_response_transfer_for_body_read_for_route(
         &mut self,
         session_id: Option<&str>,
+        owner_route: Option<&CdpSessionRoute>,
         request_id: &str,
     ) -> Option<PausedDocumentTransfer> {
-        self.target_session_owner_mut(session_id)?
+        self.target_session_owner_mut_for_route(session_id, owner_route)?
             .take_pending_fetch_response_transfer(request_id)
     }
 
-    pub(crate) fn register_pending_fetch_response_transfer_for_session_owner(
+    pub(crate) fn register_pending_fetch_response_transfer_for_route(
         &mut self,
         session_id: Option<&str>,
+        owner_route: Option<&CdpSessionRoute>,
         request_id: String,
         transfer: PausedDocumentTransfer,
     ) -> bool {
-        self.target_session_owner_mut(session_id)
+        self.target_session_owner_mut_for_route(session_id, owner_route)
             .is_some_and(|mut owner| {
                 owner.register_pending_fetch_response_transfer(request_id, transfer)
             })
     }
 
-    pub(crate) fn pending_subresource_fetch_response_request_for_action_session_owner(
+    pub(crate) fn pending_subresource_fetch_response_request_for_route(
         &mut self,
         owner_session_id: Option<&str>,
+        owner_route: Option<&CdpSessionRoute>,
         action_session_id: Option<&str>,
         request_id: &str,
     ) -> Option<PendingSubresourceFetchResponseRequest> {
-        self.target_session_owner_mut(owner_session_id)?
+        self.target_session_owner_mut_for_route(owner_session_id, owner_route)?
             .pending_subresource_fetch_response_request(request_id, action_session_id)
     }
 
-    pub(crate) fn mark_pending_subresource_fetch_response_body_taken_as_stream_for_action_session_owner(
+    pub(crate) fn mark_pending_subresource_fetch_response_body_taken_as_stream_for_route(
         &mut self,
         owner_session_id: Option<&str>,
+        owner_route: Option<&CdpSessionRoute>,
         action_session_id: Option<&str>,
         request_id: &str,
     ) -> bool {
-        self.target_session_owner_mut(owner_session_id)
+        self.target_session_owner_mut_for_route(owner_session_id, owner_route)
             .is_some_and(|mut owner| {
                 owner.mark_pending_subresource_fetch_response_body_taken_as_stream(
                     request_id,
@@ -788,27 +791,29 @@ impl CdpConnection {
             .then_some(pending)
     }
 
-    pub(crate) fn take_pending_subresource_fetch_request_for_action_session_owner(
+    pub(crate) fn take_pending_subresource_fetch_request_for_route(
         &mut self,
         owner_session_id: Option<&str>,
+        owner_route: Option<&CdpSessionRoute>,
         action_session_id: Option<&str>,
         request_id: &str,
     ) -> Option<PendingSubresourceFetchRequest> {
         let pending = self
-            .target_session_owner_mut(owner_session_id)?
+            .target_session_owner_mut_for_route(owner_session_id, owner_route)?
             .take_pending_subresource_fetch_request(request_id, action_session_id)?;
         self.pending_subresource_fetch_request_residence_is_current(owner_session_id, &pending)
             .then_some(pending)
     }
 
-    pub(crate) fn take_pending_subresource_fetch_auth_request_for_action_session_owner(
+    pub(crate) fn take_pending_subresource_fetch_auth_request_for_route(
         &mut self,
         owner_session_id: Option<&str>,
+        owner_route: Option<&CdpSessionRoute>,
         action_session_id: Option<&str>,
         request_id: &str,
     ) -> Option<PendingSubresourceFetchAuthRequest> {
         let pending = self
-            .target_session_owner_mut(owner_session_id)?
+            .target_session_owner_mut_for_route(owner_session_id, owner_route)?
             .take_pending_subresource_fetch_auth_request(request_id, action_session_id)?;
         self.target_page_residence_identity_is_current_for_session(
             owner_session_id,
@@ -817,14 +822,15 @@ impl CdpConnection {
         .then_some(pending)
     }
 
-    pub(crate) fn take_pending_subresource_fetch_response_request_for_action_session_owner(
+    pub(crate) fn take_pending_subresource_fetch_response_request_for_route(
         &mut self,
         owner_session_id: Option<&str>,
+        owner_route: Option<&CdpSessionRoute>,
         action_session_id: Option<&str>,
         request_id: &str,
     ) -> Option<PendingSubresourceFetchResponseRequest> {
         let pending = self
-            .target_session_owner_mut(owner_session_id)?
+            .target_session_owner_mut_for_route(owner_session_id, owner_route)?
             .take_pending_subresource_fetch_response_request(request_id, action_session_id)?;
         self.target_page_residence_identity_is_current_for_session(
             owner_session_id,
@@ -833,13 +839,14 @@ impl CdpConnection {
         .then_some(pending)
     }
 
-    pub(crate) fn take_in_flight_subresource_fetch_request_for_session_owner(
+    pub(crate) fn take_in_flight_subresource_fetch_request_for_route(
         &mut self,
         session_id: Option<&str>,
+        owner_route: Option<&CdpSessionRoute>,
         internal_id: u64,
     ) -> Option<InFlightSubresourceFetchRequest> {
         let in_flight = self
-            .target_session_owner_mut(session_id)?
+            .target_session_owner_mut_for_route(session_id, owner_route)?
             .take_in_flight_subresource_fetch_request(internal_id)?;
         self.installed_subresource_fetch_request_is_current(session_id, &in_flight.pending)
             .then_some(in_flight)
@@ -890,17 +897,6 @@ impl CdpConnection {
             })
     }
 
-    pub(crate) fn register_in_flight_subresource_fetch_request_for_session_owner(
-        &mut self,
-        session_id: Option<&str>,
-        request_id: Option<String>,
-        pending: PendingSubresourceFetchRequest,
-    ) -> bool {
-        self.register_in_flight_subresource_fetch_request_for_route(
-            session_id, None, request_id, pending,
-        )
-    }
-
     pub(crate) fn register_in_flight_subresource_fetch_request_for_route(
         &mut self,
         session_id: Option<&str>,
@@ -947,17 +943,6 @@ impl CdpConnection {
                 );
                 true
             })
-    }
-
-    pub(crate) fn register_in_flight_deferred_response_stage_subresource_fetch_request_for_session_owner(
-        &mut self,
-        session_id: Option<&str>,
-        request_id: Option<String>,
-        pending: PendingSubresourceFetchRequest,
-    ) -> bool {
-        self.register_in_flight_deferred_response_stage_subresource_fetch_request_for_route(
-            session_id, None, request_id, pending,
-        )
     }
 
     pub(crate) fn register_in_flight_deferred_response_stage_subresource_fetch_request_for_route(
@@ -1116,7 +1101,18 @@ impl CdpConnection {
         handle_auth_requests: bool,
         patterns: Vec<FetchInterceptionPattern>,
     ) -> Result<Option<moli_core::page::PendingPageCommand>, String> {
-        let Some(mut owner) = self.target_session_owner_mut(session_id) else {
+        self.start_enable_fetch_for_route(session_id, None, handle_auth_requests, patterns)
+    }
+
+    pub(crate) fn start_enable_fetch_for_route(
+        &mut self,
+        session_id: Option<&str>,
+        owner_route: Option<&CdpSessionRoute>,
+        handle_auth_requests: bool,
+        patterns: Vec<FetchInterceptionPattern>,
+    ) -> Result<Option<moli_core::page::PendingPageCommand>, String> {
+        let Some(mut owner) = self.target_session_owner_mut_for_route(session_id, owner_route)
+        else {
             return Err("BrowserContextNotLoaded".to_owned());
         };
         let Some((subresource_enabled, subresource_resource_type)) = owner.configure_fetch(
@@ -1140,16 +1136,19 @@ impl CdpConnection {
         .map_err(|error| format!("failed to update page fetch interception: {error}"))
     }
 
-    pub(crate) fn start_add_network_intercept_for_session_owner(
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn start_add_network_intercept_for_route(
         &mut self,
         session_id: Option<&str>,
+        owner_route: Option<&CdpSessionRoute>,
         intercept_session_id: Option<String>,
         intercept_id: String,
         handle_auth_requests: bool,
         auth_url_patterns: Vec<String>,
         patterns: Vec<FetchInterceptionPattern>,
     ) -> Result<Option<moli_core::page::PendingPageCommand>, String> {
-        let Some(mut owner) = self.target_session_owner_mut(session_id) else {
+        let Some(mut owner) = self.target_session_owner_mut_for_route(session_id, owner_route)
+        else {
             return Err("BrowserContextNotLoaded".to_owned());
         };
         let Some((subresource_enabled, subresource_resource_type)) = owner.add_network_intercept(
@@ -1175,13 +1174,15 @@ impl CdpConnection {
         .map_err(|error| format!("failed to update page fetch interception: {error}"))
     }
 
-    pub(crate) fn start_remove_network_intercept_for_session_owner(
+    pub(crate) fn start_remove_network_intercept_for_route(
         &mut self,
         session_id: Option<&str>,
+        owner_route: Option<&CdpSessionRoute>,
         intercept_id: &str,
         allow_global_lookup: bool,
     ) -> Result<Option<moli_core::page::PendingPageCommand>, String> {
-        let Some(mut owner) = self.target_session_owner_mut(session_id) else {
+        let Some(mut owner) = self.target_session_owner_mut_for_route(session_id, owner_route)
+        else {
             return Err("BrowserContextNotLoaded".to_owned());
         };
         let Some((subresource_enabled, subresource_resource_type)) =
@@ -1236,7 +1237,22 @@ impl CdpConnection {
         )>,
         String,
     > {
-        let Some(mut owner) = self.target_session_owner_mut(session_id) else {
+        self.start_disable_fetch_for_route(session_id, None)
+    }
+
+    pub(crate) fn start_disable_fetch_for_route(
+        &mut self,
+        session_id: Option<&str>,
+        owner_route: Option<&CdpSessionRoute>,
+    ) -> Result<
+        Option<(
+            SessionOwnerPendingFetchState,
+            Option<moli_core::page::PendingPageCommand>,
+        )>,
+        String,
+    > {
+        let Some(mut owner) = self.target_session_owner_mut_for_route(session_id, owner_route)
+        else {
             return Ok(None);
         };
         let Some((pending, (subresource_enabled, subresource_resource_type), page_update_required)) =

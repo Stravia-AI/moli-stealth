@@ -1,6 +1,6 @@
 use super::{
-    CdpConnection, CommandOwnerScope, NoneSessionOwnerRouteOverrideScope,
-    TargetPageProtocolAttachmentIdentity, state::PendingBidiChannelListener,
+    CdpConnection, CommandOwnerScope, TargetPageProtocolAttachmentIdentity,
+    state::PendingBidiChannelListener,
 };
 
 /// Exact Page attachment that owns one WebDriver BiDi channel listener.
@@ -41,13 +41,6 @@ impl BidiChannelPageOwner {
 
     pub(crate) fn command_owner(&self) -> &CommandOwnerScope {
         &self.owner_scope
-    }
-
-    pub(crate) fn enter<'a>(
-        &self,
-        conn: &'a mut CdpConnection,
-    ) -> NoneSessionOwnerRouteOverrideScope<'a> {
-        self.owner_scope.enter(conn)
     }
 
     /// Checks the captured Page attachment directly.
@@ -227,8 +220,8 @@ mod tests {
     }
 
     #[test]
-    fn implicit_page_owner_reenters_its_frozen_route_and_restores_the_caller() {
-        let mut conn = connection_with_page_session();
+    fn implicit_page_owner_retains_its_frozen_route() {
+        let conn = connection_with_page_session();
         let owner_route = crate::conn::CdpSessionRoute::PageTarget {
             browser_context_id: "BID-owner".to_owned(),
             target_id: "TID-owner".to_owned(),
@@ -239,26 +232,12 @@ mod tests {
             CommandOwnerScope::for_route(owner_route.clone()),
         )
         .expect("implicit owner must capture the scoped Page");
-        let caller_route = crate::conn::CdpSessionRoute::Browser;
-        conn.replace_none_session_owner_route_override(Some(caller_route.clone()));
-
-        {
-            let mut scope = owner.enter(&mut conn);
-            assert_eq!(
-                scope.conn_mut().none_session_owner_route_override(),
-                Some(owner_route),
-                "deferred work must not follow the caller's current implicit route"
-            );
-            assert!(
-                owner.is_current(scope.conn_mut()),
-                "the frozen route must still resolve the captured Page attachment"
-            );
-        }
 
         assert_eq!(
-            conn.none_session_owner_route_override(),
-            Some(caller_route),
-            "executing exact owner work must restore the surrounding route"
+            owner.command_owner().session_owner_route(),
+            Some(&owner_route),
+            "deferred work must retain its exact Page route"
         );
+        assert!(owner.is_current(&conn));
     }
 }

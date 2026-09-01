@@ -16,12 +16,11 @@ use crate::conn::{CdpConnection, CommandDispatchContext, CommandOwnerScope};
 /// concrete publications and exact cursor fences.
 pub(crate) async fn project_protocol_local_command_outputs(
     conn: &mut CdpConnection,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     command: &mut CommandDispatchContext,
 ) {
-    let owner = CommandOwnerScope::capture(conn, session_id);
-    PreparedProtocolOutputs::from_protocol_local_command_boundary(conn, session_id)
+    PreparedProtocolOutputs::from_protocol_local_command_boundary(conn, owner)
         .await
-        .project_async(conn, &owner, command)
+        .project_async(conn, owner, command)
         .await;
 }

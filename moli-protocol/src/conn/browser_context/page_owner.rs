@@ -549,7 +549,15 @@ impl CdpConnection {
         &self,
         session_id: Option<&str>,
     ) -> Option<bool> {
-        self.target_session_owner_ref(session_id)
+        self.page_domain_enabled_for_route(session_id, None)
+    }
+
+    pub(crate) fn page_domain_enabled_for_route(
+        &self,
+        session_id: Option<&str>,
+        owner_route: Option<&crate::conn::CdpSessionRoute>,
+    ) -> Option<bool> {
+        self.target_session_owner_ref_for_route(session_id, owner_route)
             .and_then(|owner| owner.devtools_session_state())
             .map(devtools_session_page_domain_enabled)
     }
@@ -718,20 +726,40 @@ impl CdpConnection {
         session_id: Option<&str>,
         enabled: bool,
     ) -> bool {
+        let owner = crate::conn::CommandOwnerScope::capture(self, session_id);
+        self.set_console_enabled_for_owner(&owner, enabled)
+    }
+
+    pub(crate) fn set_console_enabled_for_owner(
+        &mut self,
+        owner: &crate::conn::CommandOwnerScope,
+        enabled: bool,
+    ) -> bool {
         let handled = self
-            .with_target_session_owner_mut(session_id, |owner| owner.set_console_enabled(enabled))
+            .with_target_session_owner_mut_for_route(
+                owner.session_id(),
+                owner.session_owner_route(),
+                |owner| owner.set_console_enabled(enabled),
+            )
             .unwrap_or(false);
         if handled {
             let renderer_console_agent_owns_page_console_api_events = enabled
                 && self
-                    .runtime_session_owner_slot(session_id)
+                    .runtime_session_owner_slot_for_route(
+                        owner.session_id(),
+                        owner.session_owner_route(),
+                    )
                     .is_ok_and(|slot| slot.has_loaded_page());
-            let _ = self.with_target_devtools_session_state_for_session_mut(session_id, |state| {
-                state
-                    .console_output_session_state
-                    .renderer_console_agent_owns_page_console_api_events =
-                    renderer_console_agent_owns_page_console_api_events;
-            });
+            let _ = self.with_target_devtools_session_state_for_route_mut(
+                owner.session_id(),
+                owner.session_owner_route(),
+                |state| {
+                    state
+                        .console_output_session_state
+                        .renderer_console_agent_owns_page_console_api_events =
+                        renderer_console_agent_owns_page_console_api_events;
+                },
+            );
         }
         handled
     }
@@ -740,8 +768,20 @@ impl CdpConnection {
         &mut self,
         session_id: Option<&str>,
     ) -> bool {
-        self.with_target_session_owner_mut(session_id, |owner| owner.clear_console_messages())
-            .unwrap_or(false)
+        let owner = crate::conn::CommandOwnerScope::capture(self, session_id);
+        self.clear_console_messages_for_owner(&owner)
+    }
+
+    pub(crate) fn clear_console_messages_for_owner(
+        &mut self,
+        owner: &crate::conn::CommandOwnerScope,
+    ) -> bool {
+        self.with_target_session_owner_mut_for_route(
+            owner.session_id(),
+            owner.session_owner_route(),
+            |owner| owner.clear_console_messages(),
+        )
+        .unwrap_or(false)
     }
 
     pub(crate) fn enable_log_for_session_owner(

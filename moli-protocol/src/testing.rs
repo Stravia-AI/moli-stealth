@@ -694,6 +694,8 @@ impl TestContext {
         drain_after_command: bool,
     ) -> Vec<CdpSchedulerEvent> {
         let output_session_id = command.command_output_session_id().map(str::to_owned);
+        let output_owner =
+            crate::conn::CommandOwnerScope::capture(&self.conn, output_session_id.as_deref());
         let mut protocol_events = Vec::new();
         let mut scheduler_events = Vec::new();
         let mut command_context = crate::conn::CommandDispatchContext::default();
@@ -713,7 +715,7 @@ impl TestContext {
         if drain_after_command && completed {
             crate::domains::activity::project_protocol_local_command_outputs(
                 &mut self.conn,
-                output_session_id.as_deref(),
+                &output_owner,
                 &mut command_context,
             )
             .await;
@@ -845,12 +847,15 @@ impl TestContext {
                 CdpCommandTaskStep::Pending(mut pending)
                     if pending.waits_for_scheduler_deferred_inspector_reply() =>
                 {
-                    let session_id = pending.session_id().map(str::to_owned);
+                    let owner = pending
+                        .runtime_command_owner_scope()
+                        .expect("deferred Runtime commands have an exact owner")
+                        .clone();
                     protocol_events
                         .extend(pending.take_scheduler_deferred_inspector_reply_events());
                     crate::domains::activity::project_protocol_local_command_outputs(
                         &mut self.conn,
-                        session_id.as_deref(),
+                        &owner,
                         command_context,
                     )
                     .await;

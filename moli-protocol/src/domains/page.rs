@@ -2464,24 +2464,29 @@ async fn complete_renderer_navigation_step_background_events_async(
     }
 }
 
-pub(crate) fn emit_page_window_open_background_events(
+pub(crate) fn emit_page_window_open_background_events_for_route(
     conn: &CdpConnection,
     out: &mut Vec<BackgroundProtocolEvent>,
     owner_session_id: Option<&str>,
+    owner_route: Option<&crate::conn::CdpSessionRoute>,
     url: &str,
     window_name: &str,
     window_features: &[String],
     user_gesture: bool,
 ) {
-    if !crate::domains::target::popup_activation_creates_new_target(
+    if !crate::domains::target::popup_activation_creates_new_target_for_route(
         conn,
         owner_session_id,
+        owner_route,
         window_name,
     ) {
         return;
     }
-    for event_session_id in conn.page_event_session_ids_for_session_owner(owner_session_id) {
-        if conn.page_domain_enabled_for_session_owner(event_session_id.as_deref()) == Some(true) {
+    for event_session_id in conn.page_event_session_ids_for_route(owner_session_id, owner_route) {
+        let event_owner_route = event_session_id.is_none().then_some(owner_route).flatten();
+        if conn.page_domain_enabled_for_route(event_session_id.as_deref(), event_owner_route)
+            == Some(true)
+        {
             out.push(BackgroundProtocolEvent::page_window_open(
                 event_session_id.as_deref(),
                 url,
