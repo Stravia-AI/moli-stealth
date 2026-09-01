@@ -772,6 +772,20 @@ struct SvgSvgElementTemplateMethodsDeclaration {
     deselect_all: (),
 
     #[webapi(
+        method = "createSVGNumber",
+        length = 0,
+        callback = svg_svg_element_create_number_callback
+    )]
+    create_svg_number: (),
+
+    #[webapi(
+        method = "createSVGLength",
+        length = 0,
+        callback = svg_svg_element_create_length_callback
+    )]
+    create_svg_length: (),
+
+    #[webapi(
         method = "createSVGAngle",
         length = 0,
         callback = svg_svg_element_create_angle_callback
@@ -779,11 +793,25 @@ struct SvgSvgElementTemplateMethodsDeclaration {
     create_svg_angle: (),
 
     #[webapi(
+        method = "createSVGPoint",
+        length = 0,
+        callback = svg_svg_element_create_point_callback
+    )]
+    create_svg_point: (),
+
+    #[webapi(
         method = "createSVGMatrix",
         length = 0,
         callback = svg_svg_element_create_matrix_callback
     )]
     create_svg_matrix: (),
+
+    #[webapi(
+        method = "createSVGRect",
+        length = 0,
+        callback = svg_svg_element_create_rect_callback
+    )]
+    create_svg_rect: (),
 
     #[webapi(
         method = "createSVGTransform",

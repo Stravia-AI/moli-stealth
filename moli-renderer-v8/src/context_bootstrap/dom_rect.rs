@@ -9,6 +9,7 @@ const DOM_RECT_WIDTH_SLOT: &str = "__moliDomRectWidth";
 const DOM_RECT_HEIGHT_SLOT: &str = "__moliDomRectHeight";
 const DOM_RECT_BRAND_SLOT: &str = "__moliDomRectBrand";
 const DOM_RECT_MUTABLE_BRAND_SLOT: &str = "__moliDomRectMutableBrand";
+const DOM_RECT_RESTRICTED_NUMBER_SLOT: &str = "__moliDomRectRestrictedNumber";
 
 #[derive(WebApiObject)]
 #[webapi(interface = "DOMRect")]
@@ -298,6 +299,20 @@ pub(crate) fn build_dom_rect_object<'s>(
         .expect("DOMRect declaration should bind")
 }
 
+pub(in crate::context_bootstrap) fn build_svg_rect_object<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+) -> v8::Local<'s, v8::Object> {
+    let object = build_dom_rect_object(scope, 0.0, 0.0, 0.0, 0.0);
+    let restricted = v8::Boolean::new(scope, true);
+    set_private_value(
+        scope,
+        object,
+        DOM_RECT_RESTRICTED_NUMBER_SLOT,
+        restricted.into(),
+    );
+    object
+}
+
 fn build_dom_rect_readonly_object<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     x: f64,
@@ -462,15 +477,24 @@ fn dom_rect_setter_callback<'s>(
         throw_type_error(scope, "Illegal invocation");
         return;
     }
-    let value = match webidl::convert::<webidl::UnrestrictedDouble>(
-        scope,
-        args.get(0),
-        webidl::Context::member("DOMRect", slot),
-    ) {
-        Ok(value) => value.0,
-        Err(error) => {
-            webidl::throw_error(scope, &error);
-            return;
+    let context = webidl::Context::member("DOMRect", slot);
+    let restricted = get_private_value(scope, args.this(), DOM_RECT_RESTRICTED_NUMBER_SLOT)
+        .is_some_and(|value| value.boolean_value(scope));
+    let value = if restricted {
+        match webidl::convert::<webidl::Double>(scope, args.get(0), context) {
+            Ok(value) => value.0,
+            Err(error) => {
+                webidl::throw_error(scope, &error);
+                return;
+            }
+        }
+    } else {
+        match webidl::convert::<webidl::UnrestrictedDouble>(scope, args.get(0), context) {
+            Ok(value) => value.0,
+            Err(error) => {
+                webidl::throw_error(scope, &error);
+                return;
+            }
         }
     };
     set_private_value(
