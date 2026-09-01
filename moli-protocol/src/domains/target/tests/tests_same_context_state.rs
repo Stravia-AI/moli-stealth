@@ -645,10 +645,10 @@ async fn same_context_targets_restore_their_own_domain_enablement_after_switchin
                 .runtime_slot
                 .primary_network_events_enabled()
         );
-        assert!(bc.active_page_target().network_policy.cache_disabled());
+        assert!(bc.active_page_target().effective_policy().cache_disabled());
         assert!(
             bc.active_page_target()
-                .network_policy
+                .effective_policy()
                 .bypass_service_worker()
         );
         assert!(bc.active_page_target().css_enabled);
@@ -700,10 +700,10 @@ async fn same_context_targets_restore_their_own_domain_enablement_after_switchin
                 .runtime_slot
                 .primary_network_events_enabled()
         );
-        assert!(!bc.active_page_target().network_policy.cache_disabled());
+        assert!(!bc.active_page_target().effective_policy().cache_disabled());
         assert!(
             !bc.active_page_target()
-                .network_policy
+                .effective_policy()
                 .bypass_service_worker()
         );
         assert!(!bc.active_page_target().css_enabled);
@@ -1570,8 +1570,8 @@ async fn same_context_targets_restore_their_own_domain_enablement_after_session_
                 .runtime_slot
                 .primary_network_events_enabled()
         );
-        assert!(bc.active_page_target().network_policy.cache_disabled());
-        assert!(bc.active_page_target().network_policy.bypass_service_worker());
+        assert!(bc.active_page_target().effective_policy().cache_disabled());
+        assert!(bc.active_page_target().effective_policy().bypass_service_worker());
         assert!(bc.active_page_target().css_enabled);
         assert!(bc.active_page_target().fetch_owner.is_enabled());
         assert!(bc.active_page_target().fetch_owner.handle_auth_requests());
@@ -1608,8 +1608,8 @@ async fn same_context_targets_restore_their_own_domain_enablement_after_session_
                 .runtime_slot
                 .primary_network_events_enabled()
         );
-        assert!(!bc.active_page_target().network_policy.cache_disabled());
-        assert!(!bc.active_page_target().network_policy.bypass_service_worker());
+        assert!(!bc.active_page_target().effective_policy().cache_disabled());
+        assert!(!bc.active_page_target().effective_policy().bypass_service_worker());
         assert!(!bc.active_page_target().css_enabled);
         assert!(bc.active_page_target().fetch_owner.is_enabled());
         assert!(!bc.active_page_target().fetch_owner.handle_auth_requests());
@@ -1646,8 +1646,8 @@ async fn same_context_targets_restore_their_own_domain_enablement_after_session_
                 .runtime_slot
                 .primary_network_events_enabled()
         );
-        assert!(bc.active_page_target().network_policy.cache_disabled());
-        assert!(bc.active_page_target().network_policy.bypass_service_worker());
+        assert!(bc.active_page_target().effective_policy().cache_disabled());
+        assert!(bc.active_page_target().effective_policy().bypass_service_worker());
         assert!(bc.active_page_target().css_enabled);
         assert!(bc.active_page_target().fetch_owner.is_enabled());
         assert!(bc.active_page_target().fetch_owner.handle_auth_requests());

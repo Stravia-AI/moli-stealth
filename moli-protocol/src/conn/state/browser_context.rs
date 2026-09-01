@@ -1496,19 +1496,24 @@ impl BrowserContext {
         self.active_target_id().map(str::to_owned)
     }
 
-    pub(crate) fn effective_active_browser_identity_override(
-        &self,
-    ) -> Option<&moli_browser_profile::BrowserIdentityProfile> {
-        self.page_targets
-            .active()
-            .and_then(|host| host.network_policy.browser_identity_override())
-            .or_else(|| self.default_browser_identity.profile())
-    }
-
     pub(crate) fn effective_active_browser_identity_override_owned(
         &self,
     ) -> Option<moli_browser_profile::BrowserIdentityProfile> {
-        self.effective_active_browser_identity_override().cloned()
+        self.page_targets
+            .active()
+            .and_then(|host| host.effective_policy().browser_identity_override().cloned())
+            .or_else(|| self.default_browser_identity.profile_owned())
+    }
+
+    pub(crate) fn effective_active_user_agent_override(&self) -> Option<&str> {
+        self.page_targets
+            .active()
+            .and_then(PageTargetHost::effective_user_agent_override)
+            .or_else(|| {
+                self.default_browser_identity
+                    .profile()
+                    .map(moli_browser_profile::BrowserIdentityProfile::user_agent)
+            })
     }
 
     pub(crate) fn effective_active_renderer_browser_identity_override_owned(
@@ -1562,14 +1567,18 @@ impl BrowserContext {
     pub(crate) fn effective_active_locale_override_owned(&self) -> Option<String> {
         self.page_targets
             .active()
-            .and_then(|host| host.locale_override.clone())
+            .and_then(|host| host.effective_policy().locale_override().map(str::to_owned))
             .or_else(|| self.default_locale_override.clone())
     }
 
     pub(crate) fn effective_active_timezone_override_owned(&self) -> Option<String> {
         self.page_targets
             .active()
-            .and_then(|host| host.timezone_override.clone())
+            .and_then(|host| {
+                host.effective_policy()
+                    .timezone_override()
+                    .map(str::to_owned)
+            })
             .or_else(|| self.default_timezone_override.clone())
     }
 
@@ -1637,7 +1646,12 @@ impl BrowserContext {
         target_id: &str,
     ) -> Option<String> {
         self.page_target(target_id)
-            .and_then(|state| state.locale_override.clone())
+            .and_then(|state| {
+                state
+                    .effective_policy()
+                    .locale_override()
+                    .map(str::to_owned)
+            })
             .or_else(|| self.default_locale_override.clone())
     }
 

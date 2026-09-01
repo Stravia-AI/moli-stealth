@@ -1608,10 +1608,10 @@ async fn detach_from_target() {
             .runtime_slot
             .primary_network_events_enabled()
     );
-    assert!(!bc.active_page_target().network_policy.cache_disabled());
+    assert!(!bc.active_page_target().effective_policy().cache_disabled());
     assert!(
         !bc.active_page_target()
-            .network_policy
+            .effective_policy()
             .bypass_service_worker()
     );
     assert!(!bc.active_page_target().css_enabled);
@@ -1626,7 +1626,7 @@ async fn detach_from_target() {
     );
     assert!(
         bc.active_page_target()
-            .network_policy
+            .effective_policy()
             .extra_headers()
             .is_empty()
     );
@@ -2304,10 +2304,10 @@ async fn set_auto_attach_false_detaches_existing_target() {
             .runtime_slot
             .primary_network_events_enabled()
     );
-    assert!(!bc.active_page_target().network_policy.cache_disabled());
+    assert!(!bc.active_page_target().effective_policy().cache_disabled());
     assert!(
         !bc.active_page_target()
-            .network_policy
+            .effective_policy()
             .bypass_service_worker()
     );
     assert!(!bc.active_page_target().css_enabled);
@@ -2322,7 +2322,7 @@ async fn set_auto_attach_false_detaches_existing_target() {
     );
     assert!(
         bc.active_page_target()
-            .network_policy
+            .effective_policy()
             .extra_headers()
             .is_empty()
     );

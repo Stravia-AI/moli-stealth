@@ -135,11 +135,11 @@ async fn same_context_targets_restore_their_own_page_session_overrides_after_swi
             .expect("active browser context");
         assert_eq!(bc.active_target_id(), Some("TID-000000000A"));
         assert_eq!(
-            bc.active_page_target().network_policy.extra_headers(),
+            bc.active_page_target().effective_policy().extra_headers(),
             vec![("X-Target".into(), "A".into())]
         );
         assert_eq!(
-            bc.active_page_target().locale_override.as_deref(),
+            bc.active_page_target().effective_policy().locale_override(),
             Some("en-GB")
         );
     }
@@ -196,11 +196,11 @@ async fn same_context_targets_restore_their_own_page_session_overrides_after_swi
             .expect("active browser context");
         assert_eq!(bc.active_target_id(), Some(second_target_id.as_str()));
         assert_eq!(
-            bc.active_page_target().network_policy.extra_headers(),
+            bc.active_page_target().effective_policy().extra_headers(),
             vec![("X-Target".into(), "B".into())]
         );
         assert_eq!(
-            bc.active_page_target().locale_override.as_deref(),
+            bc.active_page_target().effective_policy().locale_override(),
             Some("fr-FR")
         );
     }
@@ -921,7 +921,10 @@ async fn same_context_targets_restore_their_own_loader_overrides_after_switching
             .page_target(&second_target_id)
             .expect("background target");
         assert_eq!(
-            background.network_policy.user_agent_override(),
+            background
+                .effective_policy()
+                .browser_identity_override()
+                .map(|identity| identity.user_agent()),
             Some("Moli/Target-B")
         );
         assert_eq!(background.tls_verify_host_override, Some(true));
@@ -953,8 +956,9 @@ async fn same_context_targets_restore_their_own_loader_overrides_after_switching
         assert_eq!(
             active
                 .active_page_target()
-                .network_policy
-                .user_agent_override(),
+                .effective_policy()
+                .browser_identity_override()
+                .map(|identity| identity.user_agent()),
             Some("Moli/Target-B")
         );
         assert_eq!(
@@ -986,8 +990,9 @@ async fn same_context_targets_restore_their_own_loader_overrides_after_switching
         assert_eq!(
             active
                 .active_page_target()
-                .network_policy
-                .user_agent_override(),
+                .effective_policy()
+                .browser_identity_override()
+                .map(|identity| identity.user_agent()),
             Some("Moli/Target-A")
         );
         assert_eq!(
@@ -1252,8 +1257,9 @@ async fn same_context_targets_restore_their_own_loader_overrides_after_close_tar
         assert_eq!(
             active
                 .active_page_target()
-                .network_policy
-                .user_agent_override(),
+                .effective_policy()
+                .browser_identity_override()
+                .map(|identity| identity.user_agent()),
             Some("Moli/Close-A")
         );
         assert_eq!(

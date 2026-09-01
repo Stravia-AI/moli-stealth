@@ -325,8 +325,8 @@ async fn timezone_override_can_complete_through_pending_command_dispatch() {
             .as_ref()
             .unwrap()
             .active_page_target()
-            .timezone_override
-            .as_deref(),
+            .effective_policy()
+            .timezone_override(),
         Some("Asia/Shanghai")
     );
 }
@@ -1124,9 +1124,12 @@ async fn multi_session_locale_and_timezone_claims_match_chromium() {
         .as_ref()
         .expect("browser context")
         .active_page_target();
-    assert_eq!(page_state.locale_override.as_deref(), Some("fr-FR"));
     assert_eq!(
-        page_state.timezone_override.as_deref(),
+        page_state.effective_policy().locale_override(),
+        Some("fr-FR")
+    );
+    assert_eq!(
+        page_state.effective_policy().timezone_override(),
         Some("Europe/Paris")
     );
 }
@@ -1158,8 +1161,9 @@ async fn multi_session_browser_identity_uses_attachment_order_and_field_contribu
             .as_ref()
             .expect("browser context")
             .active_page_target()
-            .network_policy
-            .user_agent_override(),
+            .effective_policy()
+            .browser_identity_override()
+            .map(|identity| identity.user_agent()),
         Some("Moli/Aux-1")
     );
     assert_eq!(
@@ -1189,8 +1193,9 @@ async fn multi_session_browser_identity_uses_attachment_order_and_field_contribu
             .as_ref()
             .expect("browser context")
             .active_page_target()
-            .network_policy
-            .user_agent_override(),
+            .effective_policy()
+            .browser_identity_override()
+            .map(|identity| identity.user_agent()),
         Some("Moli/Primary-2")
     );
 
@@ -1206,13 +1211,14 @@ async fn multi_session_browser_identity_uses_attachment_order_and_field_contribu
         }),
     )
     .await;
-    let identity = ctx
+    let effective_policy = ctx
         .conn
         .browser_context
         .as_ref()
         .expect("browser context")
         .active_page_target()
-        .network_policy
+        .effective_policy();
+    let identity = effective_policy
         .browser_identity_override()
         .expect("UA and per-field contributions should compose an identity");
     assert_eq!(identity.user_agent(), "Moli/Primary-2");
@@ -1234,8 +1240,9 @@ async fn multi_session_browser_identity_uses_attachment_order_and_field_contribu
             .as_ref()
             .expect("browser context")
             .active_page_target()
-            .network_policy
-            .user_agent_override(),
+            .effective_policy()
+            .browser_identity_override()
+            .map(|identity| identity.user_agent()),
         Some("Moli/Aux-2"),
         "Network.disable must not dispose the shared Emulation agent state"
     );
@@ -1250,8 +1257,9 @@ async fn multi_session_browser_identity_uses_attachment_order_and_field_contribu
             .as_ref()
             .expect("browser context")
             .active_page_target()
-            .network_policy
-            .user_agent_override(),
+            .effective_policy()
+            .browser_identity_override()
+            .map(|identity| identity.user_agent()),
         Some("Moli/Primary-2")
     );
 }
@@ -2845,14 +2853,19 @@ async fn context_locale_override_applies_to_loaded_background_page_without_promo
     assert_eq!(
         browser_context
             .active_page_target()
-            .locale_override
-            .as_deref(),
+            .effective_policy()
+            .locale_override(),
         Some("fr-FR")
     );
     assert!(
         browser_context
             .non_default_background_page_target_for_test("TID-background")
-            .and_then(|state| state.locale_override.as_deref())
+            .and_then(|state| {
+                state
+                    .effective_policy()
+                    .locale_override()
+                    .map(str::to_owned)
+            })
             .is_none(),
         "context-wide locale remains browser-context state, not parked session state"
     );
@@ -2972,7 +2985,8 @@ async fn session_emulation_routes_to_loaded_background_owner_without_promotion()
     assert!(
         browser_context
             .active_page_target()
-            .locale_override
+            .effective_policy()
+            .locale_override()
             .is_none(),
         "background Emulation should not mutate the active target locale override"
     );
@@ -2980,7 +2994,7 @@ async fn session_emulation_routes_to_loaded_background_owner_without_promotion()
         .non_default_background_page_target_for_test("TID-background")
         .expect("background parked state");
     assert_eq!(parked.emulated_media.color_scheme.as_deref(), Some("dark"));
-    assert_eq!(parked.locale_override.as_deref(), Some("zh-CN"));
+    assert_eq!(parked.effective_policy().locale_override(), Some("zh-CN"));
     assert_eq!(
         parked
             .geolocation_override

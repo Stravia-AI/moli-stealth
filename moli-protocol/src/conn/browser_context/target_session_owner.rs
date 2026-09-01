@@ -272,6 +272,7 @@ impl TargetNavigationLoadInputs {
             .emulated_device_metrics
             .clone()
             .or_else(|| browser_context.default_emulated_device_metrics.clone());
+        let effective_policy = page_state.effective_policy();
 
         Self {
             browser_context_id: Some(browser_context.id.clone()),
@@ -282,9 +283,9 @@ impl TargetNavigationLoadInputs {
             ),
             root_frame_id: Some(target_id.to_owned()),
             renderer_runtime: browser_context.renderer_runtime_owner_access(),
-            browser_identity_override: page_state
-                .network_policy
-                .browser_identity_override_owned()
+            browser_identity_override: effective_policy
+                .browser_identity_override()
+                .cloned()
                 .or_else(|| browser_context.default_browser_identity_override_owned()),
             navigator_identity_override: page_state
                 .effective_renderer_browser_identity_override_owned()
@@ -312,14 +313,14 @@ impl TargetNavigationLoadInputs {
                 .devtools_sessions
                 .runtime_inspector_restore_snapshots(),
             extra_http_headers: browser_context
-                .merged_extra_headers_for_target_policy(page_state.network_policy.extra_headers()),
-            locale_override: page_state
-                .locale_override
-                .clone()
+                .merged_extra_headers_for_target_policy(effective_policy.extra_headers()),
+            locale_override: effective_policy
+                .locale_override()
+                .map(str::to_owned)
                 .or_else(|| browser_context.default_locale_override.clone()),
-            timezone_override: page_state
-                .timezone_override
-                .clone()
+            timezone_override: effective_policy
+                .timezone_override()
+                .map(str::to_owned)
                 .or_else(|| browser_context.default_timezone_override.clone()),
             script_execution_disabled: page_state.script_execution_disabled,
             bypass_content_security_policy: page_state.devtools_sessions.page_bypass_csp_enabled(),
@@ -331,9 +332,9 @@ impl TargetNavigationLoadInputs {
             network_offline: page_state.network_policy.network_offline()
                 || effective_network_conditions
                     .is_some_and(|conditions| !conditions.navigator_online()),
-            bypass_service_worker: page_state.network_policy.bypass_service_worker(),
-            cache_disabled: page_state.network_policy.cache_disabled(),
-            blocked_url_patterns: page_state.network_policy.blocked_url_patterns().to_vec(),
+            bypass_service_worker: effective_policy.bypass_service_worker(),
+            cache_disabled: effective_policy.cache_disabled(),
+            blocked_url_patterns: effective_policy.blocked_url_patterns().to_vec(),
             fetch_subresource_interception: page_state
                 .fetch_owner
                 .subresource_interception_config(),
@@ -629,6 +630,10 @@ impl<'a> TargetSessionOwnerMut<'a> {
         self.browser_context
             .page_target(&self.target_id)
             .expect("resolved Page target owner must remain live")
+    }
+
+    pub(super) fn effective_policy(&self) -> crate::conn::state::EffectiveTargetPolicy {
+        self.target().effective_policy()
     }
 
     fn target_mut(&mut self) -> &mut crate::conn::PageTargetHost {
@@ -955,11 +960,11 @@ impl<'a> TargetSessionOwnerMut<'a> {
                 target.target_identity().secure_context_type().to_owned();
             let target_has_network_event_listeners =
                 target.runtime_slot().has_network_event_listeners();
-            let network_policy = target.network_policy.clone();
+            let effective_policy = target.effective_policy();
             let mut request_headers = self
                 .browser_context
-                .merged_extra_headers_for_target_policy(network_policy.extra_headers());
-            let user_agent = network_policy
+                .merged_extra_headers_for_target_policy(effective_policy.extra_headers());
+            let user_agent = effective_policy
                 .browser_identity_override()
                 .or_else(|| self.browser_context.default_browser_identity_override())
                 .unwrap_or(fallback_browser_identity)
@@ -3056,7 +3061,9 @@ mod tests {
     #[test]
     fn target_session_owner_mut_prepares_background_navigation_request_preflight() {
         let mut parked = BrowserContext::new_with_page_for_test("BID-parked", "TID-active");
-        parked.active_page_target_mut().locale_override = Some("zh-CN".to_owned());
+        parked
+            .active_page_target_mut()
+            .set_base_locale_override(Some("zh-CN".to_owned()));
         parked
             .active_page_target_mut()
             .network_policy
@@ -3216,7 +3223,9 @@ mod tests {
     #[test]
     fn target_session_owner_ref_snapshots_background_navigation_load_inputs() {
         let mut parked = BrowserContext::new_with_page_for_test("BID-parked", "TID-active");
-        parked.active_page_target_mut().locale_override = Some("zh-CN".to_owned());
+        parked
+            .active_page_target_mut()
+            .set_base_locale_override(Some("zh-CN".to_owned()));
         parked.insert_page_target_host(crate::conn::PageTargetHost::with_url(
             "TID-parked".to_owned(),
             Some("SID-parked".to_owned()),
@@ -3233,9 +3242,9 @@ mod tests {
                 .network_policy
                 .set_user_agent_override("OwnerUA/1.0".to_owned());
             state.network_policy.set_network_offline(true);
-            state
-                .network_policy
-                .push_blocked_url_pattern("*.blocked.test".to_owned());
+            let network = &mut state.devtools_sessions.primary_mut().network_session_state;
+            network.network_enabled = true;
+            network.blocked_url_patterns = vec!["*.blocked.test".to_owned()];
             state
                 .network_policy
                 .push_extra_header(("X-Owner".to_owned(), "parked".to_owned()));

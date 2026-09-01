@@ -1739,7 +1739,7 @@ async fn same_context_background_session_can_stage_its_own_blocked_urls_before_p
         assert!(
             active
                 .active_page_target()
-                .network_policy
+                .effective_policy()
                 .blocked_url_patterns()
                 .is_empty(),
             "active target should keep its own block list"
@@ -1748,7 +1748,7 @@ async fn same_context_background_session_can_stage_its_own_blocked_urls_before_p
             .non_default_background_page_target_for_test(&second_target_id)
             .expect("second target should have staged parked page session state");
         assert!(
-            staged.network_policy.blocked_url_patterns().is_empty(),
+            staged.effective_policy().blocked_url_patterns().is_empty(),
             "a disabled Network handler must not contribute to effective target policy"
         );
         assert_eq!(
@@ -1781,7 +1781,7 @@ async fn same_context_background_session_can_stage_its_own_blocked_urls_before_p
         assert!(
             promoted
                 .active_page_target()
-                .network_policy
+                .effective_policy()
                 .blocked_url_patterns()
                 .is_empty(),
             "promotion must not activate a disabled Network handler"
@@ -1801,7 +1801,7 @@ async fn same_context_background_session_can_stage_its_own_blocked_urls_before_p
             .as_ref()
             .expect("promoted browser context")
             .active_page_target()
-            .network_policy
+            .effective_policy()
             .blocked_url_patterns(),
         ["http://example.test/blocked/*".to_owned()],
         "Network.enable must activate the staged background-session contribution"
@@ -2121,14 +2121,17 @@ async fn same_context_background_session_can_stage_its_own_extra_headers_before_
             .as_ref()
             .expect("active browser context");
         assert_eq!(
-            active.active_page_target().network_policy.extra_headers(),
+            active
+                .active_page_target()
+                .effective_policy()
+                .extra_headers(),
             vec![("X-Target".into(), "A".into())]
         );
         let staged = active
             .non_default_background_page_target_for_test(&second_target_id)
             .expect("second target should have staged parked page session state");
         assert_eq!(
-            staged.network_policy.extra_headers(),
+            staged.effective_policy().extra_headers(),
             vec![("X-Target".into(), "B".into())]
         );
     }
@@ -2326,13 +2329,16 @@ async fn same_context_background_session_can_clear_its_own_extra_headers_before_
             .as_ref()
             .expect("active browser context");
         assert_eq!(
-            active.active_page_target().network_policy.extra_headers(),
+            active
+                .active_page_target()
+                .effective_policy()
+                .extra_headers(),
             vec![("X-Target".into(), "A".into())]
         );
         let staged = active
             .non_default_background_page_target_for_test(&second_target_id)
             .expect("enabled background session should retain its target-owned state");
-        assert!(staged.network_policy.extra_headers().is_empty());
+        assert!(staged.effective_policy().extra_headers().is_empty());
     }
 
     let url_a = format!("http://{addr}/page-a");
@@ -2497,15 +2503,19 @@ async fn same_context_background_session_can_stage_its_own_user_agent_before_pro
         assert_eq!(
             active
                 .active_page_target()
-                .network_policy
-                .user_agent_override(),
+                .effective_policy()
+                .browser_identity_override()
+                .map(|identity| identity.user_agent()),
             Some("Moli/Stage-A")
         );
         let staged = active
             .non_default_background_page_target_for_test(&second_target_id)
             .expect("second target should have staged parked page session state");
         assert_eq!(
-            staged.network_policy.user_agent_override(),
+            staged
+                .effective_policy()
+                .browser_identity_override()
+                .map(|identity| identity.user_agent()),
             Some("Moli/Stage-B")
         );
     }
@@ -2702,8 +2712,9 @@ async fn same_context_background_session_can_clear_its_own_user_agent_before_pro
         assert!(
             active
                 .active_page_target()
-                .network_policy
-                .user_agent_override()
+                .effective_policy()
+                .browser_identity_override()
+                .map(|identity| identity.user_agent())
                 .is_none(),
             "active target should keep its default user agent override",
         );
@@ -2711,7 +2722,10 @@ async fn same_context_background_session_can_clear_its_own_user_agent_before_pro
             .non_default_background_page_target_for_test(&second_target_id)
             .expect("second target should have staged parked page session state");
         assert_eq!(
-            staged.network_policy.user_agent_override(),
+            staged
+                .effective_policy()
+                .browser_identity_override()
+                .map(|identity| identity.user_agent()),
             Some(default_ua.as_str())
         );
     }
@@ -2879,18 +2893,27 @@ async fn same_context_background_session_stages_locale_without_changing_request_
             .as_ref()
             .expect("active browser context");
         assert_eq!(
-            active.active_page_target().locale_override.as_deref(),
+            active
+                .active_page_target()
+                .effective_policy()
+                .locale_override(),
             Some("en-GB")
         );
         assert_eq!(
-            active.active_page_target().timezone_override.as_deref(),
+            active
+                .active_page_target()
+                .effective_policy()
+                .timezone_override(),
             Some("UTC")
         );
         let staged = active
             .non_default_background_page_target_for_test(&second_target_id)
             .expect("second target should have staged parked page session state");
-        assert_eq!(staged.locale_override.as_deref(), Some("fr-FR"));
-        assert_eq!(staged.timezone_override.as_deref(), Some("Asia/Shanghai"));
+        assert_eq!(staged.effective_policy().locale_override(), Some("fr-FR"));
+        assert_eq!(
+            staged.effective_policy().timezone_override(),
+            Some("Asia/Shanghai")
+        );
     }
 
     let url_a = format!("http://{addr}/page-a");
@@ -3080,7 +3103,11 @@ async fn same_context_background_session_can_clear_its_own_locale_before_promoti
             .as_ref()
             .expect("active browser context");
         assert!(
-            active.active_page_target().locale_override.is_none(),
+            active
+                .active_page_target()
+                .effective_policy()
+                .locale_override()
+                .is_none(),
             "active target should keep its default locale override",
         );
         assert!(
@@ -3239,7 +3266,11 @@ async fn same_context_background_session_can_clear_its_own_timezone_before_promo
             .as_ref()
             .expect("active browser context");
         assert!(
-            active.active_page_target().timezone_override.is_none(),
+            active
+                .active_page_target()
+                .effective_policy()
+                .timezone_override()
+                .is_none(),
             "active target should keep its default timezone override",
         );
         assert!(
@@ -7448,19 +7479,24 @@ async fn same_context_background_session_can_stage_its_own_cache_and_service_wor
                 .runtime_slot
                 .primary_network_events_enabled()
         );
-        assert!(!active.active_page_target().network_policy.cache_disabled());
         assert!(
             !active
                 .active_page_target()
-                .network_policy
+                .effective_policy()
+                .cache_disabled()
+        );
+        assert!(
+            !active
+                .active_page_target()
+                .effective_policy()
                 .bypass_service_worker()
         );
         let staged = active
             .non_default_background_page_target_for_test(&second_target_id)
             .expect("second target should have staged parked page session state");
         assert!(staged.runtime_slot.primary_network_events_enabled());
-        assert!(staged.network_policy.cache_disabled());
-        assert!(staged.network_policy.bypass_service_worker());
+        assert!(staged.effective_policy().cache_disabled());
+        assert!(staged.effective_policy().bypass_service_worker());
     }
 
     ctx.process_async(json!({
@@ -7508,10 +7544,10 @@ async fn same_context_background_session_can_stage_its_own_cache_and_service_wor
                 .runtime_slot
                 .primary_network_events_enabled()
         );
-        assert!(bc.active_page_target().network_policy.cache_disabled());
+        assert!(bc.active_page_target().effective_policy().cache_disabled());
         assert!(
             bc.active_page_target()
-                .network_policy
+                .effective_policy()
                 .bypass_service_worker()
         );
     }
@@ -7698,19 +7734,24 @@ async fn same_context_background_session_can_disable_its_own_cache_and_service_w
                 .runtime_slot
                 .primary_network_events_enabled()
         );
-        assert!(!active.active_page_target().network_policy.cache_disabled());
         assert!(
             !active
                 .active_page_target()
-                .network_policy
+                .effective_policy()
+                .cache_disabled()
+        );
+        assert!(
+            !active
+                .active_page_target()
+                .effective_policy()
                 .bypass_service_worker()
         );
         let staged = active
             .non_default_background_page_target_for_test(&second_target_id)
             .expect("second target should have staged parked page session state");
         assert!(staged.runtime_slot.primary_network_events_enabled());
-        assert!(!staged.network_policy.cache_disabled());
-        assert!(!staged.network_policy.bypass_service_worker());
+        assert!(!staged.effective_policy().cache_disabled());
+        assert!(!staged.effective_policy().bypass_service_worker());
     }
 
     ctx.process_async(json!({
@@ -7758,10 +7799,10 @@ async fn same_context_background_session_can_disable_its_own_cache_and_service_w
                 .runtime_slot
                 .primary_network_events_enabled()
         );
-        assert!(!bc.active_page_target().network_policy.cache_disabled());
+        assert!(!bc.active_page_target().effective_policy().cache_disabled());
         assert!(
             !bc.active_page_target()
-                .network_policy
+                .effective_policy()
                 .bypass_service_worker()
         );
     }

@@ -316,8 +316,6 @@ impl BrowserContext {
                 .runtime_slot
                 .remove_network_session_observation_cursor(Some(session_id));
             target.devtools_sessions.remove_attached(session_id);
-            target.refresh_devtools_network_policy();
-            target.refresh_devtools_emulation_policy();
         }
         Some(target_id)
     }
@@ -338,93 +336,56 @@ impl BrowserContext {
         let Some(target) = self.page_target_mut(&target_id) else {
             return Ok(false);
         };
-        let state = target;
-        let previous_headers = state.network_policy.extra_headers().to_vec();
-        let previous_bypass = state.network_policy.bypass_service_worker();
-        let previous_cache_disabled = state.network_policy.cache_disabled();
-        let previous_blocked_url_patterns = state.network_policy.blocked_url_patterns().to_vec();
-        let previous_browser_identity = state.network_policy.browser_identity_override_owned();
-        let previous_renderer_browser_identity =
-            state.effective_renderer_browser_identity_override_owned();
-        let previous_locale = state.locale_override.clone();
-        let previous_timezone = state.timezone_override.clone();
-        state.clear_devtools_network_state(&session_key);
-        state.clear_devtools_emulation_state(&session_key);
-        let extra_headers_changed = previous_headers != state.network_policy.extra_headers();
-        let bypass_service_worker_changed =
-            previous_bypass != state.network_policy.bypass_service_worker();
-        let cache_disabled_changed =
-            previous_cache_disabled != state.network_policy.cache_disabled();
-        let blocked_url_patterns_changed =
-            previous_blocked_url_patterns != state.network_policy.blocked_url_patterns();
-        let browser_identity_changed =
-            previous_browser_identity != state.network_policy.browser_identity_override_owned();
-        let renderer_browser_identity_changed = previous_renderer_browser_identity
-            != state.effective_renderer_browser_identity_override_owned();
-        let any_browser_identity_changed =
-            browser_identity_changed || renderer_browser_identity_changed;
-        let locale_changed = previous_locale != state.locale_override;
-        let timezone_changed = previous_timezone != state.timezone_override;
+        let previous = target.effective_policy();
+        target.clear_devtools_network_state(&session_key);
+        target.clear_devtools_emulation_state(&session_key);
+        let effective = target.effective_policy();
+        let delta = previous.delta(&effective);
+        let browser_identity_changed = delta.browser_identity_changed();
 
-        if !extra_headers_changed
-            && !bypass_service_worker_changed
-            && !cache_disabled_changed
-            && !blocked_url_patterns_changed
-            && !locale_changed
-            && !timezone_changed
-        {
-            return Ok(any_browser_identity_changed);
+        if delta.is_empty() {
+            return Ok(false);
         }
 
-        let target = self
-            .page_target(&target_id)
-            .expect("session target must remain registered");
         let effective_headers =
-            self.merged_extra_headers_for_target_policy(target.network_policy.extra_headers());
-        let effective_bypass = target.network_policy.bypass_service_worker();
-        let effective_cache_disabled = target.network_policy.cache_disabled();
-        let effective_blocked_url_patterns = target.network_policy.blocked_url_patterns().to_vec();
-        let effective_locale = target
-            .locale_override
-            .clone()
+            self.merged_extra_headers_for_target_policy(effective.extra_headers());
+        let effective_locale = effective
+            .locale_override()
+            .map(str::to_owned)
             .or_else(|| self.default_locale_override.clone());
-        let effective_timezone = target
-            .timezone_override
-            .clone()
+        let effective_timezone = effective
+            .timezone_override()
+            .map(str::to_owned)
             .or_else(|| self.default_timezone_override.clone());
         let page = self
             .page_target_mut(&target_id)
             .and_then(|target| target.runtime_slot.loaded_page_mut());
         let Some(page) = page else {
-            return Ok(any_browser_identity_changed);
+            return Ok(browser_identity_changed);
         };
-        if extra_headers_changed
-            || bypass_service_worker_changed
-            || cache_disabled_changed
-            || blocked_url_patterns_changed
-        {
+        if delta.network_request {
             page.set_network_request_policy_async(
                 &effective_headers,
-                effective_bypass,
-                effective_cache_disabled,
-                &effective_blocked_url_patterns,
+                effective.bypass_service_worker(),
+                effective.cache_disabled(),
+                effective.blocked_url_patterns(),
             )
             .await
             .map_err(|error| {
                 format!("failed to restore detached session network request policy: {error}")
             })?;
         }
-        if locale_changed {
+        if delta.locale {
             page.set_locale_override_async(effective_locale.as_deref())
                 .await
                 .map_err(|error| format!("failed to restore detached session locale: {error}"))?;
         }
-        if timezone_changed {
+        if delta.timezone {
             page.set_timezone_override_async(effective_timezone.as_deref())
                 .await
                 .map_err(|error| format!("failed to restore detached session timezone: {error}"))?;
         }
-        Ok(any_browser_identity_changed)
+        Ok(browser_identity_changed)
     }
 
     pub(crate) fn remove_auxiliary_sessions_for_target(&mut self, target_id: &str) -> Vec<String> {
@@ -476,9 +437,7 @@ impl BrowserContext {
         let target = self
             .page_target(&target_id)
             .expect("background target must remain registered");
-        let effective_bypass = target.network_policy.bypass_service_worker();
-        let cache_disabled = target.network_policy.cache_disabled();
-        let blocked_url_patterns = target.network_policy.blocked_url_patterns().to_vec();
+        let effective_policy = target.effective_policy();
 
         if let Some(page) = self
             .background_target_mut(&target_id)
@@ -486,9 +445,9 @@ impl BrowserContext {
         {
             page.set_network_request_policy_async(
                 &effective_headers,
-                effective_bypass,
-                cache_disabled,
-                &blocked_url_patterns,
+                effective_policy.bypass_service_worker(),
+                effective_policy.cache_disabled(),
+                effective_policy.blocked_url_patterns(),
             )
             .await
             .map_err(|error| format!("failed to clear page network request policy: {error}"))?;
@@ -538,8 +497,6 @@ impl BrowserContext {
         target.devtools_sessions.reset(true);
         target.runtime_slot.disable_primary_network_events();
         target.network_policy.clear_session_scoped_state();
-        target.refresh_devtools_network_policy();
-        target.refresh_devtools_emulation_policy();
         target.fetch_owner.reset_config();
         self.background_target_mut(&target_id)
             .expect("background target must exist")

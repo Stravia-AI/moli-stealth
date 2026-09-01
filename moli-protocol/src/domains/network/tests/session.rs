@@ -361,13 +361,13 @@ async fn page_network_policy_aggregates_enabled_sessions_like_chromium_handlers(
         ctx.expect_result(id, json!({}), Some(session_id));
     }
 
-    let policy = &ctx
+    let policy = ctx
         .conn
         .browser_context
         .as_ref()
         .unwrap()
         .active_page_target()
-        .network_policy;
+        .effective_policy();
     assert!(policy.cache_disabled());
     assert!(policy.bypass_service_worker());
     assert_eq!(
@@ -396,13 +396,13 @@ async fn page_network_policy_aggregates_enabled_sessions_like_chromium_handlers(
     .await;
     ctx.expect_result(20_009, json!({}), Some("SID-primary"));
 
-    let policy = &ctx
+    let policy = ctx
         .conn
         .browser_context
         .as_ref()
         .unwrap()
         .active_page_target()
-        .network_policy;
+        .effective_policy();
     assert!(!policy.cache_disabled());
     assert!(!policy.bypass_service_worker());
     assert_eq!(
@@ -426,13 +426,13 @@ async fn page_network_policy_aggregates_enabled_sessions_like_chromium_handlers(
     .await;
     ctx.expect_result(20_010, json!({}), Some("SID-primary"));
 
-    let policy = &ctx
+    let policy = ctx
         .conn
         .browser_context
         .as_ref()
         .unwrap()
         .active_page_target()
-        .network_policy;
+        .effective_policy();
     assert!(!policy.cache_disabled());
     assert!(!policy.bypass_service_worker());
     assert_eq!(

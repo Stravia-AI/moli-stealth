@@ -247,6 +247,18 @@ impl DevToolsSessionRegistry {
         ))
     }
 
+    pub(crate) fn effective_user_agent_override(&self) -> Option<&str> {
+        self.states_in_attachment_order()
+            .filter_map(|state| {
+                state
+                    .emulation_session_state
+                    .browser_identity_override
+                    .as_ref()
+                    .and_then(|identity| identity.user_agent.as_deref())
+            })
+            .last()
+    }
+
     /// Resolves the identity exposed by the live renderer Document.
     ///
     /// Chromium applies the same session attachment precedence to renderer

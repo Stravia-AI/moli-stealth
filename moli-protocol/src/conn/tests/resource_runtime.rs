@@ -504,10 +504,15 @@ fn page_request_client_for_navigation_inputs_inherits_service_worker_bypass() {
     let mut browser_context = BrowserContext::new("BID-1".to_owned());
     browser_context.set_active_target_id("TID-1");
     browser_context.attach_active_session("SID-1");
-    browser_context
-        .active_page_target_mut()
-        .network_policy
-        .set_bypass_service_worker(true);
+    {
+        let network = &mut browser_context
+            .active_page_target_mut()
+            .devtools_sessions
+            .primary_mut()
+            .network_session_state;
+        network.network_enabled = true;
+        network.bypass_service_worker = true;
+    }
     conn.browser_context = Some(browser_context);
 
     let inputs = conn.navigation_load_inputs_for_session_owner(Some("SID-1"));
@@ -3271,31 +3276,35 @@ async fn direct_network_policy_routes_to_inactive_active_owner_without_promoting
     assert!(
         inactive
             .active_page_target()
-            .network_policy
+            .effective_policy()
             .cache_disabled()
     );
     assert!(
         inactive
             .active_page_target()
-            .network_policy
+            .effective_policy()
             .bypass_service_worker()
     );
     assert_eq!(
         inactive
             .active_page_target()
-            .network_policy
+            .effective_policy()
             .blocked_url_patterns(),
         vec!["*://blocked.test/*".to_owned()]
     );
     assert_eq!(
-        inactive.active_page_target().network_policy.extra_headers(),
+        inactive
+            .active_page_target()
+            .effective_policy()
+            .extra_headers(),
         vec![("X-Test".to_owned(), "direct".to_owned())]
     );
     assert_eq!(
         inactive
             .active_page_target()
-            .network_policy
-            .user_agent_override(),
+            .effective_policy()
+            .browser_identity_override()
+            .map(|identity| identity.user_agent()),
         Some("Moli/Direct-UA")
     );
     assert!(
@@ -3375,13 +3384,13 @@ async fn direct_network_policy_invalid_params_return_owner_plan_error_without_pr
     assert!(
         !inactive
             .active_page_target()
-            .network_policy
+            .effective_policy()
             .cache_disabled()
     );
     assert!(
         inactive
             .active_page_target()
-            .network_policy
+            .effective_policy()
             .extra_headers()
             .is_empty(),
         "invalid direct output-plan commands must not mutate owner policy"
@@ -3434,18 +3443,21 @@ async fn direct_network_policy_routes_to_inactive_background_owner_without_promo
     let staged = inactive
         .non_default_background_page_target_for_test("TID-background")
         .expect("background session state should be staged");
-    assert!(staged.network_policy.cache_disabled());
-    assert!(staged.network_policy.bypass_service_worker());
+    assert!(staged.effective_policy().cache_disabled());
+    assert!(staged.effective_policy().bypass_service_worker());
     assert_eq!(
-        staged.network_policy.blocked_url_patterns(),
+        staged.effective_policy().blocked_url_patterns(),
         vec!["*://blocked-background.test/*".to_owned()]
     );
     assert_eq!(
-        staged.network_policy.extra_headers(),
+        staged.effective_policy().extra_headers(),
         vec![("X-Background".to_owned(), "direct".to_owned())]
     );
     assert_eq!(
-        staged.network_policy.user_agent_override(),
+        staged
+            .effective_policy()
+            .browser_identity_override()
+            .map(|identity| identity.user_agent()),
         Some("Moli/Background-UA")
     );
     assert!(staged.network_policy.network_offline());

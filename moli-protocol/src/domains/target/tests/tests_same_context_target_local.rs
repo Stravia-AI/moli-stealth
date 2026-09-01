@@ -2593,11 +2593,17 @@ async fn playwright_over_cdp_context_target_attach_and_navigate_smoke() {
     assert_eq!(active.active_target_id(), Some(target_id.as_str()));
     assert_eq!(active.active_session_id(), Some(session_id.as_str()));
     assert_eq!(
-        active.active_page_target().locale_override.as_deref(),
+        active
+            .active_page_target()
+            .effective_policy()
+            .locale_override(),
         Some("fr-FR")
     );
     assert_eq!(
-        active.active_page_target().timezone_override.as_deref(),
+        active
+            .active_page_target()
+            .effective_policy()
+            .timezone_override(),
         Some("UTC")
     );
 }

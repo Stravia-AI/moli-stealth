@@ -182,9 +182,7 @@ impl TargetSessionOwnerMut<'_> {
         self.mutate_network_policy_session_state(|state| {
             state.bypass_service_worker = bypass_service_worker;
         });
-        let effective_bypass = self.mutate_session_state_ref(|mut state| {
-            state.network_policy_mut().bypass_service_worker()
-        });
+        let effective_bypass = self.effective_policy().bypass_service_worker();
         let Some(page) = self.runtime_slot_mut().loaded_page_mut() else {
             return Ok(None);
         };
@@ -200,9 +198,7 @@ impl TargetSessionOwnerMut<'_> {
         self.mutate_network_policy_session_state(|state| {
             state.blocked_url_patterns = blocked_url_patterns;
         });
-        let effective_patterns = self.mutate_session_state_ref(|mut state| {
-            state.network_policy_mut().blocked_url_patterns().to_vec()
-        });
+        let effective_patterns = self.effective_policy().blocked_url_patterns().to_vec();
         let Some(page) = self.runtime_slot_mut().loaded_page_mut() else {
             return Ok(None);
         };
@@ -218,9 +214,7 @@ impl TargetSessionOwnerMut<'_> {
         self.mutate_network_policy_session_state(|state| {
             state.extra_headers = extra_headers;
         });
-        let headers = self.mutate_session_state_ref(|mut state| {
-            state.network_policy_mut().extra_headers().to_vec()
-        });
+        let headers = self.effective_policy().extra_headers().to_vec();
         let effective_headers = self.effective_extra_headers_for_target_policy(headers);
         let Some(page) = self.runtime_slot_mut().loaded_page_mut() else {
             return Ok(None);
@@ -234,10 +228,11 @@ impl TargetSessionOwnerMut<'_> {
         mut self,
         extra_headers: Vec<(String, String)>,
     ) -> Result<Option<PendingPageCommand>, String> {
-        let headers = self.mutate_session_state_ref(|mut state| {
+        let headers = self.mutate_page_state(|state, _session_key| {
             state
-                .network_policy_mut()
-                .replace_base_extra_headers(extra_headers)
+                .network_policy
+                .replace_base_extra_headers(extra_headers);
+            state.effective_policy().extra_headers().to_vec()
         });
         let effective_headers = self.effective_extra_headers_for_target_policy(headers);
         let Some(page) = self.runtime_slot_mut().loaded_page_mut() else {
@@ -251,25 +246,17 @@ impl TargetSessionOwnerMut<'_> {
     fn start_replay_effective_network_request_policy(
         &mut self,
     ) -> Result<Option<PendingPageCommand>, String> {
-        let (headers, bypass_service_worker, cache_disabled, blocked_url_patterns) = self
-            .mutate_session_state_ref(|mut state| {
-                let policy = state.network_policy_mut();
-                (
-                    policy.extra_headers().to_vec(),
-                    policy.bypass_service_worker(),
-                    policy.cache_disabled(),
-                    policy.blocked_url_patterns().to_vec(),
-                )
-            });
-        let effective_headers = self.effective_extra_headers_for_target_policy(headers);
+        let policy = self.effective_policy();
+        let effective_headers =
+            self.effective_extra_headers_for_target_policy(policy.extra_headers().to_vec());
         let Some(page) = self.runtime_slot_mut().loaded_page_mut() else {
             return Ok(None);
         };
         page.start_set_network_request_policy(
             &effective_headers,
-            bypass_service_worker,
-            cache_disabled,
-            &blocked_url_patterns,
+            policy.bypass_service_worker(),
+            policy.cache_disabled(),
+            policy.blocked_url_patterns(),
         )
         .map(Some)
         .map_err(|error| format!("failed to replay page network request policy: {error}"))
@@ -972,9 +959,6 @@ mod tests {
             network.blocked_url_patterns = vec!["*://blocked.test/*".to_owned()];
             network.extra_headers = vec![("X-Test".to_owned(), "active".to_owned())];
         }
-        active
-            .active_page_target_mut()
-            .refresh_devtools_network_policy();
         let active_offline = active_session_state_mut(&mut active).set_emulated_network_conditions(
             true,
             25.0,
@@ -983,22 +967,30 @@ mod tests {
             Some("cellular3g".to_owned()),
         );
 
-        assert!(active.active_page_target().network_policy.cache_disabled());
         assert!(
             active
                 .active_page_target()
-                .network_policy
+                .effective_policy()
+                .cache_disabled()
+        );
+        assert!(
+            active
+                .active_page_target()
+                .effective_policy()
                 .bypass_service_worker()
         );
         assert_eq!(
             active
                 .active_page_target()
-                .network_policy
+                .effective_policy()
                 .blocked_url_patterns(),
             vec!["*://blocked.test/*"]
         );
         assert_eq!(
-            active.active_page_target().network_policy.extra_headers(),
+            active
+                .active_page_target()
+                .effective_policy()
+                .extra_headers(),
             vec![("X-Test".to_owned(), "active".to_owned())]
         );
         assert!(active_offline);
@@ -1041,7 +1033,6 @@ mod tests {
             network.blocked_url_patterns = vec!["*://parked-blocked.test/*".to_owned()];
             network.extra_headers = vec![("X-Test".to_owned(), "parked".to_owned())];
         }
-        parked.refresh_devtools_network_policy();
         let parked_offline = parked_session_state_mut(&mut parked).set_emulated_network_conditions(
             true,
             50.0,
@@ -1050,14 +1041,14 @@ mod tests {
             Some("cellular4g".to_owned()),
         );
 
-        assert!(parked.network_policy.cache_disabled());
-        assert!(parked.network_policy.bypass_service_worker());
+        assert!(parked.effective_policy().cache_disabled());
+        assert!(parked.effective_policy().bypass_service_worker());
         assert_eq!(
-            parked.network_policy.blocked_url_patterns(),
+            parked.effective_policy().blocked_url_patterns(),
             vec!["*://parked-blocked.test/*"]
         );
         assert_eq!(
-            parked.network_policy.extra_headers(),
+            parked.effective_policy().extra_headers(),
             vec![("X-Test".to_owned(), "parked".to_owned())]
         );
         assert!(parked_offline);

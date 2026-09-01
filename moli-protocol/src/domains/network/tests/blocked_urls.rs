@@ -51,7 +51,7 @@ async fn set_blocked_urls_updates_browser_context_state() {
             .as_ref()
             .unwrap()
             .active_page_target()
-            .network_policy
+            .effective_policy()
             .blocked_url_patterns(),
         vec![
             "http://example.test/*.png".to_owned(),
@@ -72,7 +72,7 @@ async fn set_blocked_urls_updates_browser_context_state() {
             .as_ref()
             .unwrap()
             .active_page_target()
-            .network_policy
+            .effective_policy()
             .blocked_url_patterns()
             .is_empty()
     );
@@ -96,7 +96,7 @@ async fn set_blocked_urls_contribution_activates_with_network_handler() {
             .as_ref()
             .unwrap()
             .active_page_target()
-            .network_policy
+            .effective_policy()
             .blocked_url_patterns()
             .is_empty(),
         "Chromium does not instrument blocked URLs until the Network handler is enabled"
@@ -109,7 +109,7 @@ async fn set_blocked_urls_contribution_activates_with_network_handler() {
             .as_ref()
             .unwrap()
             .active_page_target()
-            .network_policy
+            .effective_policy()
             .blocked_url_patterns(),
         ["*without-enable*".to_owned()],
         "Network.enable activates the handler's retained blocked URL contribution"

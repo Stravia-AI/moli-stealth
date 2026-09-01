@@ -80,11 +80,14 @@ async fn set_extra_http_headers_replaces_previous_headers() {
 
     let bc = ctx.conn.browser_context.as_ref().expect("browser context");
     assert_eq!(
-        bc.active_page_target().network_policy.extra_headers().len(),
+        bc.active_page_target()
+            .effective_policy()
+            .extra_headers()
+            .len(),
         1
     );
     assert_eq!(
-        bc.active_page_target().network_policy.extra_headers()[0],
+        bc.active_page_target().effective_policy().extra_headers()[0],
         ("food".to_owned(), "bars".to_owned())
     );
 }
