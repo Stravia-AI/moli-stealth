@@ -585,12 +585,11 @@ pub(crate) use state::{
 };
 pub(crate) use target::{
     PreparedTargetAttach, PreparedTargetHostClosure, PreparedTargetHostDelta,
-    TargetAttachSessionCommit, TargetBindingCleanupAction, TargetClosureCleanupPlan,
-    TargetSessionDetachCleanupPlan,
+    TargetAttachSessionCommit, TargetBindingCleanupAction, TargetBindingCleanupPlan,
+    TargetClosureCleanupPlan, TargetEventPlan, TargetSessionDetachCleanupPlan,
 };
 use target::{
-    TargetClosurePlan, TargetControlPlane, TargetEventPlan, TargetHostDelta,
-    target_destroyed_automation_events,
+    TargetClosurePlan, TargetControlPlane, TargetHostDelta, target_destroyed_automation_events,
 };
 pub(crate) use top_level_navigation_work::TopLevelLocationNavigationOwnerAction;
 

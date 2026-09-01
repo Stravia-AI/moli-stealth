@@ -229,25 +229,6 @@ enum BidiChannelListenerRoute {
     Event(BackgroundProtocolEvent),
 }
 
-fn unregister_runtime_remote_object_group_from_page_target(
-    page_session_state: &mut PageTargetHost,
-    session_id: Option<&str>,
-    object_group: &str,
-) {
-    if let Some(session_id) = session_id
-        && let Some(state) = page_session_state
-            .devtools_sessions
-            .attached_mut(session_id)
-    {
-        state.unregister_runtime_remote_object_group(object_group);
-        return;
-    }
-    page_session_state
-        .devtools_sessions
-        .primary_mut()
-        .unregister_runtime_remote_object_group(object_group);
-}
-
 #[derive(Debug)]
 pub(crate) struct OwnerRuntimeResponse {
     command_id: u64,
@@ -1983,63 +1964,6 @@ impl CdpConnection {
         }
         self.target_devtools_session_state_for_session(session_id)
             .is_some_and(DevToolsSessionState::has_pending_inspector_awaits)
-    }
-
-    pub(crate) fn fail_pending_inspector_awaits_from_page_session_state_for_sessions_background_events_into(
-        out: &mut Vec<BackgroundProtocolEvent>,
-        page_session_state: &mut PageTargetHost,
-        primary_session_id: Option<&str>,
-        session_ids: &[&str],
-        reason: &'static str,
-    ) {
-        for (cdp_id, entry) in page_session_state
-            .devtools_sessions
-            .drain_pending_inspector_awaits_for_sessions(session_ids)
-        {
-            if let Some(listener) = entry.bidi_channel_listener() {
-                unregister_runtime_remote_object_group_from_page_target(
-                    page_session_state,
-                    entry.session_id(),
-                    listener.channel_object_group(),
-                );
-                continue;
-            }
-            push_pending_inspector_await_error_background_event(
-                out,
-                cdp_id,
-                entry.session_id(),
-                reason,
-            );
-        }
-        if let Some(primary_session_id) = primary_session_id
-            && session_ids.contains(&primary_session_id)
-        {
-            let terminated = page_session_state
-                .devtools_sessions
-                .primary_mut()
-                .terminate_all_renderer_calls(reason);
-            push_terminated_renderer_call_error_background_events(
-                out,
-                terminated,
-                Some(primary_session_id),
-                reason,
-            );
-        }
-        for session_id in session_ids {
-            let Some(state) = page_session_state
-                .devtools_sessions
-                .attached_mut(session_id)
-            else {
-                continue;
-            };
-            let terminated = state.terminate_all_renderer_calls(reason);
-            push_terminated_renderer_call_error_background_events(
-                out,
-                terminated,
-                Some(session_id),
-                reason,
-            );
-        }
     }
 
     pub(crate) fn fail_pending_inspector_awaits_from_shared_worker_target_session_background_events_into(
