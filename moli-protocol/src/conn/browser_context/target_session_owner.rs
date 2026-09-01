@@ -9,10 +9,10 @@ use crate::conn::state::{
 use crate::conn::{
     BackgroundProtocolEvent, ConnectionNetworkRequestIdAllocator, DocumentStartScript,
     EmulatedDeviceMetrics, FetchInterceptionPattern, FetchRequestStage,
-    InitialDocumentPageInstallResult, InitialDocumentPageOwner, IsolatedWorldDefinition,
-    LoadedNavigationPageCommit, LoadedNavigationRendererAttachmentCommit, NETWORK_ERROR_PAGE_URL,
-    NetworkErrorPageNavigation, PausedDocumentTransfer, PendingFetchAuthNavigation,
-    PendingFetchNavigation, PendingSubresourceFetchAuthRequest, PendingSubresourceFetchRequest,
+    InitialDocumentPageInstallResult, InitialDocumentPageOwner, LoadedNavigationPageCommit,
+    LoadedNavigationRendererAttachmentCommit, NETWORK_ERROR_PAGE_URL, NetworkErrorPageNavigation,
+    PausedDocumentTransfer, PendingFetchAuthNavigation, PendingFetchNavigation,
+    PendingSubresourceFetchAuthRequest, PendingSubresourceFetchRequest,
     PendingSubresourceFetchResponseRequest, RuntimeBindingDefinition,
 };
 use crate::devtools_runtime::{DevToolsNetworkInterceptId, DevToolsNetworkResourceType};
@@ -108,7 +108,6 @@ pub(crate) struct TargetLoadedNavigationCommitState {
         Vec<RendererInspectorSessionRestoreSnapshot>,
     pub(crate) stored_runtime_bindings: Vec<RuntimeBindingDefinition>,
     pub(crate) session_runtime_bindings: Vec<RuntimeBindingDefinition>,
-    pub(crate) isolated_worlds: Vec<IsolatedWorldDefinition>,
     pub(crate) fetch_subresource_config: (bool, Option<moli_core::page::SubresourceResourceType>),
 }
 
@@ -1235,7 +1234,6 @@ impl<'a> TargetSessionOwnerMut<'a> {
                     session_runtime_bindings: devtools_session_state
                         .map(|state| state.runtime_bindings.clone())
                         .unwrap_or_default(),
-                    isolated_worlds: target.owner_state.isolated_worlds.clone(),
                     fetch_subresource_config: target.fetch_owner.subresource_interception_config(),
                 })
             }

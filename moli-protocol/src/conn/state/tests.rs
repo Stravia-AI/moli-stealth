@@ -14,13 +14,10 @@ use super::fetch::{
 };
 use super::navigation::{PageNavigationHistoryEntry, TargetNavigationHistoryState};
 use super::navigation_outcome::{NavigationDispatchState, NavigationResultProjection};
-use super::page_slot::{DocumentStartScript, IsolatedWorldDefinition};
+use super::page_slot::DocumentStartScript;
 use super::runtime_slot::TargetRuntimeSlot;
 use super::session::TargetPageSessionState;
-use super::{
-    PageTargetHost,
-    parking::{ParkedTargetOwnerState, TargetOwnerState},
-};
+use super::{PageTargetHost, parking::TargetOwnerState};
 
 use serde_json::json;
 use std::collections::HashMap;
@@ -1210,12 +1207,8 @@ fn navigation_history_traversal_reuses_same_document_entries() {
 fn background_target_keeps_owner_state_independent_from_network_artifacts() {
     let mut target = PageTargetHost::with_url("TID-A".to_owned(), None, "about:blank".to_owned());
 
-    let mut owner_state = ParkedTargetOwnerState {
+    let mut owner_state = TargetOwnerState {
         next_document_start_script_id: 9,
-        isolated_worlds: vec![IsolatedWorldDefinition {
-            name: "utility".to_owned(),
-            grant_universal_access: false,
-        }],
         ..Default::default()
     };
     owner_state
@@ -1262,7 +1255,6 @@ fn background_target_keeps_owner_state_independent_from_network_artifacts() {
             .has_unemitted_console_domain(3, 2)
     );
     assert_eq!(restored.next_document_start_script_id, 9);
-    assert_eq!(restored.isolated_worlds.len(), 1);
     assert!(target.owner_state.is_default());
 }
 

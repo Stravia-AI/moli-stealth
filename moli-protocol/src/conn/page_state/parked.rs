@@ -1,8 +1,8 @@
 use super::super::state::{TargetPageAbsenceReason, TargetSessionStorageNamespace};
 use super::super::{
-    BrowserContext, DedicatedWorkerTargetState, IsolatedWorldDefinition, PageTargetHost,
-    ParkedTargetOwnerState, ServiceWorkerTargetState, SharedWorkerTargetState, TargetIdentityState,
-    TargetInitialEmptyDocumentCreator,
+    BrowserContext, DedicatedWorkerTargetState, PageTargetHost, ServiceWorkerTargetState,
+    SharedWorkerTargetState, TargetIdentityState, TargetInitialEmptyDocumentCreator,
+    TargetOwnerState,
 };
 use crate::devtools_runtime::{
     DevToolsBrowserContextId, DevToolsTargetId, DevToolsTargetInfo, DevToolsTargetKind,
@@ -849,16 +849,6 @@ impl BrowserContext {
         Ok(true)
     }
 
-    pub fn take_parked_isolated_worlds(&mut self, target_id: &str) -> Vec<IsolatedWorldDefinition> {
-        std::mem::take(
-            &mut self
-                .background_target_mut(target_id)
-                .expect("parked target must exist")
-                .owner_state
-                .isolated_worlds,
-        )
-    }
-
     pub fn take_parked_document_start_script_counter(&mut self, target_id: &str) -> u32 {
         let owner_state = &mut self
             .background_target_mut(target_id)
@@ -867,17 +857,6 @@ impl BrowserContext {
         let counter = owner_state.next_document_start_script_id;
         owner_state.next_document_start_script_id = 0;
         counter
-    }
-
-    pub fn replace_parked_isolated_worlds(
-        &mut self,
-        target_id: String,
-        isolated_worlds: Vec<IsolatedWorldDefinition>,
-    ) {
-        self.background_target_mut(&target_id)
-            .expect("parked target must exist")
-            .owner_state
-            .isolated_worlds = isolated_worlds;
     }
 
     pub fn replace_parked_document_start_script_counter(
@@ -970,7 +949,7 @@ impl BrowserContext {
     fn mutate_target_owner_state_by_target_id<T>(
         &mut self,
         target_id: &str,
-        mutate: impl FnOnce(&mut ParkedTargetOwnerState) -> T,
+        mutate: impl FnOnce(&mut TargetOwnerState) -> T,
     ) -> Option<T> {
         if self.is_active_target(target_id) {
             return Some(mutate(&mut self.active_page_target_mut().owner_state));
@@ -982,7 +961,7 @@ impl BrowserContext {
     pub(crate) fn mutate_parked_target_owner_state<T>(
         &mut self,
         target_id: &str,
-        mutate: impl FnOnce(&mut ParkedTargetOwnerState) -> T,
+        mutate: impl FnOnce(&mut TargetOwnerState) -> T,
     ) -> T {
         mutate(
             &mut self
@@ -992,19 +971,13 @@ impl BrowserContext {
         )
     }
 
-    pub(crate) fn parked_target_owner_state(
-        &self,
-        target_id: &str,
-    ) -> Option<&ParkedTargetOwnerState> {
+    pub(crate) fn parked_target_owner_state(&self, target_id: &str) -> Option<&TargetOwnerState> {
         let state = &self.background_target(target_id)?.owner_state;
         (!state.is_default()).then_some(state)
     }
 
     #[cfg(test)]
-    pub(crate) fn parked_target_owner_state_or_default(
-        &self,
-        target_id: &str,
-    ) -> ParkedTargetOwnerState {
+    pub(crate) fn parked_target_owner_state_or_default(&self, target_id: &str) -> TargetOwnerState {
         self.background_target(target_id)
             .map(|target| target.owner_state.clone())
             .unwrap_or_default()
@@ -1780,13 +1753,6 @@ mod tests {
             None,
         );
         context.replace_parked_document_start_script_counter("TID-bg".to_owned(), 7);
-        context.replace_parked_isolated_worlds(
-            "TID-bg".to_owned(),
-            vec![IsolatedWorldDefinition {
-                name: "utility".to_owned(),
-                grant_universal_access: true,
-            }],
-        );
         context.mutate_parked_page_session_state("TID-bg", |state| {
             state.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary] =
                 DevToolsSessionState {
@@ -1804,8 +1770,6 @@ mod tests {
 
         assert_eq!(host.target_id(), "TID-bg");
         assert_eq!(host.owner_state.next_document_start_script_id, 7);
-        assert_eq!(host.owner_state.isolated_worlds.len(), 1);
-        assert_eq!(host.owner_state.isolated_worlds[0].name, "utility");
         assert!(
             host.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
                 .runtime_session_state
@@ -1828,7 +1792,6 @@ mod tests {
             context.take_parked_document_start_script_counter("TID-bg"),
             7
         );
-        assert_eq!(context.take_parked_isolated_worlds("TID-bg").len(), 1);
     }
 
     #[test]
@@ -1899,14 +1862,6 @@ mod tests {
         context
             .active_page_state_mut()
             .owner_state
-            .isolated_worlds
-            .push(IsolatedWorldDefinition {
-                name: "main.utility".to_owned(),
-                grant_universal_access: false,
-            });
-        context
-            .active_page_state_mut()
-            .owner_state
             .document_start_scripts
             .push((
                 "script-1".to_owned(),
@@ -1950,7 +1905,6 @@ mod tests {
                 .inspector_enabled
         );
         assert_eq!(host.owner_state.next_document_start_script_id, 3);
-        assert_eq!(host.owner_state.isolated_worlds.len(), 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]
