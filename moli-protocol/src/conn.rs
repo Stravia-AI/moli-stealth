@@ -122,6 +122,7 @@ pub use moli_protocol_cdp::{
 use target::DEFAULT_BROWSER_CONTEXT_ID;
 pub(crate) use target::{
     CdpSessionRoute, DefaultTargetLifecycle, TargetActivationTransition, TargetHandlerAccessMode,
+    TargetWorkerProtocolAttachmentIdentity,
 };
 
 #[derive(Clone, Debug)]
