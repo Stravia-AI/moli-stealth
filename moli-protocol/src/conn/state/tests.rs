@@ -16,7 +16,7 @@ use super::navigation::{PageNavigationHistoryEntry, TargetNavigationHistoryState
 use super::navigation_outcome::{NavigationDispatchState, NavigationResultProjection};
 use super::page_slot::{DocumentStartScript, IsolatedWorldDefinition};
 use super::runtime_slot::TargetRuntimeSlot;
-use super::session::{TargetPageSessionState, TargetPageState};
+use super::session::TargetPageSessionState;
 use super::{
     PageTargetHost,
     parking::{ParkedTargetOwnerState, TargetOwnerState},
@@ -53,7 +53,7 @@ fn test_navigation_dispatch_state(fetch_request_id: &str) -> NavigationDispatchS
 fn background_target_owns_page_session_state_atomically() {
     let mut target = PageTargetHost::with_url("TID-A".to_owned(), None, "about:blank".to_owned());
 
-    let mut state = TargetPageState::empty("TID-state-test".to_owned());
+    let mut state = PageTargetHost::empty("TID-state-test".to_owned());
     state.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary] = DevToolsSessionState {
         page_session_state: TargetPageSessionState {
             log_enabled: true,

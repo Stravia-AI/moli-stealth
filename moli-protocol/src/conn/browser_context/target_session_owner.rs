@@ -2,9 +2,9 @@ use super::session_owner::TargetSessionOwner;
 use super::*;
 use crate::conn::state::{
     BrowserContextPageStorageHandles, BrowserContextResourceStorageHandles, DevToolsSessionState,
-    PageNavigationHistoryEntry, RendererMainDocumentCommitSeed, TargetFetchConfig,
+    PageNavigationHistoryEntry, PageTargetHost, RendererMainDocumentCommitSeed, TargetFetchConfig,
     TargetNetworkPolicyState, TargetOwnerState, TargetPageAbsenceReason,
-    TargetPageResidenceIdentity, TargetPageState, TargetRuntimeSessionState, TargetRuntimeSlot,
+    TargetPageResidenceIdentity, TargetRuntimeSessionState, TargetRuntimeSlot,
 };
 use crate::conn::{
     BackgroundProtocolEvent, ConnectionNetworkRequestIdAllocator, DocumentStartScript,
@@ -457,13 +457,13 @@ fn target_navigation_initiator_url(target_url: &str, loaded_page: Option<&Page>)
     url.host_str().is_some().then_some(url)
 }
 
-fn clear_page_runtime_remote_object_tracking(state: &mut crate::conn::state::TargetPageState) {
+fn clear_page_runtime_remote_object_tracking(state: &mut crate::conn::state::PageTargetHost) {
     for session in state.devtools_sessions.states_mut() {
         session.clear_runtime_remote_object_tracking();
     }
 }
 
-fn clear_page_loaded_document_session_state(state: &mut crate::conn::state::TargetPageState) {
+fn clear_page_loaded_document_session_state(state: &mut crate::conn::state::PageTargetHost) {
     clear_page_runtime_remote_object_tracking(state);
     for session in state.devtools_sessions.states_mut() {
         session
@@ -793,7 +793,7 @@ impl<'a> TargetSessionOwnerMut<'a> {
 
     pub(super) fn mutate_page_state<T>(
         &mut self,
-        f: impl FnOnce(&mut TargetPageState, bool, Option<&str>) -> T,
+        f: impl FnOnce(&mut PageTargetHost, bool, Option<&str>) -> T,
     ) -> Option<T> {
         match self {
             Self::PageTarget {

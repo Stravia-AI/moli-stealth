@@ -34,7 +34,6 @@ use super::{
     page_target_host::{PageTargetHost, PageTargetRegistry},
     parking::TargetOwnerState,
     service_worker_target::ServiceWorkerTargetState,
-    session::TargetPageState,
     shared_worker_target::SharedWorkerTargetState,
 };
 
@@ -375,11 +374,11 @@ impl BrowserContext {
     }
 
     #[cfg(test)]
-    pub(crate) fn active_page_state(&self) -> &TargetPageState {
+    pub(crate) fn active_page_state(&self) -> &PageTargetHost {
         self.active_page_target().state()
     }
 
-    pub(crate) fn active_page_state_mut(&mut self) -> &mut TargetPageState {
+    pub(crate) fn active_page_state_mut(&mut self) -> &mut PageTargetHost {
         self.active_page_target_mut().state_mut()
     }
 

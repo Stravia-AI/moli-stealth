@@ -59,10 +59,6 @@ impl TargetPerformanceSessionState {
     }
 }
 
-/// Compatibility name for code that consumes page-owned state. There is only
-/// one object: the stable `PageTargetHost` itself.
-pub type TargetPageState = PageTargetHost;
-
 impl PageTargetHost {
     pub(crate) fn effective_renderer_browser_identity_override_owned(
         &self,
@@ -741,13 +737,12 @@ impl TargetNetworkPolicyState {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        PageScreencastConfig, PageScreencastFormat, PageScreencastSessionState, TargetPageState,
-    };
+    use super::{PageScreencastConfig, PageScreencastFormat, PageScreencastSessionState};
+    use crate::conn::PageTargetHost;
 
     #[test]
     fn devtools_emulation_overrides_reveal_target_base_state_when_cleared() {
-        let mut state = TargetPageState::empty("TID-policy-test".to_owned());
+        let mut state = PageTargetHost::empty("TID-policy-test".to_owned());
         state.set_base_locale_override(Some("en-GB".to_owned()));
         state.set_base_timezone_override(Some("Europe/London".to_owned()));
         state.network_policy.set_browser_identity_override(

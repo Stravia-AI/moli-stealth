@@ -230,7 +230,7 @@ enum BidiChannelListenerRoute {
 }
 
 fn unregister_runtime_remote_object_group_from_parked_page_session_state(
-    page_session_state: &mut TargetPageState,
+    page_session_state: &mut PageTargetHost,
     session_id: Option<&str>,
     object_group: &str,
 ) {
@@ -1687,7 +1687,7 @@ impl CdpConnection {
 
     pub(crate) fn fail_pending_inspector_awaits_from_page_session_state_for_sessions_background_events_into(
         out: &mut Vec<BackgroundProtocolEvent>,
-        page_session_state: &mut TargetPageState,
+        page_session_state: &mut PageTargetHost,
         primary_session_id: Option<&str>,
         session_ids: &[&str],
         reason: &'static str,

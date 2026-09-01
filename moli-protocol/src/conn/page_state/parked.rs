@@ -899,7 +899,7 @@ impl BrowserContext {
     pub(crate) fn parked_page_session_state(
         &self,
         target_id: &str,
-    ) -> Option<&crate::conn::state::TargetPageState> {
+    ) -> Option<&crate::conn::state::PageTargetHost> {
         let state = self.background_target(target_id)?.state();
         state.has_non_default_session_state().then_some(state)
     }
@@ -907,7 +907,7 @@ impl BrowserContext {
     pub fn mutate_parked_page_session_state<T>(
         &mut self,
         target_id: &str,
-        mutate: impl FnOnce(&mut crate::conn::state::TargetPageState) -> T,
+        mutate: impl FnOnce(&mut crate::conn::state::PageTargetHost) -> T,
     ) -> T {
         mutate(
             self.background_target_mut(target_id)

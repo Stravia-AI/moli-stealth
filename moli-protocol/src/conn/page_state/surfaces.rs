@@ -2,7 +2,7 @@ use super::super::cookie_manager_surface::BrowserContextCookieManagerSurfaceSnap
 use super::super::{
     BrowserContext, CdpConnection, DocumentStartScript, EmulatedDeviceMetrics,
     EmulatedGeolocationOverrideState, EmulatedNetworkConditions, EmulatedViewportSurface,
-    TargetPageState, viewport_surface_install_script,
+    PageTargetHost, viewport_surface_install_script,
 };
 #[cfg(test)]
 use moli_cookie_jar::{BrowserCookieFacadeContextOverrides, BrowserCookieFacadeOverrides};
@@ -40,7 +40,7 @@ impl SurfaceOverrideInputs {
     }
 
     fn from_parked(
-        state: &TargetPageState,
+        state: &PageTargetHost,
         default_network_conditions: Option<EmulatedNetworkConditions>,
         default_geolocation_override: Option<EmulatedGeolocationOverrideState>,
         default_emulated_device_metrics: Option<EmulatedDeviceMetrics>,
@@ -359,7 +359,7 @@ impl BrowserContext {
 
     pub(crate) fn generated_surface_override_script_for_parked_state(
         &self,
-        state: &TargetPageState,
+        state: &PageTargetHost,
     ) -> Option<DocumentStartScript> {
         Self::generated_surface_override_script_from_inputs(&SurfaceOverrideInputs::from_parked(
             state,
