@@ -29,7 +29,7 @@ use url::Url;
 fn test_navigation_dispatch_state(fetch_request_id: &str) -> NavigationDispatchState {
     NavigationDispatchState {
         navigate_id: Some(1),
-        navigate_session_id: Some("SID-1".to_owned()),
+        owner: crate::conn::CommandOwnerScope::from_session_and_owner_route(Some("SID-1"), None),
         result_projection: NavigationResultProjection::Cdp(
             json!({"frameId": "TID-1", "loaderId": "LID-0000000001"}),
         ),

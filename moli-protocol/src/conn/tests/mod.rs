@@ -1681,7 +1681,7 @@ fn materialized_navigation_test_state(
 ) -> NavigationDispatchState {
     NavigationDispatchState {
         navigate_id,
-        navigate_session_id: None,
+        owner: crate::conn::CommandOwnerScope::from_session_and_owner_route(None, None),
         result_projection: NavigationResultProjection::Cdp(
             json!({ "frameId": "TID-nav", "loaderId": loader_id }),
         ),

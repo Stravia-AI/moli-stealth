@@ -2373,7 +2373,10 @@ mod tests {
             document_navigation_token: None,
             navigation: NavigationDispatchState {
                 navigate_id: Some(1),
-                navigate_session_id: owner_session_id.map(str::to_owned),
+                owner: crate::conn::CommandOwnerScope::from_session_and_owner_route(
+                    owner_session_id,
+                    None,
+                ),
                 result_projection: NavigationResultProjection::Cdp(
                     json!({"frameId": "FRAME-1", "loaderId": "LOADER-1"}),
                 ),
