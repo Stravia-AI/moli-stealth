@@ -7477,16 +7477,6 @@ pub(crate) async fn complete_pending_page_command(
     completed: CompletedPageCommandDispatch,
     command_context: &mut CommandDispatchContext,
 ) -> PageCommandTaskStep {
-    let owner_scope = completed.owner_scope.clone();
-    let mut route_scope = owner_scope.enter(conn);
-    complete_pending_page_command_inner(route_scope.conn_mut(), completed, command_context).await
-}
-
-async fn complete_pending_page_command_inner(
-    conn: &mut CdpConnection,
-    completed: CompletedPageCommandDispatch,
-    command_context: &mut CommandDispatchContext,
-) -> PageCommandTaskStep {
     let command_id = completed.command_id;
     let owner_scope = completed.owner_scope.clone();
     let session_id = completed.owner_scope.session_id().map(str::to_owned);
@@ -7612,7 +7602,7 @@ async fn complete_pending_page_command_inner(
             return preload::complete_pending_add_script_to_evaluate_on_new_document_command(
                 conn,
                 command_id,
-                session_id.as_deref(),
+                &owner_scope,
                 completed,
                 command_context,
             )
@@ -7990,7 +7980,7 @@ async fn complete_pending_page_command_inner(
             return preload::complete_pending_create_isolated_world_command(
                 conn,
                 command_id,
-                session_id.as_deref(),
+                &owner_scope,
                 *completed,
                 command_context,
             )
@@ -8028,7 +8018,7 @@ async fn complete_pending_page_command_inner(
             return termination::complete_stop_loading_command_dispatch(
                 conn,
                 command_id,
-                session_id.as_deref(),
+                &owner_scope,
             )
             .await;
         }
@@ -8036,7 +8026,7 @@ async fn complete_pending_page_command_inner(
             return termination::complete_crash_command_dispatch(
                 conn,
                 command_id,
-                session_id.as_deref(),
+                &owner_scope,
                 command_context,
             )
             .await;
@@ -8045,7 +8035,7 @@ async fn complete_pending_page_command_inner(
             return termination::complete_close_command_dispatch(
                 conn,
                 command_id,
-                session_id.as_deref(),
+                &owner_scope,
                 command_context,
             )
             .await;

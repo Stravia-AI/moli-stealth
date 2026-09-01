@@ -624,7 +624,7 @@ impl MainDocumentNavigationActivity {
         network::emit_pending_network_backlog_activity_background_events(
             conn,
             out,
-            network::NetworkBacklogProjectionContext::new(self.state.owner.session_id()),
+            network::NetworkBacklogProjectionContext::for_owner(&self.state.owner),
         );
         if timing_enabled {
             tracing::info!(

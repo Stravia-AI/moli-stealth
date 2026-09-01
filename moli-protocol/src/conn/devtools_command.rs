@@ -392,6 +392,7 @@ impl CdpConnection {
             .is_some_and(|browser_context| {
                 browser_context.has_default_bidi_channel_preload_script()
             });
+        let command_owner = CommandOwnerScope::for_implicit_route(Some(route.clone()));
         let mut route_scope = self.scoped_none_session_owner_route_override(route);
         let mut initial_runtime_execution_context_ids = Vec::new();
         let mut renderer_output_predecessor = None;
@@ -478,7 +479,7 @@ impl CdpConnection {
                 Box::pin(
                     crate::domains::runtime::start_bidi_preload_channel_listeners_for_execution_context_background_events_async(
                         route_scope.conn_mut(),
-                        None,
+                        &command_owner,
                         execution_context_id,
                         &mut listener_events,
                     ),

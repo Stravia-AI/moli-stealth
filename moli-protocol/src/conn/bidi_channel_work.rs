@@ -25,9 +25,19 @@ impl BidiChannelPageOwner {
     /// route, while `attachment` freezes the target Page residence and exact
     /// protocol session.
     pub(crate) fn capture(conn: &CdpConnection, session_id: Option<&str>) -> Option<Self> {
+        Self::capture_for_owner(conn, CommandOwnerScope::capture(conn, session_id))
+    }
+
+    pub(crate) fn capture_for_owner(
+        conn: &CdpConnection,
+        owner_scope: CommandOwnerScope,
+    ) -> Option<Self> {
         Some(Self {
-            owner_scope: CommandOwnerScope::capture(conn, session_id),
-            attachment: conn.target_page_protocol_attachment_identity_for_session(session_id)?,
+            attachment: conn.target_page_protocol_attachment_identity_for_route(
+                owner_scope.session_id(),
+                owner_scope.session_owner_route(),
+            )?,
+            owner_scope,
         })
     }
 
