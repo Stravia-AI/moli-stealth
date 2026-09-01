@@ -35,6 +35,7 @@ mod bigint;
 mod binding;
 mod context;
 pub use context::ContextOptions;
+mod cpu_profiler;
 pub mod cppgc;
 mod data;
 mod date;
@@ -95,6 +96,7 @@ pub mod simdutf;
 pub mod V8;
 
 pub use array_buffer::*;
+pub use cpu_profiler::{CpuTraceProfile, CpuTraceProfiler, CpuTraceProfilerStopError};
 pub use data::*;
 pub use exception::*;
 pub use external_references::ExternalReference;
