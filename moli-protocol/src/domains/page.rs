@@ -2346,10 +2346,11 @@ pub(crate) async fn navigate_page_owned_top_level_location_background_events_asy
         );
         return;
     }
-    navigate_session_owner_from_renderer_request_background_events_async(
+    let command_owner = CommandOwnerScope::capture(conn, session_id);
+    navigate_command_owner_from_renderer_request_background_events_async(
         conn,
         out,
-        session_id,
+        command_owner,
         navigation.url(),
         navigation.request_method(),
         navigation.request_body(),
@@ -2365,10 +2366,20 @@ pub(crate) async fn navigate_session_owner_from_renderer_background_events_async
     session_id: Option<&str>,
     url: &str,
 ) {
-    navigate_session_owner_from_renderer_request_background_events_async(
+    let owner = CommandOwnerScope::capture(conn, session_id);
+    navigate_command_owner_from_renderer_background_events_async(conn, out, &owner, url).await;
+}
+
+pub(crate) async fn navigate_command_owner_from_renderer_background_events_async(
+    conn: &mut CdpConnection,
+    out: &mut Vec<BackgroundProtocolEvent>,
+    owner: &CommandOwnerScope,
+    url: &str,
+) {
+    navigate_command_owner_from_renderer_request_background_events_async(
         conn,
         out,
-        session_id,
+        owner.clone(),
         url,
         "GET",
         None,
@@ -2378,17 +2389,16 @@ pub(crate) async fn navigate_session_owner_from_renderer_background_events_async
     .await;
 }
 
-async fn navigate_session_owner_from_renderer_request_background_events_async(
+async fn navigate_command_owner_from_renderer_request_background_events_async(
     conn: &mut CdpConnection,
     out: &mut Vec<BackgroundProtocolEvent>,
-    session_id: Option<&str>,
+    owner: CommandOwnerScope,
     url: &str,
     request_method: &str,
     request_body: Option<&[u8]>,
     request_headers: &[(String, String)],
     browser_navigation_kind: moli_fetch::BrowserNavigationRequestKind,
 ) {
-    let owner = CommandOwnerScope::capture(conn, session_id);
     let start = navigation::start_session_owner_navigation_from_renderer(
         conn,
         &owner,
