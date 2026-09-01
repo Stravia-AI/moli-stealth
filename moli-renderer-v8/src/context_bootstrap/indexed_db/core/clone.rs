@@ -90,7 +90,8 @@ impl v8::ValueSerializerImpl for IndexedDbStructuredCloneSerializer {
             crate::context_bootstrap::is_crypto_key_object(scope, object)
                 || crate::blob::is_blob_object(scope, object)
                 || is_file_list_object(scope, object)
-                || file_system_handle_clone_payload_from_object(scope, object).is_some(),
+                || file_system_handle_clone_payload_from_object(scope, object).is_some()
+                || moli_webapi_declare::is_web_api_platform_object(scope, object),
         )
     }
 

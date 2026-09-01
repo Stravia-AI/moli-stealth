@@ -251,6 +251,7 @@ pub(in crate::context_bootstrap) fn install_interface_template_metadata<'s>(
     template: v8::Local<'s, v8::FunctionTemplate>,
     name: &'static str,
 ) {
+    moli_webapi_declare::mark_web_api_platform_object_template_instances(scope, template);
     if name == "WebSocket" {
         // WebSocket exposes a legacy dynamic @@toStringTag accessor which
         // distinguishes the prototype object from ordinary instances.
