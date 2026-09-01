@@ -162,11 +162,35 @@ const NODE_BRIDGE_DESCRIPTORS: &[BridgeDescriptor] = &[
         ELEMENT_GROUPS,
     ),
     descriptor(
+        "SVGFEDiffuseLightingElement",
+        Some("SVGElement"),
+        ELEMENT_GROUPS,
+    ),
+    descriptor(
         "SVGFEDisplacementMapElement",
         Some("SVGElement"),
         ELEMENT_GROUPS,
     ),
+    descriptor(
+        "SVGFEDistantLightElement",
+        Some("SVGElement"),
+        ELEMENT_GROUPS,
+    ),
+    descriptor("SVGFEDropShadowElement", Some("SVGElement"), ELEMENT_GROUPS),
+    descriptor(
+        "SVGFEGaussianBlurElement",
+        Some("SVGElement"),
+        ELEMENT_GROUPS,
+    ),
     descriptor("SVGFEMorphologyElement", Some("SVGElement"), ELEMENT_GROUPS),
+    descriptor("SVGFEOffsetElement", Some("SVGElement"), ELEMENT_GROUPS),
+    descriptor("SVGFEPointLightElement", Some("SVGElement"), ELEMENT_GROUPS),
+    descriptor(
+        "SVGFESpecularLightingElement",
+        Some("SVGElement"),
+        ELEMENT_GROUPS,
+    ),
+    descriptor("SVGFESpotLightElement", Some("SVGElement"), ELEMENT_GROUPS),
     descriptor("SVGFETurbulenceElement", Some("SVGElement"), ELEMENT_GROUPS),
     descriptor(
         "SVGForeignObjectElement",
@@ -204,6 +228,7 @@ const NODE_BRIDGE_DESCRIPTORS: &[BridgeDescriptor] = &[
     descriptor("SVGMaskElement", Some("SVGElement"), ELEMENT_GROUPS),
     descriptor("SVGMetadataElement", Some("SVGElement"), ELEMENT_GROUPS),
     descriptor("SVGScriptElement", Some("SVGElement"), ELEMENT_GROUPS),
+    descriptor("SVGStopElement", Some("SVGElement"), ELEMENT_GROUPS),
     descriptor("SVGStyleElement", Some("SVGElement"), ELEMENT_GROUPS),
     specialized_descriptor(
         "SVGPathElement",
