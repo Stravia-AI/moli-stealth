@@ -1,5 +1,3 @@
-#[cfg(test)]
-use crate::conn::BrowserContext;
 use crate::conn::{CdpConnection, CdpSessionRoute, PageTargetHost};
 use moli_page_types::DevToolsSessionKey;
 
@@ -30,17 +28,6 @@ impl CdpConnection {
                 .and_then(|browser_context| browser_context.active_target_id())
                 .is_none(),
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_background_target_session<R>(
-        &mut self,
-        session_id: Option<&str>,
-        f: impl FnOnce(&mut BrowserContext, &str) -> R,
-    ) -> Option<R> {
-        let (browser_context_id, target_id) = self.background_target_route(session_id)?;
-        let browser_context = self.browser_context_by_id_mut(&browser_context_id)?;
-        Some(f(browser_context, &target_id))
     }
 
     pub(crate) fn mutate_target_page_state_for_session(
@@ -128,6 +115,7 @@ impl CdpConnection {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::conn::BrowserContext;
 
     #[test]
     fn empty_browser_context_does_not_materialize_a_page_owner() {

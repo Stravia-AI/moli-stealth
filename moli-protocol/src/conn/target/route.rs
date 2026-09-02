@@ -272,43 +272,6 @@ impl CdpConnection {
         self.browser_contexts()
             .any(|browser_context| browser_context.has_attached_child_frame_id(frame_id))
     }
-
-    #[cfg(test)]
-    pub(crate) fn has_background_target_session(&self, session_id: Option<&str>) -> bool {
-        self.background_target_route(session_id).is_some()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn background_target_id_for_session(
-        &self,
-        session_id: Option<&str>,
-    ) -> Option<String> {
-        self.background_target_route(session_id)
-            .map(|(_, target_id)| target_id)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn background_target_route(
-        &self,
-        session_id: Option<&str>,
-    ) -> Option<(String, String)> {
-        match self.session_route(session_id)? {
-            CdpSessionRoute::PageTarget {
-                browser_context_id,
-                target_id,
-                ..
-            } => (!self
-                .browser_context_by_id(&browser_context_id)?
-                .is_active_target(&target_id))
-            .then_some((browser_context_id, target_id)),
-            CdpSessionRoute::Browser
-            | CdpSessionRoute::BrowserContext { .. }
-            | CdpSessionRoute::TabTarget { .. }
-            | CdpSessionRoute::SharedWorkerTarget { .. }
-            | CdpSessionRoute::DedicatedWorkerTarget { .. }
-            | CdpSessionRoute::ServiceWorkerTarget { .. } => None,
-        }
-    }
 }
 fn prepared_browser_context_session_route(
     browser_context: &BrowserContext,
@@ -387,8 +350,11 @@ mod tests {
 
         assert_eq!(connection.session_route(Some("SID-a")), Some(route));
         assert_eq!(
-            connection.background_target_route(Some("SID-a")),
-            Some(("BID-route".to_owned(), "TID-a".to_owned()))
+            connection
+                .browser_context
+                .as_ref()
+                .and_then(BrowserContext::active_target_id),
+            Some("TID-b")
         );
     }
 

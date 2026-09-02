@@ -22,18 +22,6 @@ impl CommandOwnerScope {
         }
     }
 
-    pub(crate) fn capture_for_route(
-        conn: &CdpConnection,
-        session_id: Option<&str>,
-        owner_route: Option<&CdpSessionRoute>,
-    ) -> Self {
-        match (session_id, owner_route) {
-            (Some(session_id), _) => Self::for_session(session_id),
-            (None, Some(route)) => Self::for_route(route.clone()),
-            (None, None) => Self::capture(conn, None),
-        }
-    }
-
     fn capture_default_route(conn: &CdpConnection) -> CdpSessionRoute {
         let Some(browser_context) = conn.browser_context.as_ref() else {
             return CdpSessionRoute::Browser;
