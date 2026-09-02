@@ -148,7 +148,7 @@ async fn set_auto_attach_true_still_reports_transient_no_page_target_like_chromi
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn runtime_add_binding_on_auto_attached_background_target_session_routes_without_promotion_when_active_target_has_no_loaded_page()
+async fn runtime_add_binding_on_auto_attached_background_target_session_routes_without_activation_when_active_target_has_no_loaded_page()
  {
     let mut ctx = TestContext::new();
     load_bc_with_target(&mut ctx, "BID-9", "TID-000000000A");
@@ -208,7 +208,7 @@ async fn runtime_add_binding_on_auto_attached_background_target_session_routes_w
             .runtime_bindings
             .iter()
             .any(|binding| binding.name == "patchedBinding"),
-        "binding definition should persist on the background DevTools session without promotion"
+        "binding definition should persist on the background DevTools session without activation"
     );
 }
 

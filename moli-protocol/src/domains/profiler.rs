@@ -566,7 +566,7 @@ mod tests {
             let browser_context = ctx.conn.browser_context.as_mut().expect("browser context");
             browser_context.attach_active_session("SID-profiler-primary");
             assert!(
-                browser_context.assign_auxiliary_session_to_target(
+                browser_context.assign_attached_session_to_target(
                     "TID-profiler",
                     "SID-profiler-aux".to_owned()
                 )
@@ -604,7 +604,7 @@ mod tests {
             aux_start_without_enable["error"]["message"]
                 .as_str()
                 .is_some_and(|message| message.contains("Profiler is not enabled")),
-            "auxiliary session should not see primary enable state: {aux_start_without_enable:?}"
+            "attached session should not see primary enable state: {aux_start_without_enable:?}"
         );
 
         let aux_enable = process_and_take_response(
@@ -648,7 +648,7 @@ mod tests {
             primary_stop_without_recording["error"]["message"]
                 .as_str()
                 .is_some_and(|message| message.contains("No recording profiles found")),
-            "primary stop should not stop auxiliary profile: {primary_stop_without_recording:?}"
+            "primary stop should not stop attached profile: {primary_stop_without_recording:?}"
         );
 
         let aux_stop = process_and_take_response(
@@ -665,7 +665,7 @@ mod tests {
             aux_stop["result"]["profile"]["nodes"]
                 .as_array()
                 .is_some_and(|nodes| !nodes.is_empty()),
-            "auxiliary session should return its own CPU profile: {aux_stop:?}"
+            "attached session should return its own CPU profile: {aux_stop:?}"
         );
     }
 
@@ -677,7 +677,7 @@ mod tests {
             let browser_context = ctx.conn.browser_context.as_mut().expect("browser context");
             browser_context.attach_active_session("SID-profiler-primary");
             assert!(
-                browser_context.assign_auxiliary_session_to_target(
+                browser_context.assign_attached_session_to_target(
                     "TID-profiler",
                     "SID-profiler-aux".to_owned()
                 )
@@ -767,7 +767,7 @@ mod tests {
         .await;
         assert!(
             aux_coverage["result"]["timestamp"].is_number(),
-            "auxiliary startPreciseCoverage should return timestamp: {aux_coverage:?}"
+            "attached startPreciseCoverage should return timestamp: {aux_coverage:?}"
         );
 
         let aux_stop_coverage = process_and_take_response(
@@ -793,7 +793,7 @@ mod tests {
         .await;
         assert!(
             primary_take_after_aux_stop["result"]["timestamp"].is_number(),
-            "stopping auxiliary coverage must not clear primary coverage: {primary_take_after_aux_stop:?}"
+            "stopping attached coverage must not clear primary coverage: {primary_take_after_aux_stop:?}"
         );
 
         let primary_stop_coverage = process_and_take_response(
@@ -816,7 +816,7 @@ mod tests {
         {
             let browser_context = ctx.conn.browser_context.as_mut().expect("browser context");
             browser_context.attach_active_session("SID-profiler-old");
-            assert!(browser_context.assign_auxiliary_session_to_target(
+            assert!(browser_context.assign_attached_session_to_target(
                 "TID-profiler",
                 "SID-profiler-aux-old".to_owned()
             ));
@@ -881,7 +881,7 @@ mod tests {
                     .devtools_sessions
                     .attached("SID-profiler-aux-old")
                     .is_some(),
-                "detaching the primary target session must preserve independent auxiliary sessions"
+                "detaching the primary target session must preserve independent attached sessions"
             );
         }
 
@@ -1663,14 +1663,14 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn auxiliary_profiler_recording_survives_page_navigation() {
+    async fn attached_profiler_recording_survives_page_navigation() {
         let mut ctx = TestContext::new();
         with_loaded_document_async(&mut ctx, "<!doctype html><body>before</body>").await;
         {
             let browser_context = ctx.conn.browser_context.as_mut().expect("browser context");
             browser_context.attach_active_session("SID-profiler-primary");
             assert!(
-                browser_context.assign_auxiliary_session_to_target(
+                browser_context.assign_attached_session_to_target(
                     "TID-profiler",
                     "SID-profiler-aux".to_owned()
                 )
@@ -1749,7 +1749,7 @@ mod tests {
         .await;
         assert!(
             navigate["result"]["frameId"].is_string(),
-            "auxiliary Page.navigate should commit before Profiler.stop: {navigate:?}"
+            "attached Page.navigate should commit before Profiler.stop: {navigate:?}"
         );
 
         let after = process_and_take_response(
@@ -1779,21 +1779,21 @@ mod tests {
         .await;
         assert!(
             stop.get("error").is_none(),
-            "auxiliary Profiler.stop after navigation should not fail: {stop:?}"
+            "attached Profiler.stop after navigation should not fail: {stop:?}"
         );
         let profile = &stop["result"]["profile"];
         assert!(
             !profile_contains_script_url(profile, "moli-aux-profiler-before-navigation.js"),
-            "auxiliary restore should not migrate old-isolate samples: {stop:?}"
+            "attached restore should not migrate old-isolate samples: {stop:?}"
         );
         assert!(
             profile_contains_script_url(profile, "moli-aux-profiler-after-navigation.js"),
-            "auxiliary profile should include work from the replacement Profiler agent: {stop:?}"
+            "attached profile should include work from the replacement Profiler agent: {stop:?}"
         );
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn inactive_context_auxiliary_profiler_recording_survives_page_navigation() {
+    async fn inactive_context_attached_profiler_recording_survives_page_navigation() {
         let mut ctx = TestContext::new();
 
         let default_context = process_and_take_response(
@@ -1936,7 +1936,7 @@ mod tests {
         .await;
         assert!(
             navigate["result"]["frameId"].is_string(),
-            "inactive auxiliary Page.navigate should commit before Profiler.stop: {navigate:?}"
+            "inactive attached Page.navigate should commit before Profiler.stop: {navigate:?}"
         );
 
         let after = process_and_take_response(
@@ -1967,7 +1967,7 @@ mod tests {
         .await;
         assert!(
             stop.get("error").is_none(),
-            "inactive auxiliary Profiler.stop after navigation should not fail: {stop:?}"
+            "inactive attached Profiler.stop after navigation should not fail: {stop:?}"
         );
         let profile = &stop["result"]["profile"];
         assert!(
@@ -1975,11 +1975,11 @@ mod tests {
                 profile,
                 "moli-inactive-aux-profiler-before-navigation.js"
             ),
-            "inactive auxiliary restore should not migrate old-isolate samples: {stop:?}"
+            "inactive attached restore should not migrate old-isolate samples: {stop:?}"
         );
         assert!(
             profile_contains_script_url(profile, "moli-inactive-aux-profiler-after-navigation.js"),
-            "inactive auxiliary profile should include work from the replacement Profiler agent: {stop:?}"
+            "inactive attached profile should include work from the replacement Profiler agent: {stop:?}"
         );
     }
 
@@ -2516,7 +2516,7 @@ mod tests {
         {
             let browser_context = ctx.conn.browser_context.as_mut().expect("browser context");
             browser_context.attach_active_session("SID-page-console-profile-primary");
-            assert!(browser_context.assign_auxiliary_session_to_target(
+            assert!(browser_context.assign_attached_session_to_target(
                 "TID-page-console-profile-fanout",
                 "SID-page-console-profile-aux".to_owned(),
             ));
@@ -2661,7 +2661,7 @@ mod tests {
         {
             let browser_context = ctx.conn.browser_context.as_mut().expect("browser context");
             browser_context.attach_active_session("SID-page-console-profile-detach-primary");
-            assert!(browser_context.assign_auxiliary_session_to_target(
+            assert!(browser_context.assign_attached_session_to_target(
                 "TID-page-console-profile-detach",
                 "SID-page-console-profile-detach-aux".to_owned(),
             ));
@@ -2737,13 +2737,11 @@ mod tests {
                 message["sessionId"] == json!("SID-page-console-profile-detach-primary")
                     && message["method"] == json!("Profiler.consoleProfileStarted")
             });
-        let aux_started = ctx.take_first_matching(
-            "auxiliary Profiler.consoleProfileStarted event",
-            |message| {
+        let aux_started =
+            ctx.take_first_matching("attached Profiler.consoleProfileStarted event", |message| {
                 message["sessionId"] == json!("SID-page-console-profile-detach-aux")
                     && message["method"] == json!("Profiler.consoleProfileStarted")
-            },
-        );
+            });
         assert_eq!(
             primary_started["params"]["title"],
             json!("page-console-profile-detach")
@@ -2807,7 +2805,7 @@ mod tests {
         wait_until_messages(
             &mut ctx,
             Some("SID-page-console-profile-detach-primary"),
-            "primary page console profile finish after auxiliary detach",
+            "primary page console profile finish after attached detach",
             |messages| {
                 messages.iter().any(|message| {
                     message["sessionId"] == json!("SID-page-console-profile-detach-primary")
@@ -2835,7 +2833,7 @@ mod tests {
                 &primary_finished["params"]["profile"],
                 "moliDetachedPageConsoleProfileWork",
             ),
-            "remaining attached session should keep sampling after auxiliary detach: {primary_finished:?}"
+            "remaining attached session should keep sampling after attached detach: {primary_finished:?}"
         );
         assert!(
             ctx.sent.iter().all(|message| {

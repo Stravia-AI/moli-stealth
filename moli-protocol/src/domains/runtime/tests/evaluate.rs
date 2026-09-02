@@ -1827,7 +1827,7 @@ async fn evaluate_started_before_pending_navigation_can_complete() {
 }
 
 #[tokio::test]
-async fn evaluate_rejects_auxiliary_session_while_main_document_navigation_is_pending() {
+async fn evaluate_rejects_attached_session_while_main_document_navigation_is_pending() {
     let mut ctx = TestContext::new();
     with_loaded_document_async(
         &mut ctx,
@@ -1842,8 +1842,8 @@ async fn evaluate_rejects_auxiliary_session_while_main_document_navigation_is_pe
     browser_context.set_active_target_id("TID-1");
     browser_context.attach_active_session("SID-1");
     assert!(
-        browser_context.assign_auxiliary_session_to_target("TID-1", "SID-aux".to_owned()),
-        "auxiliary session should attach to the active target"
+        browser_context.assign_attached_session_to_target("TID-1", "SID-aux".to_owned()),
+        "attached session should attach to the active target"
     );
     browser_context.set_target_url("data:text/html,previous".to_owned());
     browser_context
@@ -1852,7 +1852,7 @@ async fn evaluate_rejects_auxiliary_session_while_main_document_navigation_is_pe
     assert!(
         ctx.conn
             .has_pending_document_navigation_for_session_owner(Some("SID-aux")),
-        "auxiliary session should inherit the active target document gate"
+        "attached session should inherit the active target document gate"
     );
     ctx.sent.clear();
 
@@ -7208,7 +7208,7 @@ async fn release_object_group_drops_inherited_get_properties_and_call_function_h
     );
 }
 #[tokio::test]
-async fn background_runtime_evaluate_emits_runtime_observable_from_background_owner_without_promotion()
+async fn background_runtime_evaluate_emits_runtime_observable_from_background_owner_without_activation()
  {
     let mut ctx = TestContext::new();
     with_loaded_runtime_frontend_enabled_background_target_async(
@@ -7263,12 +7263,12 @@ async fn background_runtime_evaluate_emits_runtime_observable_from_background_ow
             .as_ref()
             .and_then(|browser_context| browser_context.active_target_id()),
         Some("TID-active"),
-        "background Runtime.evaluate observable drain should not promote the target"
+        "background Runtime.evaluate observable drain should not activate the target"
     );
 }
 
 #[tokio::test]
-async fn call_function_on_loaded_background_owner_without_promotion() {
+async fn call_function_on_loaded_background_owner_without_activation() {
     let mut ctx = TestContext::new();
     with_loaded_runtime_frontend_enabled_background_target_async(
         &mut ctx,
@@ -7329,7 +7329,7 @@ async fn call_function_on_loaded_background_owner_without_promotion() {
             .as_ref()
             .and_then(|browser_context| browser_context.active_target_id()),
         Some("TID-active"),
-        "background Runtime.callFunctionOn should not promote the target"
+        "background Runtime.callFunctionOn should not activate the target"
     );
 
     ctx.process_async(json!({

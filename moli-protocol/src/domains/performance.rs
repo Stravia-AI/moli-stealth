@@ -813,12 +813,12 @@ mod tests {
                 .browser_context
                 .as_mut()
                 .expect("browser context")
-                .assign_auxiliary_session_to_target("TID-1", "SID-aux".to_owned())
+                .assign_attached_session_to_target("TID-1", "SID-aux".to_owned())
         );
         ctx.conn
             .apply_runtime_binding_state_for_session_owner_async(Some("SID-aux"))
             .await
-            .expect("target attachment should establish the auxiliary renderer session");
+            .expect("target attachment should establish the attached renderer session");
 
         ctx.process_async(json!({
             "id": 4_100,
@@ -867,15 +867,15 @@ mod tests {
                 .performance
                 .enabled()
         );
-        let auxiliary = browser_context
+        let attached = browser_context
             .active_page_target()
             .devtools_sessions
             .attached("SID-aux")
-            .expect("auxiliary session state")
+            .expect("attached session state")
             .page_session_state
             .performance;
-        assert!(auxiliary.enabled());
-        assert_eq!(auxiliary.time_domain(), PerformanceTimeDomain::ThreadTicks);
+        assert!(attached.enabled());
+        assert_eq!(attached.time_domain(), PerformanceTimeDomain::ThreadTicks);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1022,7 +1022,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn performance_get_metrics_targets_loaded_background_owner_without_promotion() {
+    async fn performance_get_metrics_targets_loaded_background_owner_without_activation() {
         let mut ctx = TestContext::new();
         let background_url = "data:text/html,<!doctype html><body><main><section></section><section></section></main></body>";
         let mut bc = BrowserContext::new("BID-1".into());
@@ -1065,12 +1065,12 @@ mod tests {
             browser_context
                 .background_target("TID-background")
                 .is_some_and(|target| target.has_loaded_page()),
-            "Performance.getMetrics should not promote the loaded background owner"
+            "Performance.getMetrics should not activate the loaded background owner"
         );
     }
 
     #[tokio::test]
-    async fn performance_get_metrics_on_unloaded_background_owner_does_not_promote() {
+    async fn performance_get_metrics_on_unloaded_background_owner_does_not_activate() {
         let mut ctx = TestContext::new();
         let mut bc = BrowserContext::new("BID-1".into());
         bc.set_active_target_id("TID-active".to_owned());
@@ -1116,7 +1116,7 @@ mod tests {
             browser_context
                 .background_target("TID-background")
                 .is_some_and(|target| !target.has_loaded_page()),
-            "unloaded Performance owner fallback should not promote the background target"
+            "unloaded Performance owner fallback should not activate the background target"
         );
     }
 

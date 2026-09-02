@@ -398,14 +398,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn debugger_paused_auxiliary_session_detach_wakes_owner() {
+    async fn debugger_paused_attached_session_detach_wakes_owner() {
         let mut ctx = TestContext::new();
         with_loaded_document(&mut ctx).await;
         {
             let browser_context = ctx.conn.browser_context.as_mut().expect("browser context");
             browser_context.attach_active_session("SID-debugger-primary");
             assert!(
-                browser_context.assign_auxiliary_session_to_target(
+                browser_context.assign_attached_session_to_target(
                     "TID-debugger",
                     "SID-debugger-aux".to_owned(),
                 )
@@ -438,7 +438,7 @@ mod tests {
         .await;
         assert_eq!(timer["result"]["result"]["value"], json!(true));
 
-        ctx.wait_for_scheduler_message("auxiliary Debugger.paused", |message| {
+        ctx.wait_for_scheduler_message("attached Debugger.paused", |message| {
             message["method"] == json!("Debugger.paused")
                 && message["sessionId"] == json!("SID-debugger-aux")
         })
@@ -485,7 +485,7 @@ mod tests {
             let browser_context = ctx.conn.browser_context.as_mut().expect("browser context");
             browser_context.attach_active_session("SID-debugger-primary");
             assert!(
-                browser_context.assign_auxiliary_session_to_target(
+                browser_context.assign_attached_session_to_target(
                     "TID-debugger",
                     "SID-debugger-aux".to_owned(),
                 )

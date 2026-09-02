@@ -3020,7 +3020,7 @@ impl CdpConnection {
         }
         let (browser_context_id, target_id) = self.target_owner_identity_for_session(session_id)?;
         let devtools_session_id =
-            self.target_devtools_auxiliary_session_id_for_session(session_id)?;
+            self.target_devtools_attached_session_id_for_session(session_id)?;
         Some(RuntimeRemoteObjectOwnerIdentity::Page {
             browser_context_id,
             target_id,
@@ -6853,7 +6853,7 @@ mod tests {
         browser_context.attach_active_session("SID-active".to_owned());
         assert!(
             browser_context
-                .assign_auxiliary_session_to_target("TID-active", "SID-auxiliary".to_owned(),)
+                .assign_attached_session_to_target("TID-active", "SID-attached".to_owned(),)
         );
         conn.browser_context = Some(browser_context);
 
@@ -6862,8 +6862,8 @@ mod tests {
             vec!["same-wire-id".to_owned()],
         );
         conn.register_runtime_remote_object_ids_for_session_owner(
-            Some("SID-auxiliary"),
-            vec!["same-wire-id".to_owned(), "auxiliary-only".to_owned()],
+            Some("SID-attached"),
+            vec!["same-wire-id".to_owned(), "attached-only".to_owned()],
         );
 
         assert!(
@@ -6876,16 +6876,16 @@ mod tests {
         );
         assert!(
             conn.validate_runtime_remote_object_ids_for_session_owner(
-                Some("SID-auxiliary"),
+                Some("SID-attached"),
                 &["same-wire-id".to_owned()],
             )
             .is_ok(),
-            "the same V8 wire id can independently belong to the auxiliary session"
+            "the same V8 wire id can independently belong to the attached session"
         );
         assert_eq!(
             conn.validate_runtime_remote_object_ids_for_session_owner(
                 Some("SID-active"),
-                &["auxiliary-only".to_owned()],
+                &["attached-only".to_owned()],
             ),
             Err("Cannot find object with given id".to_owned()),
             "an id known only to another session must remain inaccessible"
@@ -7076,9 +7076,9 @@ mod tests {
         let mut browser_context = BrowserContext::new("BID-navigation-sessions".to_owned());
         browser_context.set_active_target_id("TID-navigation-sessions".to_owned());
         browser_context.attach_active_session("SID-navigation-primary".to_owned());
-        assert!(browser_context.assign_auxiliary_session_to_target(
+        assert!(browser_context.assign_attached_session_to_target(
             "TID-navigation-sessions",
-            "SID-navigation-auxiliary".to_owned(),
+            "SID-navigation-attached".to_owned(),
         ));
         conn.browser_context = Some(browser_context);
 
@@ -7092,18 +7092,18 @@ mod tests {
                 devtools_session_renderer_command_descriptor_for_test(71),
             )
             .expect("primary frontend response correlation should register");
-        let auxiliary = conn
+        let attached = conn
             .try_register_renderer_call_for_session_owner(
-                Some("SID-navigation-auxiliary"),
+                Some("SID-navigation-attached"),
                 71,
                 Some(old_attachment),
                 devtools_session_renderer_command_descriptor_for_test(71),
             )
-            .expect("auxiliary frontend response correlation should register");
+            .expect("attached frontend response correlation should register");
         let (primary_correlation, primary_sender, primary_receiver) = primary.into_parts();
-        let (auxiliary_correlation, auxiliary_sender, auxiliary_receiver) = auxiliary.into_parts();
+        let (attached_correlation, attached_sender, attached_receiver) = attached.into_parts();
         assert!(primary_receiver.is_none());
-        assert!(auxiliary_receiver.is_none());
+        assert!(attached_receiver.is_none());
 
         let replacements = {
             let browser_context = conn
@@ -7125,7 +7125,7 @@ mod tests {
         assert!(replays.is_empty());
         for (correlation, sender) in [
             (primary_correlation, primary_sender),
-            (auxiliary_correlation, auxiliary_sender),
+            (attached_correlation, attached_sender),
         ] {
             assert!(
                 sender
@@ -7142,11 +7142,8 @@ mod tests {
             Some(primary_correlation)
         );
         assert_eq!(
-            conn.renderer_call_for_frontend_for_session_owner(
-                Some("SID-navigation-auxiliary"),
-                71,
-            ),
-            Some(auxiliary_correlation)
+            conn.renderer_call_for_frontend_for_session_owner(Some("SID-navigation-attached"), 71,),
+            Some(attached_correlation)
         );
 
         let termination_events = conn.terminate_prepared_renderer_calls_after_navigation(
@@ -7172,7 +7169,7 @@ mod tests {
             session_ids,
             std::collections::BTreeSet::from([
                 "SID-navigation-primary".to_owned(),
-                "SID-navigation-auxiliary".to_owned(),
+                "SID-navigation-attached".to_owned(),
             ])
         );
         assert!(
@@ -7180,7 +7177,7 @@ mod tests {
                 .is_none()
         );
         assert!(
-            conn.renderer_runtime_command_cause_for_frontend(Some("SID-navigation-auxiliary"), 71,)
+            conn.renderer_runtime_command_cause_for_frontend(Some("SID-navigation-attached"), 71,)
                 .is_none()
         );
     }
@@ -7980,7 +7977,7 @@ mod tests {
                     .is_some_and(|state| state.devtools_sessions
                         [moli_page_types::DevToolsSessionKey::Primary]
                         .has_pending_inspector_awaits()),
-                "parked DevTools session should physically store its pending await"
+                "background DevTools session should physically store its pending await"
             );
         }
 

@@ -1435,8 +1435,7 @@ async fn rust_cdp_chromium_target_attach_to_browser_target_emits_browser_target(
 // Chromium source:
 // third_party/blink/web_tests/http/tests/inspector-protocol/target/browser-auto-attach-tab.js
 #[tokio::test(flavor = "multi_thread")]
-async fn rust_cdp_chromium_target_attach_to_target_from_browser_session_creates_auxiliary_session()
-{
+async fn rust_cdp_chromium_target_attach_to_target_from_browser_session_creates_attached_session() {
     let mut ctx = TestContext::new_with_target_discovery(false);
     let browser_context_id = create_browser_context(&mut ctx, 260_038).await;
     let target_id =
@@ -1607,7 +1606,7 @@ async fn rust_cdp_chromium_target_close_background_target_detaches_sessions() {
             .browser_context
             .as_mut()
             .unwrap()
-            .assign_auxiliary_session_to_target("TID-background", "SID-aux".into())
+            .assign_attached_session_to_target("TID-background", "SID-aux".into())
     );
 
     ctx.process_async(json!({
@@ -1643,7 +1642,7 @@ async fn rust_cdp_chromium_target_close_background_target_detaches_sessions() {
 // Chromium source:
 // third_party/blink/web_tests/http/tests/inspector-protocol/target/tab-target.js
 #[tokio::test(flavor = "multi_thread")]
-async fn rust_cdp_chromium_target_activate_background_target_promotes_it() {
+async fn rust_cdp_chromium_target_activate_background_target_activates_it() {
     let mut ctx = TestContext::new_with_target_discovery(false);
     load_bc_with_target(&mut ctx, "BID-activate", "TID-active");
     push_background_target(

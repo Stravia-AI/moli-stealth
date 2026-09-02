@@ -153,7 +153,7 @@ async fn enable_and_disable_are_session_local_for_same_target() {
     let mut bc = BrowserContext::new("BID-session-fetch".into());
     bc.set_active_target_id("TID-session-fetch".to_owned());
     bc.attach_active_session("SID-primary".to_owned());
-    assert!(bc.assign_auxiliary_session_to_target("TID-session-fetch", "SID-aux".to_owned()));
+    assert!(bc.assign_attached_session_to_target("TID-session-fetch", "SID-aux".to_owned()));
     ctx.conn.browser_context = Some(bc);
 
     ctx.process_async(json!({
@@ -245,7 +245,7 @@ async fn disable_drains_only_current_session_pending_subresource_fetches() {
     let mut bc = BrowserContext::new("BID-session-fetch-pending".into());
     bc.set_active_target_id("TID-session-fetch".to_owned());
     bc.attach_active_session("SID-primary".to_owned());
-    assert!(bc.assign_auxiliary_session_to_target("TID-session-fetch", "SID-aux".to_owned()));
+    assert!(bc.assign_attached_session_to_target("TID-session-fetch", "SID-aux".to_owned()));
     ctx.conn.browser_context = Some(bc);
 
     ctx.process_async(json!({
@@ -309,7 +309,7 @@ async fn disable_drains_only_current_session_pending_subresource_fetches() {
         fetch_owner
             .take_pending_subresource_fetch_request("FETCH-aux", Some("SID-aux"))
             .is_some(),
-        "Fetch.disable for primary must not clear auxiliary session pending requests"
+        "Fetch.disable for primary must not clear attached session pending requests"
     );
 }
 
@@ -396,7 +396,7 @@ async fn disable_drains_fetch_owned_pending_when_same_session_network_intercept_
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn enable_targets_loaded_background_owner_without_promotion() {
+async fn enable_targets_loaded_background_owner_without_activation() {
     let mut ctx = TestContext::new();
     let background = PageTargetHost::with_url(
         "TID-background".to_owned(),
@@ -515,7 +515,7 @@ async fn pending_fetch_enable_keeps_background_owner_route_across_completion() {
     let staged = bc
         .background_target("TID-fetch-background")
         .filter(|target| target.has_non_default_session_state())
-        .expect("background fetch config should stay parked");
+        .expect("background fetch config should stay background");
     assert!(staged.fetch_owner.config_snapshot().is_enabled());
     assert_eq!(staged.fetch_owner.config_snapshot().patterns().len(), 1);
     assert_eq!(
@@ -588,7 +588,7 @@ async fn enable_targets_inactive_owner_without_activation() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn disable_targets_loaded_background_owner_without_promotion() {
+async fn disable_targets_loaded_background_owner_without_activation() {
     let mut ctx = TestContext::new();
     let background = PageTargetHost::with_url(
         "TID-background".to_owned(),

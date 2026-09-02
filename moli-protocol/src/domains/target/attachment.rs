@@ -199,7 +199,7 @@ fn do_attach(conn: &mut CdpConnection, cmd: &Cmd<'_>, target_id: &str) -> Target
     let session_id = conn.gen_session_id();
     let bc = conn.browser_context.as_mut().unwrap();
     let assigned = if attach_from_browser_session || target_has_primary_session {
-        bc.assign_auxiliary_session_to_target(target_id, session_id.clone())
+        bc.assign_attached_session_to_target(target_id, session_id.clone())
     } else {
         bc.assign_session_to_target(target_id, session_id.clone())
     };
@@ -247,7 +247,7 @@ fn do_attach_tab_target(
     tab_target_id: &str,
     attach_from_browser_session: bool,
 ) -> TargetCommandTaskStep {
-    let attach_as_auxiliary = attach_from_browser_session
+    let is_attached_session = attach_from_browser_session
         || conn
             .primary_session_id_for_tab_target_id(tab_target_id)
             .is_some();
@@ -256,7 +256,7 @@ fn do_attach_tab_target(
         session_id.clone(),
         command_session_id,
         tab_target_id,
-        attach_as_auxiliary,
+        is_attached_session,
     ) {
         Ok(event_plan) => event_plan,
         Err(message) => return target_command_error_without_session(-31998, message),

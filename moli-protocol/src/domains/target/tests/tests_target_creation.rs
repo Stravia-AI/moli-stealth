@@ -1020,7 +1020,7 @@ async fn window_open_hands_off_session_storage_snapshot_and_initial_storage_key(
         // The opener's lightweight WindowProxy facade starts its mirrored
         // load before the concrete popup action can reach protocol. Let that
         // renderer-local request finish; gate the second request, which is the
-        // real auxiliary target navigation whose lifetime this test covers.
+        // real attached target navigation whose lifetime this test covers.
         let request_index = request_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if request_index == 0 {
             return opener().await;
@@ -2077,7 +2077,7 @@ fn popup_target_id_for_url(messages: &[serde_json::Value], url: &str) -> String 
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn anchor_left_click_promotes_blank_target_to_foreground() {
+async fn anchor_left_click_activates_blank_target_to_foreground() {
     const POPUP_HREF: &str = "data:text/html,%3Cmain%3Eforeground-popup%3C/main%3E";
     const POPUP_URL: &str = "data:text/html,<main>foreground-popup</main>";
     let mut ctx = TestContext::new();
@@ -2111,7 +2111,7 @@ async fn anchor_left_click_promotes_blank_target_to_foreground() {
                 browser_context
                     .background_target("TID-anchor-foreground-opener")
                     .is_some(),
-                "foreground popup should demote its opener"
+                "foreground popup should deactivate its opener"
             );
         })
         .await;

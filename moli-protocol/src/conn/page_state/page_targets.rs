@@ -262,7 +262,7 @@ impl BrowserContext {
         true
     }
 
-    pub(crate) fn assign_auxiliary_session_to_target(
+    pub(crate) fn assign_attached_session_to_target(
         &mut self,
         target_id: &str,
         session_id: String,
@@ -274,14 +274,14 @@ impl BrowserContext {
         true
     }
 
-    pub(crate) fn auxiliary_target_id_for_session(&self, session_id: &str) -> Option<&str> {
+    pub(crate) fn attached_target_id_for_session(&self, session_id: &str) -> Option<&str> {
         self.page_targets
             .iter()
             .find(|target| target.devtools_sessions.attached(session_id).is_some())
             .map(PageTargetHost::target_id)
     }
 
-    pub(crate) fn auxiliary_session_ids_for_target(&self, target_id: &str) -> Vec<String> {
+    pub(crate) fn attached_session_ids_for_target(&self, target_id: &str) -> Vec<String> {
         let mut session_ids = self
             .page_target(target_id)
             .into_iter()
@@ -302,18 +302,18 @@ impl BrowserContext {
         } else {
             Vec::new()
         };
-        session_ids.extend(self.auxiliary_session_ids_for_target(target_id));
+        session_ids.extend(self.attached_session_ids_for_target(target_id));
         session_ids.sort();
         session_ids.dedup();
         session_ids
     }
 
-    pub(crate) fn remove_auxiliary_session(&mut self, session_id: &str) -> Option<String> {
-        let target_id = self.auxiliary_target_id_for_session(session_id)?.to_owned();
+    pub(crate) fn remove_attached_session(&mut self, session_id: &str) -> Option<String> {
+        let target_id = self.attached_target_id_for_session(session_id)?.to_owned();
         if let Some(target) = self.page_target_mut(&target_id) {
             target
                 .runtime_slot
-                .remove_auxiliary_network_session(session_id);
+                .remove_attached_network_session(session_id);
             target.fetch_owner.remove_fetch_session(Some(session_id));
             target
                 .runtime_slot
@@ -492,11 +492,11 @@ impl BrowserContext {
     }
 
     #[cfg(test)]
-    pub(crate) fn enable_auxiliary_network_events(&mut self, session_id: &str) {
-        if self.auxiliary_target_id_for_session(session_id).is_some() {
+    pub(crate) fn enable_attached_network_events(&mut self, session_id: &str) {
+        if self.attached_target_id_for_session(session_id).is_some() {
             self.active_page_target_mut()
                 .runtime_slot
-                .enable_auxiliary_network_events(session_id);
+                .enable_attached_network_events(session_id);
         }
     }
 
@@ -710,8 +710,8 @@ impl BrowserContext {
 
     pub(crate) fn devtools_target_info(&self, target_id: &str) -> Option<DevToolsTargetInfo> {
         if let Some(target) = self.page_target(target_id) {
-            let attached = target.has_session()
-                || !self.auxiliary_session_ids_for_target(target_id).is_empty();
+            let attached =
+                target.has_session() || !self.attached_session_ids_for_target(target_id).is_empty();
             return Some(DevToolsTargetInfo {
                 target_id: Some(DevToolsTargetId::from(target_id)),
                 kind: DevToolsTargetKind::Page,
@@ -1327,7 +1327,7 @@ mod tests {
 
     #[test]
     fn changing_foreground_selection_retains_each_session_storage_namespace() {
-        let mut context = BrowserContext::new("BC-demoted-storage".to_owned());
+        let mut context = BrowserContext::new("BC-deactivated-storage".to_owned());
         context.set_active_target_id("TID-first");
         let first_session_storage = context.page_storage_handles().session_storage_store.clone();
         assert!(
@@ -1447,13 +1447,13 @@ mod tests {
     }
 
     #[test]
-    fn remove_auxiliary_session_drops_session_local_fetch_config() {
+    fn remove_attached_session_drops_session_local_fetch_config() {
         let mut context = BrowserContext::new("BC-1".to_owned());
         context.set_active_target_id("TID-active".to_owned());
         context.attach_active_session("SID-active".to_owned());
         assert!(
-            context.assign_auxiliary_session_to_target("TID-active", "SID-aux".to_owned()),
-            "auxiliary session should attach to active target"
+            context.assign_attached_session_to_target("TID-active", "SID-aux".to_owned()),
+            "attached session should attach to active target"
         );
         context.active_page_target_mut().fetch_owner.configure(
             Some("SID-aux".to_owned()),
@@ -1473,7 +1473,7 @@ mod tests {
         );
 
         assert_eq!(
-            context.remove_auxiliary_session("SID-aux").as_deref(),
+            context.remove_attached_session("SID-aux").as_deref(),
             Some("TID-active")
         );
 
@@ -1483,7 +1483,7 @@ mod tests {
                 .fetch_owner
                 .config_snapshot()
                 .is_enabled(),
-            "detaching the auxiliary target session must remove its Fetch.enable config"
+            "detaching the attached target session must remove its Fetch.enable config"
         );
     }
 
@@ -1492,13 +1492,13 @@ mod tests {
         let mut ctx = TestContext::new();
         let active_page = ctx
             .conn
-            .load_page_via_runtime_async("data:text/html,<title>demote-active</title>")
+            .load_page_via_runtime_async("data:text/html,<title>deactivate-active</title>")
             .await
             .expect("active page should load");
 
-        let mut context = BrowserContext::new("BC-demote".to_owned());
-        context.set_active_target_id("TID-demote".to_owned());
-        context.attach_active_session("SID-demote".to_owned());
+        let mut context = BrowserContext::new("BC-deactivate".to_owned());
+        context.set_active_target_id("TID-deactivate".to_owned());
+        context.attach_active_session("SID-deactivate".to_owned());
         context.set_target_url(active_page.final_url().as_str().to_owned());
         context.active_page_target_mut().devtools_sessions
             [moli_page_types::DevToolsSessionKey::Primary]
@@ -1548,11 +1548,11 @@ mod tests {
             .owner_state
             .document_start_scripts
             .push((
-                "script-demote".to_owned(),
+                "script-deactivate".to_owned(),
                 DocumentStartScript {
                     registry_key: None,
                     devtools_session: None,
-                    source: "globalThis.demoted = true".to_owned(),
+                    source: "globalThis.deactivated = true".to_owned(),
                     world_name: None,
                     has_bidi_channel_argument: false,
                     bidi_channel_handoffs: Vec::new(),
@@ -1591,17 +1591,17 @@ mod tests {
         assert_eq!(context.active_target_id(), Some("TID-selected"));
         assert!(
             context
-                .page_target("TID-demote")
+                .page_target("TID-deactivate")
                 .is_some_and(|host| host.has_loaded_page()),
             "changing foreground selection must retain the loaded page in its stable host"
         );
         assert_eq!(context.background_target_count(), 1);
         let background_target = &context.background_target_at(0).unwrap();
-        assert_eq!(background_target.target_id(), "TID-demote");
-        assert_eq!(background_target.session_id(), Some("SID-demote"));
+        assert_eq!(background_target.target_id(), "TID-deactivate");
+        assert_eq!(background_target.session_id(), Some("SID-deactivate"));
         assert_eq!(
             background_target.target_url(),
-            "data:text/html,<title>demote-active</title>"
+            "data:text/html,<title>deactivate-active</title>"
         );
         assert!(
             background_target.has_loaded_page(),
@@ -1630,7 +1630,7 @@ mod tests {
         );
         assert!(
             context
-                .background_target("TID-demote")
+                .background_target("TID-deactivate")
                 .filter(|target| target.has_non_default_session_state())
                 .is_some_and(|state| state.devtools_sessions
                     [moli_page_types::DevToolsSessionKey::Primary]
@@ -1639,7 +1639,7 @@ mod tests {
             "session-scoped Runtime.enable state must remain owned by the target"
         );
         let background_state = context
-            .background_target("TID-demote")
+            .background_target("TID-deactivate")
             .filter(|target| target.has_non_default_session_state())
             .expect("background target should retain page session state");
         assert!(
@@ -1701,7 +1701,7 @@ mod tests {
         );
         assert_eq!(
             context
-                .background_target("TID-demote")
+                .background_target("TID-deactivate")
                 .expect("previous target must remain registered")
                 .owner_state
                 .next_document_start_script_id,
@@ -1710,7 +1710,7 @@ mod tests {
         );
         assert_eq!(
             context
-                .background_target("TID-demote")
+                .background_target("TID-deactivate")
                 .expect("background target should retain owner state")
                 .owner_state
                 .document_start_scripts
@@ -1719,7 +1719,7 @@ mod tests {
             "document-start scripts must remain target-owned"
         );
         let background_runtime = &context
-            .background_target("TID-demote")
+            .background_target("TID-deactivate")
             .expect("background target should retain network state")
             .runtime_slot;
         assert_eq!(background_runtime.next_fetch_request_id_for_test(), 77);
@@ -1736,7 +1736,7 @@ mod tests {
 
     #[test]
     fn staging_background_target_in_empty_context_leaves_foreground_empty() {
-        let mut context = BrowserContext::new("BC-demote-empty".to_owned());
+        let mut context = BrowserContext::new("BC-deactivate-empty".to_owned());
         context.stage_background_target(
             "TID-existing-bg".to_owned(),
             Some("SID-existing-bg".to_owned()),
@@ -1759,7 +1759,7 @@ mod tests {
 
     #[test]
     fn selecting_new_target_preserves_previous_pending_initial_document_reason() {
-        let mut context = BrowserContext::new("BC-demote-pending".to_owned());
+        let mut context = BrowserContext::new("BC-deactivate-pending".to_owned());
         context.set_active_target_id("TID-old-active");
         context.set_target_url("about:blank#old".to_owned());
         context.begin_active_target_initial_empty_document("about:blank#old".to_owned());
@@ -1791,8 +1791,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn background_target_promote_without_page_preserves_pending_initial_document_reason() {
-        let mut context = BrowserContext::new("BC-promote-pending".to_owned());
+    async fn background_target_activate_without_page_preserves_pending_initial_document_reason() {
+        let mut context = BrowserContext::new("BC-activate-pending".to_owned());
         context.stage_background_target(
             "TID-pending-bg".to_owned(),
             Some("SID-pending-bg".to_owned()),
@@ -1832,7 +1832,7 @@ mod tests {
             .await
             .expect("second loaded page should load");
 
-        let mut context = BrowserContext::new("BC-promote-first".to_owned());
+        let mut context = BrowserContext::new("BC-activate-first".to_owned());
         context.stage_background_target(
             "TID-empty".to_owned(),
             Some("SID-empty".to_owned()),
@@ -1908,7 +1908,7 @@ mod tests {
                 .and_then(|target| target.runtime_slot().current_renderer_attachment())
                 .map(|attachment| attachment.id()),
             Some(second_attachment.id()),
-            "promoting one target must not replace another background target's route lease"
+            "activating one target must not replace another background target's route lease"
         );
     }
 
@@ -1976,7 +1976,7 @@ mod tests {
 
     #[tokio::test]
     async fn background_target_selection_preserves_nested_page_session_state() {
-        let mut context = BrowserContext::new("BC-promote".to_owned());
+        let mut context = BrowserContext::new("BC-activate".to_owned());
         context.stage_background_target(
             "TID-bg".to_owned(),
             Some("SID-bg".to_owned()),

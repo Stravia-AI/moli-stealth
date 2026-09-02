@@ -303,7 +303,7 @@ async fn enabling_and_disabling_sessions_replays_aggregated_headers_to_loaded_pa
     let mut bc = BrowserContext::new("BID-1".into());
     bc.set_active_target_id("TID-1");
     bc.attach_active_session("SID-1");
-    assert!(bc.assign_auxiliary_session_to_target("TID-1", "SID-aux".to_owned()));
+    assert!(bc.assign_attached_session_to_target("TID-1", "SID-aux".to_owned()));
     ctx.conn.browser_context = Some(bc);
 
     ctx.process_async(json!({
@@ -408,13 +408,13 @@ async fn enabling_and_disabling_sessions_replays_aggregated_headers_to_loaded_pa
     ctx.conn
         .clear_target_session_overrides_async("SID-aux")
         .await
-        .expect("detaching the auxiliary session should restore effective request policy");
+        .expect("detaching the attached session should restore effective request policy");
     assert_eq!(
         ctx.conn
             .browser_context
             .as_mut()
             .unwrap()
-            .remove_auxiliary_session("SID-aux")
+            .remove_attached_session("SID-aux")
             .as_deref(),
         Some("TID-1")
     );

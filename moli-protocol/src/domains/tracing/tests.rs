@@ -12,7 +12,7 @@ fn context_with_page_sessions() -> TestContext {
     browser_context.set_target_url("https://example.test/page#fragment".to_owned());
     browser_context.attach_active_session("SID-owner".to_owned());
     assert!(
-        browser_context.assign_auxiliary_session_to_target("TID-tracing", "SID-peer".to_owned(),)
+        browser_context.assign_attached_session_to_target("TID-tracing", "SID-peer".to_owned(),)
     );
     ctx.conn.browser_context = Some(browser_context);
     ctx

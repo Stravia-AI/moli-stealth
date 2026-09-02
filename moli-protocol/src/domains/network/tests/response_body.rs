@@ -33,8 +33,8 @@ async fn get_response_body_respects_recorded_session_visibility() {
     bc.active_page_target_mut()
         .runtime_slot
         .enable_primary_network_events();
-    assert!(bc.assign_auxiliary_session_to_target("TID-1", "SID-aux".to_owned()));
-    bc.enable_auxiliary_network_events("SID-aux");
+    assert!(bc.assign_attached_session_to_target("TID-1", "SID-aux".to_owned()));
+    bc.enable_attached_network_events("SID-aux");
     bc.record_captured_response_body(
         "REQ-aux-only".to_owned(),
         "aux-only body".to_owned(),
@@ -73,7 +73,7 @@ async fn get_response_body_requires_calling_session_network_listener() {
     bc.active_page_target_mut()
         .runtime_slot
         .enable_primary_network_events();
-    assert!(bc.assign_auxiliary_session_to_target("TID-1", "SID-aux".to_owned()));
+    assert!(bc.assign_attached_session_to_target("TID-1", "SID-aux".to_owned()));
     bc.record_captured_response_body(
         "REQ-shared".to_owned(),
         "shared body".to_owned(),
@@ -454,8 +454,8 @@ async fn get_request_post_data_respects_recorded_session_visibility() {
     bc.active_page_target_mut()
         .runtime_slot
         .enable_primary_network_events();
-    assert!(bc.assign_auxiliary_session_to_target("TID-1", "SID-aux".to_owned()));
-    bc.enable_auxiliary_network_events("SID-aux");
+    assert!(bc.assign_attached_session_to_target("TID-1", "SID-aux".to_owned()));
+    bc.enable_attached_network_events("SID-aux");
     bc.record_pending_response_body("REQ-aux-only".to_owned(), [Some("SID-aux".to_owned())]);
     bc.active_page_target_mut()
         .runtime_slot

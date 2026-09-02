@@ -1161,8 +1161,8 @@ pub struct CdpConnection {
     /// Runtime.runIfWaitingForDebugger before their initial document proceeds.
     pub auto_attach_wait_for_debugger_on_start: bool,
     // Insertion order is protocol state: the first matching owner supplies
-    // the primary auto-attached Page session, while later owners attach as
-    // auxiliary sessions. A randomized HashMap iteration order made that
+    // the primary auto-attached Page session, while later owners contribute
+    // additional attached sessions. A randomized HashMap iteration order made that
     // choice vary between otherwise identical processes.
     auto_attach_owner_sessions: IndexMap<Option<String>, AutoAttachOwnerPolicy>,
     target_control: TargetControlPlane,
@@ -3473,10 +3473,13 @@ impl CdpConnection {
         &mut self,
         tab_target_id: &str,
         session_id: String,
-        auxiliary: bool,
+        is_attached_session: bool,
     ) -> bool {
-        self.target_control
-            .assign_session_to_tab_target(tab_target_id, session_id, auxiliary)
+        self.target_control.assign_session_to_tab_target(
+            tab_target_id,
+            session_id,
+            is_attached_session,
+        )
     }
 
     pub(crate) fn remove_tab_session(&mut self, session_id: &str) -> Option<String> {

@@ -496,7 +496,7 @@ pub(super) async fn complete_crash_command_dispatch(
     // issued the command. Settle every attached session before dropping the
     // Page; otherwise a late completion from (for example) the primary
     // session can wait forever on a response sender owned by the retired
-    // renderer while the crash was issued by an auxiliary session.
+    // renderer while the crash was issued by an attached session.
     let target_inspector_session_ids = conn.page_event_session_ids_for_owner(owner);
     let mut pending_await_events = Vec::new();
     for inspector_session_id in &target_inspector_session_ids {

@@ -46,10 +46,10 @@ impl TargetControlPlane {
         &mut self,
         tab_target_id: &str,
         session_id: String,
-        auxiliary: bool,
+        is_attached_session: bool,
     ) -> bool {
         self.graph
-            .assign_session_to_tab_target(tab_target_id, session_id, auxiliary)
+            .assign_session_to_tab_target(tab_target_id, session_id, is_attached_session)
     }
 
     pub(crate) fn remove_tab_session(&mut self, session_id: &str) -> Option<String> {

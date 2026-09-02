@@ -249,9 +249,13 @@ impl CdpConnection {
         session_id: String,
         owner_session_id: Option<&str>,
         tab_target_id: &str,
-        auxiliary: bool,
+        is_attached_session: bool,
     ) -> Result<TargetEventPlan, &'static str> {
-        if !self.assign_session_to_tab_target(tab_target_id, session_id.clone(), auxiliary) {
+        if !self.assign_session_to_tab_target(
+            tab_target_id,
+            session_id.clone(),
+            is_attached_session,
+        ) {
             return Err("UnknownTargetId");
         }
         let prepared_session = self.prepare_direct_attach_session_commit(
@@ -659,7 +663,7 @@ impl CdpConnection {
                 ..
             } => {
                 if let Some(bc) = self.target_binding_browser_context_mut(cleanup_plan) {
-                    let _ = bc.remove_auxiliary_session(cleanup_plan.session_id());
+                    let _ = bc.remove_attached_session(cleanup_plan.session_id());
                 }
             }
             TargetBindingCleanupAction::TabTarget { .. } => {
@@ -755,7 +759,7 @@ impl CdpConnection {
                     .browser_context_by_id_mut(cleanup_plan.browser_context_id())
                     .ok_or_else(|| anyhow::anyhow!("InvalidSessionId"))?;
                 let removed_target_id = bc
-                    .remove_auxiliary_session(cleanup_plan.session_id())
+                    .remove_attached_session(cleanup_plan.session_id())
                     .ok_or_else(|| anyhow::anyhow!("InvalidSessionId"))?;
                 anyhow::ensure!(removed_target_id == *target_id, "UnknownTargetId");
             }

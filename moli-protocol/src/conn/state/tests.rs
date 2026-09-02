@@ -93,7 +93,7 @@ fn page_domain_subscription_generation_tracks_distinct_enable_lifetimes() {
     assert_eq!(
         state,
         TargetPageSessionState::default(),
-        "internal subscription generations must not keep default parked state alive"
+        "internal subscription generations must not keep default background state alive"
     );
 
     state.enable_page_domain(19);
@@ -1340,11 +1340,11 @@ fn background_target_mutates_owner_state_in_place() {
     };
 
     assert_eq!(identifier, "1");
-    let parked_state = &target.owner_state;
-    assert_eq!(parked_state.next_document_start_script_id, 1);
-    assert_eq!(parked_state.document_start_scripts.len(), 1);
+    let background_state = &target.owner_state;
+    assert_eq!(background_state.next_document_start_script_id, 1);
+    assert_eq!(background_state.document_start_scripts.len(), 1);
     assert!(
-        !parked_state
+        !background_state
             .console_output_state
             .has_unemitted_console_domain(7, 3)
     );

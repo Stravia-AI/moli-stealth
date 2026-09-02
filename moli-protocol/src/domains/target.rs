@@ -1253,7 +1253,7 @@ mod devtools_runtime_entry_tests {
         let mut browser_context = BrowserContext::new("BID-runtime-ready-close".to_owned());
         browser_context.set_active_target_id("TID-runtime-ready-close");
         browser_context.attach_active_session("SID-runtime-ready-close");
-        assert!(browser_context.assign_auxiliary_session_to_target(
+        assert!(browser_context.assign_attached_session_to_target(
             "TID-runtime-ready-close",
             "SID-runtime-ready-close-aux".to_owned(),
         ));
@@ -1278,7 +1278,7 @@ mod devtools_runtime_entry_tests {
             "test must cover scheduler-deferred Runtime await owner cleanup"
         );
         conn.register_pending_inspector_await(7102, Some("SID-runtime-ready-close-aux"));
-        let auxiliary_dispatch = conn
+        let attached_dispatch = conn
             .try_register_renderer_call_for_session_owner(
                 Some("SID-runtime-ready-close-aux"),
                 7102,
@@ -1293,14 +1293,14 @@ mod devtools_runtime_entry_tests {
                 )
                 .expect("test Runtime command should parse"),
             )
-            .expect("auxiliary renderer command should register");
+            .expect("attached renderer command should register");
         assert!(
             conn.claim_pending_inspector_await_for_scheduler_deferred_reply(
                 7102,
                 &crate::conn::CommandOwnerScope::for_session("SID-runtime-ready-close-aux",),
             )
             .is_some(),
-            "test must cover an auxiliary scheduler-deferred Runtime await"
+            "test must cover an attached scheduler-deferred Runtime await"
         );
 
         let (result, protocol_events) = execute_devtools_target_command_async_with_protocol_events(
@@ -1338,9 +1338,9 @@ mod devtools_runtime_entry_tests {
                 .is_some_and(|response| response.command_id() == 7102
                     && response.error() == Some("Target closed")
                     && response.has_bound_renderer_call_id())),
-            "an auxiliary claimed await must settle through its correlated typed response before the Page route retires"
+            "an attached claimed await must settle through its correlated typed response before the Page route retires"
         );
-        drop(auxiliary_dispatch);
+        drop(attached_dispatch);
         assert!(
             protocol_events.iter().all(|event| {
                 event.protocol_message().is_none_or(|message| {

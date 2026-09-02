@@ -756,20 +756,20 @@ mod tests {
     fn same_frontend_id_is_independent_across_session_owned_registries() {
         let id = FrontendCommandId::new(9);
         let mut primary = PendingRendererCommandRegistry::default();
-        let mut auxiliary = PendingRendererCommandRegistry::default();
+        let mut attached = PendingRendererCommandRegistry::default();
 
         primary.try_insert(id, "primary").unwrap();
-        auxiliary.try_insert(id, "auxiliary").unwrap();
+        attached.try_insert(id, "attached").unwrap();
 
         assert_eq!(primary.remove(id), Some("primary"));
-        assert_eq!(auxiliary.remove(id), Some("auxiliary"));
+        assert_eq!(attached.remove(id), Some("attached"));
     }
 
     #[test]
     fn renderer_call_ids_are_internal_and_session_scoped() {
         let large_frontend_id = FrontendCommandId::new(i32::MAX as u64 + 41);
         let mut primary = PendingRendererCommandRegistry::<()>::default();
-        let mut auxiliary = PendingRendererCommandRegistry::<()>::default();
+        let mut attached = PendingRendererCommandRegistry::<()>::default();
 
         let primary_first = primary
             .try_register_renderer_call(
@@ -779,7 +779,7 @@ mod tests {
             )
             .unwrap()
             .correlation();
-        let auxiliary_first = auxiliary
+        let attached_first = attached
             .try_register_renderer_call(
                 large_frontend_id,
                 None,
@@ -797,15 +797,15 @@ mod tests {
             .correlation();
 
         assert_eq!(primary_first.renderer_call_id(), RendererCallId::new(1));
-        assert_eq!(auxiliary_first.renderer_call_id(), RendererCallId::new(1));
+        assert_eq!(attached_first.renderer_call_id(), RendererCallId::new(1));
         assert_eq!(primary_second.renderer_call_id(), RendererCallId::new(2));
         assert_eq!(
             primary.take_frontend_command_for_renderer(RendererCallId::new(1)),
             Some(primary_first)
         );
         assert_eq!(
-            auxiliary.take_renderer_call_for_frontend(large_frontend_id),
-            Some(auxiliary_first)
+            attached.take_renderer_call_for_frontend(large_frontend_id),
+            Some(attached_first)
         );
     }
 

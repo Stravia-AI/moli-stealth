@@ -856,7 +856,7 @@ async fn ignore_input_events_is_target_aggregated_and_does_not_block_insert_text
     .await;
     let browser_context = ctx.conn.browser_context.as_mut().expect("browser context");
     browser_context.attach_active_session("SID-primary");
-    assert!(browser_context.assign_auxiliary_session_to_target("TID-1", "SID-aux".to_owned()));
+    assert!(browser_context.assign_attached_session_to_target("TID-1", "SID-aux".to_owned()));
 
     ctx.process_async(json!({
         "id": 30,
@@ -978,7 +978,7 @@ async fn ignore_input_events_is_target_aggregated_and_does_not_block_insert_text
             .browser_context
             .as_mut()
             .expect("browser context")
-            .remove_auxiliary_session("SID-aux"),
+            .remove_attached_session("SID-aux"),
         Some("TID-1".to_owned())
     );
     ctx.process_async(json!({

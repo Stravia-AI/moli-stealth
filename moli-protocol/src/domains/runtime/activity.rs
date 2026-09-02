@@ -1121,7 +1121,7 @@ mod tests {
                 .browser_context
                 .as_mut()
                 .expect("browser context")
-                .assign_auxiliary_session_to_target("TID-1", "SID-aux".to_owned())
+                .assign_attached_session_to_target("TID-1", "SID-aux".to_owned())
         );
         let outputs = renderer_inspector_outputs(
             &mut ctx.conn,

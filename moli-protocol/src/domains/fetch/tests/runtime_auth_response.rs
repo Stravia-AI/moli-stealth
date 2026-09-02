@@ -1530,7 +1530,7 @@ async fn multiple_fetch_sessions_chain_subresource_auth_required_pauses() {
             .browser_context
             .as_mut()
             .unwrap()
-            .assign_auxiliary_session_to_target("TID-1", "SID-aux".to_owned())
+            .assign_attached_session_to_target("TID-1", "SID-aux".to_owned())
     );
 
     for (id, session_id) in [(35_970, "SID-1"), (35_971, "SID-aux")] {
@@ -1597,7 +1597,7 @@ async fn multiple_fetch_sessions_chain_subresource_auth_required_pauses() {
     wait_until_message(
         &mut ctx,
         "SID-aux",
-        "auxiliary request-stage pause",
+        "attached request-stage pause",
         |message| {
             message["method"] == json!("Fetch.requestPaused")
                 && message["sessionId"] == json!("SID-aux")
@@ -1605,12 +1605,11 @@ async fn multiple_fetch_sessions_chain_subresource_auth_required_pauses() {
         },
     )
     .await;
-    let second_request_pause =
-        ctx.take_first_matching("auxiliary request-stage pause", |message| {
-            message["method"] == json!("Fetch.requestPaused")
-                && message["sessionId"] == json!("SID-aux")
-                && message["params"]["request"]["url"] == json!(protected_url)
-        });
+    let second_request_pause = ctx.take_first_matching("attached request-stage pause", |message| {
+        message["method"] == json!("Fetch.requestPaused")
+            && message["sessionId"] == json!("SID-aux")
+            && message["params"]["request"]["url"] == json!(protected_url)
+    });
     let second_request_id = second_request_pause["params"]["requestId"]
         .as_str()
         .expect("second request id")
@@ -1655,7 +1654,7 @@ async fn multiple_fetch_sessions_chain_subresource_auth_required_pauses() {
     .await;
     ctx.expect_result(35_976, json!({}), Some("SID-1"));
 
-    let second_auth = ctx.take_first_matching("auxiliary authRequired pause", |message| {
+    let second_auth = ctx.take_first_matching("attached authRequired pause", |message| {
         message["method"] == json!("Fetch.authRequired")
             && message["sessionId"] == json!("SID-aux")
             && message["params"]["request"]["url"] == json!(protected_url)

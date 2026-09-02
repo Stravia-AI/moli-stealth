@@ -59,7 +59,7 @@ fn install_multi_session_page_state(ctx: &mut TestContext) {
     let mut browser_context = BrowserContext::new("BID-1".into());
     browser_context.set_active_target_id("TID-1");
     browser_context.attach_active_session("SID-primary");
-    assert!(browser_context.assign_auxiliary_session_to_target("TID-1", "SID-aux".to_owned()));
+    assert!(browser_context.assign_attached_session_to_target("TID-1", "SID-aux".to_owned()));
     ctx.conn.browser_context = Some(browser_context);
 }
 
@@ -262,7 +262,7 @@ async fn script_execution_disabled_completes_through_io_pending_dispatch() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn auxiliary_session_first_io_emulation_response_uses_its_session_host() {
+async fn attached_session_first_io_emulation_response_uses_its_session_host() {
     let mut ctx = TestContext::new();
     load_session_page_for_pending_emulation_test(&mut ctx).await;
     assert!(
@@ -270,12 +270,12 @@ async fn auxiliary_session_first_io_emulation_response_uses_its_session_host() {
             .browser_context
             .as_mut()
             .expect("browser context")
-            .assign_auxiliary_session_to_target("TID-1", "SID-aux".to_owned())
+            .assign_attached_session_to_target("TID-1", "SID-aux".to_owned())
     );
     ctx.conn
         .apply_runtime_binding_state_for_session_owner_async(Some("SID-aux"))
         .await
-        .expect("target attachment should establish the auxiliary renderer session");
+        .expect("target attachment should establish the attached renderer session");
 
     ctx.process_async(json!({
         "id": 9_111,
@@ -1249,7 +1249,7 @@ async fn multi_session_browser_identity_uses_attachment_order_and_field_contribu
     ctx.conn
         .clear_target_session_overrides_async("SID-aux")
         .await
-        .expect("detaching the auxiliary session should restore the previous UA");
+        .expect("detaching the attached session should restore the previous UA");
     assert_eq!(
         ctx.conn
             .browser_context
@@ -2707,7 +2707,7 @@ async fn locale_and_timezone_overrides_apply_to_locale_date_formatting() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn context_emulated_media_applies_to_loaded_background_page_without_promotion() {
+async fn context_emulated_media_applies_to_loaded_background_page_without_activation() {
     let mut ctx = TestContext::new();
     let background = PageTargetHost::new(
         "TID-background".to_owned(),
@@ -2778,12 +2778,12 @@ async fn context_emulated_media_applies_to_loaded_background_page_without_promot
             .as_ref()
             .and_then(|browser_context| browser_context.active_target_id()),
         Some("TID-active"),
-        "context-wide overrides should not promote the loaded background target"
+        "context-wide overrides should not activate the loaded background target"
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn context_locale_override_applies_to_loaded_background_page_without_promotion() {
+async fn context_locale_override_applies_to_loaded_background_page_without_activation() {
     let mut ctx = TestContext::new();
     let background = PageTargetHost::new(
         "TID-background".to_owned(),
@@ -2847,7 +2847,7 @@ async fn context_locale_override_applies_to_loaded_background_page_without_promo
     assert_eq!(
         browser_context.active_target_id(),
         Some("TID-active"),
-        "context-wide overrides should not promote the loaded background target"
+        "context-wide overrides should not activate the loaded background target"
     );
     assert_eq!(
         browser_context
@@ -2867,12 +2867,12 @@ async fn context_locale_override_applies_to_loaded_background_page_without_promo
                     .map(str::to_owned)
             })
             .is_none(),
-        "context-wide locale remains browser-context state, not parked session state"
+        "context-wide locale remains browser-context state, not background session state"
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn session_emulation_routes_to_loaded_background_owner_without_promotion() {
+async fn session_emulation_routes_to_loaded_background_owner_without_activation() {
     let mut ctx = TestContext::new();
     let background = PageTargetHost::new(
         "TID-background".to_owned(),
@@ -2940,7 +2940,7 @@ async fn session_emulation_routes_to_loaded_background_owner_without_promotion()
             .as_ref()
             .and_then(|browser_context| browser_context.active_target_id()),
         Some("TID-active"),
-        "session-scoped Emulation should not promote the loaded background target"
+        "session-scoped Emulation should not activate the loaded background target"
     );
 
     ctx.process_async(json!({
@@ -2990,14 +2990,20 @@ async fn session_emulation_routes_to_loaded_background_owner_without_promotion()
             .is_none(),
         "background Emulation should not mutate the active target locale override"
     );
-    let parked = browser_context
+    let background = browser_context
         .background_target("TID-background")
         .filter(|target| target.has_non_default_session_state())
-        .expect("background parked state");
-    assert_eq!(parked.emulated_media.color_scheme.as_deref(), Some("dark"));
-    assert_eq!(parked.effective_policy().locale_override(), Some("zh-CN"));
+        .expect("background target state");
     assert_eq!(
-        parked
+        background.emulated_media.color_scheme.as_deref(),
+        Some("dark")
+    );
+    assert_eq!(
+        background.effective_policy().locale_override(),
+        Some("zh-CN")
+    );
+    assert_eq!(
+        background
             .geolocation_override
             .as_ref()
             .and_then(EmulatedGeolocationOverrideState::position)
@@ -3212,16 +3218,16 @@ async fn target_session_detach_clears_emulated_media_before_reattach() {
         "params": { "targetId": "TID-1", "flatten": true }
     }))
     .await;
-    let auxiliary_session_id = ctx.take_response_by_id(195)["result"]["sessionId"]
+    let attached_session_id = ctx.take_response_by_id(195)["result"]["sessionId"]
         .as_str()
-        .expect("auxiliary target session id")
+        .expect("attached target session id")
         .to_owned();
     let _ = ctx.take_all();
 
     ctx.process_async(json!({
         "id": 196,
         "method": "Emulation.setEmulatedMedia",
-        "sessionId": auxiliary_session_id,
+        "sessionId": attached_session_id,
         "params": {
             "features": [
                 { "name": "prefers-color-scheme", "value": "dark" }
@@ -3229,7 +3235,7 @@ async fn target_session_detach_clears_emulated_media_before_reattach() {
         }
     }))
     .await;
-    ctx.expect_result(196, json!({}), Some(&auxiliary_session_id));
+    ctx.expect_result(196, json!({}), Some(&attached_session_id));
 
     ctx.process_async(json!({
         "id": 197,
@@ -3246,7 +3252,7 @@ async fn target_session_detach_clears_emulated_media_before_reattach() {
     ctx.process_async(json!({
         "id": 198,
         "method": "Target.detachFromTarget",
-        "params": { "sessionId": auxiliary_session_id }
+        "params": { "sessionId": attached_session_id }
     }))
     .await;
     ctx.expect_result(198, json!({}), None);

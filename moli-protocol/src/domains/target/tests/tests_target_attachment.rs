@@ -688,7 +688,7 @@ async fn attach_to_target_ensures_pending_background_initial_document_before_att
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn attach_to_target_existing_session_creates_distinct_auxiliary_session() {
+async fn attach_to_target_existing_session_creates_distinct_attached_session() {
     // Chromium TargetHandler::AttachToTarget calls Session::Attach on every
     // invocation, even when the host already has another attached session.
     let mut ctx = TestContext::new();
@@ -704,21 +704,21 @@ async fn attach_to_target_existing_session_creates_distinct_auxiliary_session() 
         .await;
 
     let response = take_response_by_id(&mut ctx, 12);
-    let auxiliary_session_id = response["result"]["sessionId"]
+    let attached_session_id = response["result"]["sessionId"]
         .as_str()
-        .expect("auxiliary session id")
+        .expect("attached session id")
         .to_owned();
-    assert_ne!(auxiliary_session_id, "SID-primary");
+    assert_ne!(attached_session_id, "SID-primary");
     let attached = ctx.take_one();
     assert_eq!(attached["method"], "Target.attachedToTarget");
     assert_eq!(
         attached["params"]["sessionId"],
-        json!(auxiliary_session_id.as_str())
+        json!(attached_session_id.as_str())
     );
     let bc = ctx.conn.browser_context.as_ref().unwrap();
     assert_eq!(bc.active_session_id(), Some("SID-primary"));
     assert_eq!(
-        bc.auxiliary_target_id_for_session(&auxiliary_session_id),
+        bc.attached_target_id_for_session(&attached_session_id),
         Some("TID-000000000B")
     );
 
@@ -738,7 +738,7 @@ async fn attach_to_target_existing_session_creates_distinct_auxiliary_session() 
     ctx.process_async(json!({
         "id": 121,
         "method": "Runtime.evaluate",
-        "sessionId": auxiliary_session_id,
+        "sessionId": attached_session_id,
         "params": {
             "expression": "21 + 21",
             "returnByValue": true
@@ -750,7 +750,7 @@ async fn attach_to_target_existing_session_creates_distinct_auxiliary_session() 
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn attach_to_target_keeps_background_target_parked() {
+async fn attach_to_target_keeps_background_target_background() {
     let mut ctx = TestContext::new();
     load_bc_with_target(&mut ctx, "BID-9", "TID-000000000A");
     push_background_target(&mut ctx, "TID-000000000B", "about:blank", None);
@@ -1044,7 +1044,7 @@ async fn detach_browser_target_session_cascades_owned_target_sessions() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn detach_auxiliary_page_session_cascades_owned_target_sessions() {
+async fn detach_attached_page_session_cascades_owned_target_sessions() {
     let mut ctx = TestContext::new();
     load_bc_with_target(&mut ctx, "BID-aux-cascade", "TID-page");
 
@@ -1069,7 +1069,7 @@ async fn detach_auxiliary_page_session_cascades_owned_target_sessions() {
     .await;
     let page_session_id = ctx.take_response_by_id(152)["result"]["sessionId"]
         .as_str()
-        .expect("auxiliary page session id")
+        .expect("attached page session id")
         .to_owned();
     ctx.expect_event("Target.attachedToTarget", None);
 
@@ -1101,7 +1101,7 @@ async fn detach_auxiliary_page_session_cascades_owned_target_sessions() {
     assert_eq!(
         ctx.conn.session_route(Some(&child_session_id)),
         None,
-        "detaching a direct page frontend's auxiliary session must release its child sessions"
+        "detaching a direct page frontend's attached session must release its child sessions"
     );
     let detached_child = ctx.take_first_matching("child detachedFromTarget", |message| {
         message["method"] == json!("Target.detachedFromTarget")
@@ -1182,7 +1182,7 @@ async fn root_frontend_release_preserves_private_browser_owned_page_session() {
     let browser_context = ctx.conn.browser_context.as_ref().expect("browser context");
     assert_eq!(browser_context.active_session_id(), None);
     assert_eq!(
-        browser_context.auxiliary_target_id_for_session(&private_page_session_id),
+        browser_context.attached_target_id_for_session(&private_page_session_id),
         Some("TID-root-release")
     );
 }
@@ -1239,7 +1239,7 @@ async fn browser_target_session_survives_browser_context_disposal() {
     assert_eq!(attach_response["sessionId"], browser_session_id);
     assert!(
         attach_response["result"]["sessionId"].is_string(),
-        "attach response should include an auxiliary target session"
+        "attach response should include an attached target session"
     );
     let attached_event = ctx.take_one();
     assert_eq!(attached_event["method"], "Target.attachedToTarget");
@@ -1247,16 +1247,14 @@ async fn browser_target_session_survives_browser_context_disposal() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn session_route_finds_browser_active_auxiliary_background_and_inactive_sessions() {
+async fn session_route_finds_browser_active_attached_background_and_inactive_sessions() {
     let mut ctx = TestContext::new();
     load_bc_with_target(&mut ctx, "BID-A", "TID-000000000A");
     ctx.conn.register_browser_session("SID-browser".to_owned());
     {
         let bc = ctx.conn.browser_context.as_mut().unwrap();
         bc.attach_active_session("SID-active");
-        assert!(
-            bc.assign_auxiliary_session_to_target("TID-000000000A", "SID-auxiliary".to_owned())
-        );
+        assert!(bc.assign_attached_session_to_target("TID-000000000A", "SID-attached".to_owned()));
     }
     push_background_target(
         &mut ctx,
@@ -1282,7 +1280,7 @@ async fn session_route_finds_browser_active_auxiliary_background_and_inactive_se
         crate::conn::TargetIdentityState::about_blank(),
         crate::conn::TargetPageSlot::empty_for_test_fixture(),
     ));
-    assert!(inactive.assign_auxiliary_session_to_target(
+    assert!(inactive.assign_attached_session_to_target(
         "TID-000000000D",
         "SID-inactive-aux-background".to_owned()
     ));
@@ -1311,11 +1309,11 @@ async fn session_route_finds_browser_active_auxiliary_background_and_inactive_se
         })
     );
     assert_eq!(
-        ctx.conn.session_route(Some("SID-auxiliary")),
+        ctx.conn.session_route(Some("SID-attached")),
         Some(CdpSessionRoute::PageTarget {
             browser_context_id: "BID-A".to_owned(),
             target_id: "TID-000000000A".to_owned(),
-            session_key: moli_page_types::DevToolsSessionKey::Attached("SID-auxiliary".to_owned(),),
+            session_key: moli_page_types::DevToolsSessionKey::Attached("SID-attached".to_owned(),),
         })
     );
     assert_eq!(
@@ -1378,7 +1376,7 @@ async fn session_route_finds_browser_active_auxiliary_background_and_inactive_se
     assert_eq!(
         ctx.conn.browser_context.as_ref().map(|bc| bc.id.as_str()),
         Some("BID-A"),
-        "direct background route helpers must not promote inactive browser contexts"
+        "direct background route helpers must not activate inactive browser contexts"
     );
     assert!(
         ctx.conn
@@ -1403,7 +1401,7 @@ async fn session_route_finds_browser_active_auxiliary_background_and_inactive_se
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn attach_to_target_from_browser_session_creates_distinct_auxiliary_session() {
+async fn attach_to_target_from_browser_session_creates_distinct_attached_session() {
     let mut ctx = TestContext::new();
     load_bc_with_target(&mut ctx, "BID-9", "TID-000000000B");
     ctx.conn
@@ -1449,7 +1447,7 @@ async fn attach_to_target_from_browser_session_creates_distinct_auxiliary_sessio
     let bc = ctx.conn.browser_context.as_ref().unwrap();
     assert_eq!(bc.active_session_id(), Some("SID-page"));
     assert_eq!(
-        bc.auxiliary_target_id_for_session(target_session_id),
+        bc.attached_target_id_for_session(target_session_id),
         Some("TID-000000000B")
     );
 
@@ -1465,7 +1463,7 @@ async fn attach_to_target_from_browser_session_creates_distinct_auxiliary_sessio
     assert!(
         bc.active_page_target()
             .runtime_slot
-            .has_auxiliary_network_events_for_session(target_session_id)
+            .has_attached_network_events_for_session(target_session_id)
     );
 }
 
@@ -1638,7 +1636,7 @@ async fn detach_from_target_drops_only_selected_page_renderer_inspector_session(
     {
         let bc = ctx.conn.browser_context.as_mut().unwrap();
         bc.attach_active_session("SID-detach-primary");
-        assert!(bc.assign_auxiliary_session_to_target(
+        assert!(bc.assign_attached_session_to_target(
             "TID-detach-inspector",
             "SID-detach-aux".to_owned()
         ));
@@ -1666,7 +1664,7 @@ async fn detach_from_target_drops_only_selected_page_renderer_inspector_session(
     assert_eq!(
         page_renderer_inspector_session_count(&mut ctx, "after both sessions enabled").await,
         baseline_session_count + 1,
-        "primary Runtime.enable must reuse the target default Inspector session while auxiliary Runtime.enable adds one session"
+        "primary Runtime.enable must reuse the target default Inspector session while attached Runtime.enable adds one session"
     );
 
     ctx.process_async(json!({
@@ -1690,12 +1688,12 @@ async fn detach_from_target_drops_only_selected_page_renderer_inspector_session(
         ctx.sent
             .iter()
             .all(|message| message["method"] != json!("Target.detachedFromTarget")),
-        "auxiliary detach must publish exactly one target detach event"
+        "attached detach must publish exactly one target detach event"
     );
     assert_eq!(
-        page_renderer_inspector_session_count(&mut ctx, "after auxiliary detach").await,
+        page_renderer_inspector_session_count(&mut ctx, "after attached detach").await,
         baseline_session_count,
-        "auxiliary detach should drop only that renderer V8 inspector session"
+        "attached detach should drop only that renderer V8 inspector session"
     );
     ctx.process_async(json!({
         "id": 120_005,
@@ -1712,7 +1710,7 @@ async fn detach_from_target_drops_only_selected_page_renderer_inspector_session(
 
     {
         let bc = ctx.conn.browser_context.as_mut().unwrap();
-        assert!(bc.assign_auxiliary_session_to_target(
+        assert!(bc.assign_attached_session_to_target(
             "TID-detach-inspector",
             "SID-detach-aux-replacement".to_owned()
         ));
@@ -1726,7 +1724,7 @@ async fn detach_from_target_drops_only_selected_page_renderer_inspector_session(
     ctx.expect_result(120_006, json!({}), Some("SID-detach-aux-replacement"));
     ctx.sent.clear();
     assert_eq!(
-        page_renderer_inspector_session_count(&mut ctx, "after replacement auxiliary enable").await,
+        page_renderer_inspector_session_count(&mut ctx, "after replacement attached enable").await,
         baseline_session_count + 1
     );
     ctx.process_async(json!({
@@ -1787,7 +1785,7 @@ async fn detach_from_target_drops_only_selected_page_renderer_inspector_session(
 
     let bc = ctx.conn.browser_context.as_ref().unwrap();
     assert_eq!(
-        bc.auxiliary_target_id_for_session("SID-detach-aux-replacement"),
+        bc.attached_target_id_for_session("SID-detach-aux-replacement"),
         Some("TID-detach-inspector"),
         "detaching primary must preserve the attached session binding"
     );
@@ -1853,7 +1851,7 @@ async fn detach_from_target_drops_only_selected_page_renderer_inspector_session(
     assert_eq!(
         page_renderer_inspector_session_count(&mut ctx, "after fresh primary attach").await,
         baseline_session_count,
-        "a fresh primary session must not observe a leaked auxiliary renderer session"
+        "a fresh primary session must not observe a leaked attached renderer session"
     );
 }
 
@@ -1870,10 +1868,12 @@ async fn detach_from_target_removes_only_selected_session_document_start_scripts
     {
         let browser_context = ctx.conn.browser_context.as_mut().unwrap();
         browser_context.attach_active_session("SID-preload-primary");
-        assert!(browser_context.assign_auxiliary_session_to_target(
-            "TID-detach-preload",
-            "SID-preload-aux".to_owned(),
-        ));
+        assert!(
+            browser_context.assign_attached_session_to_target(
+                "TID-detach-preload",
+                "SID-preload-aux".to_owned(),
+            )
+        );
     }
     ctx.sent.clear();
 
@@ -1886,7 +1886,7 @@ async fn detach_from_target_removes_only_selected_session_document_start_scripts
         (
             120_102,
             "SID-preload-aux",
-            "globalThis.__auxPreload = 'auxiliary';",
+            "globalThis.__auxPreload = 'attached';",
         ),
     ] {
         ctx.process_async(json!({
@@ -1907,7 +1907,7 @@ async fn detach_from_target_removes_only_selected_session_document_start_scripts
         "id": 120_107,
         "sessionId": "SID-preload-aux",
         "method": "Page.addScriptToEvaluateOnNewDocument",
-        "params": { "source": "globalThis.__auxSecondPreload = 'auxiliary-2';" }
+        "params": { "source": "globalThis.__auxSecondPreload = 'attached-2';" }
     }))
     .await;
     ctx.expect_result(
@@ -2019,7 +2019,7 @@ async fn detach_from_target_removes_only_selected_session_document_start_scripts
         "sessionId": "SID-preload-primary",
         "method": "Runtime.evaluate",
         "params": {
-            "expression": "JSON.stringify({ primary: globalThis.__primaryPreload ?? null, auxiliary: globalThis.__auxPreload ?? null })",
+            "expression": "JSON.stringify({ primary: globalThis.__primaryPreload ?? null, attached: globalThis.__auxPreload ?? null })",
             "returnByValue": true
         }
     }))
@@ -2027,7 +2027,7 @@ async fn detach_from_target_removes_only_selected_session_document_start_scripts
     let replacement = take_response_by_id(&mut ctx, 120_106);
     assert_eq!(
         replacement["result"]["result"]["value"],
-        json!(r#"{"primary":"primary","auxiliary":null}"#),
+        json!(r#"{"primary":"primary","attached":null}"#),
         "only the surviving session script must replay into the replacement Document"
     );
 }
@@ -2041,7 +2041,7 @@ async fn page_renderer_inspector_session_count(ctx: &mut TestContext, stage: &st
         .expect("active target should still have a loaded page");
     // This diagnostic deliberately runs on the primary Inspector route. It
     // bypasses CdpConnection's session-aware Page accessor, so bind that route
-    // explicitly instead of inheriting whichever auxiliary session the prior
+    // explicitly instead of inheriting whichever attached session the prior
     // command happened to stamp on the Page facade.
     page.set_renderer_devtools_command_session_id(None);
     let response = page

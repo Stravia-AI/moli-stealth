@@ -43,7 +43,7 @@ async fn close_active_target_fails_only_active_owner_pending_awaits() {
     bc.set_active_target_id("TID-active-await".to_owned());
     bc.attach_active_session("SID-active-await".to_owned());
     assert!(
-        bc.assign_auxiliary_session_to_target(
+        bc.assign_attached_session_to_target(
             "TID-active-await",
             "SID-active-aux-await".to_owned(),
         )
@@ -73,9 +73,9 @@ async fn close_active_target_fails_only_active_owner_pending_awaits() {
     let active_failed = take_response_by_id(&mut ctx, 1041201);
     assert_eq!(active_failed["sessionId"], json!("SID-active-await"));
     assert_eq!(active_failed["error"]["message"], json!("Target closed"));
-    let auxiliary_failed = take_response_by_id(&mut ctx, 1041203);
-    assert_eq!(auxiliary_failed["sessionId"], json!("SID-active-aux-await"));
-    assert_eq!(auxiliary_failed["error"]["message"], json!("Target closed"));
+    let attached_failed = take_response_by_id(&mut ctx, 1041203);
+    assert_eq!(attached_failed["sessionId"], json!("SID-active-aux-await"));
+    assert_eq!(attached_failed["error"]["message"], json!("Target closed"));
     assert!(
         ctx.take_all().into_iter().all(|message| {
             message["id"] != json!(1041201)
@@ -193,7 +193,7 @@ async fn attach_to_target_selects_inactive_browser_context() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn attach_to_target_creates_auxiliary_session_and_keeps_target_context_active() {
+async fn attach_to_target_creates_attached_session_and_keeps_target_context_active() {
     let mut ctx = TestContext::new();
     load_bc_with_target(&mut ctx, "BID-A", "TID-A");
     let mut inactive = BrowserContext::new("BID-B".into());
@@ -229,7 +229,7 @@ async fn attach_to_target_creates_auxiliary_session_and_keeps_target_context_act
         ctx.conn
             .browser_context
             .as_ref()
-            .and_then(|bc| bc.auxiliary_target_id_for_session(&attached_session_id)),
+            .and_then(|bc| bc.attached_target_id_for_session(&attached_session_id)),
         Some("TID-B")
     );
     assert!(
@@ -516,7 +516,7 @@ async fn create_target_with_auto_attach_attaches_second_target_in_same_browser_c
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn page_command_on_auto_attached_background_target_session_routes_without_promoting_loaded_active_target()
+async fn page_command_on_auto_attached_background_target_session_routes_without_activating_loaded_active_target()
  {
     let mut ctx = TestContext::new();
     load_bc_with_titled_page_async(
@@ -583,7 +583,7 @@ async fn page_command_on_auto_attached_background_target_session_routes_without_
     assert!(
         bc.background_target(&second_target_id)
             .is_some_and(|target| target.has_loaded_page()),
-        "background Page.navigate should load the parked target without promoting it"
+        "background Page.navigate should load the background target without activating it"
     );
 
     ctx.process_async(json!({
@@ -606,7 +606,7 @@ async fn page_command_on_auto_attached_background_target_session_routes_without_
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn page_bring_to_front_promotes_background_session_explicitly() {
+async fn page_bring_to_front_activates_background_session_explicitly() {
     let mut ctx = TestContext::new();
     load_bc_with_target(&mut ctx, "BID-9", "TID-000000000A");
     ctx.conn
@@ -692,13 +692,13 @@ async fn page_bring_to_front_on_inactive_context_restores_previous_context() {
         .inactive_browser_contexts
         .iter()
         .find(|bc| bc.id == "BID-B")
-        .expect("inactive context should remain parked");
+        .expect("inactive context should remain background");
     assert_eq!(inactive.active_target_id(), Some("TID-active-b"));
     assert_eq!(inactive.active_session_id(), Some("SID-active-b"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn page_navigate_on_auto_attached_background_target_session_routes_without_promotion() {
+async fn page_navigate_on_auto_attached_background_target_session_routes_without_activation() {
     let mut ctx = TestContext::new();
     load_bc_with_target(&mut ctx, "BID-9", "TID-000000000A");
     ctx.conn
@@ -758,7 +758,7 @@ async fn page_navigate_on_auto_attached_background_target_session_routes_without
     assert!(
         bc.background_target(&second_target_id)
             .is_some_and(|target| target.has_loaded_page()),
-        "background Page.navigate should load the parked target without promoting it"
+        "background Page.navigate should load the background target without activating it"
     );
 
     ctx.process_async(json!({
@@ -781,7 +781,7 @@ async fn page_navigate_on_auto_attached_background_target_session_routes_without
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn page_stop_loading_aborts_background_pending_fetch_without_promotion() {
+async fn page_stop_loading_aborts_background_pending_fetch_without_activation() {
     let mut ctx = TestContext::new();
     load_bc_with_titled_page_async(
         &mut ctx,
@@ -881,7 +881,7 @@ async fn page_stop_loading_aborts_background_pending_fetch_without_promotion() {
         assert_eq!(bc.active_target_id(), Some("TID-000000000A"));
         let background = bc
             .background_target(&second_target_id)
-            .expect("background target should remain parked");
+            .expect("background target should remain background");
         assert_eq!(background.session_id(), Some(session_id.as_str()));
         assert!(
             bc.background_target(&second_target_id)
@@ -894,7 +894,7 @@ async fn page_stop_loading_aborts_background_pending_fetch_without_promotion() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn runtime_add_binding_and_preload_then_remove_on_auto_attached_background_target_session_prevent_first_navigation_replay_after_empty_slot_promotion()
+async fn runtime_add_binding_and_preload_then_remove_on_auto_attached_background_target_session_prevent_first_navigation_replay_after_empty_slot_activation()
  {
     let mut ctx = TestContext::new();
     load_bc_with_target(&mut ctx, "BID-9", "TID-000000000A");
@@ -1032,7 +1032,7 @@ async fn runtime_add_binding_and_preload_then_remove_on_auto_attached_background
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn runtime_remove_binding_on_background_target_session_routes_without_promotion_when_active_target_has_no_loaded_page()
+async fn runtime_remove_binding_on_background_target_session_routes_without_activation_when_active_target_has_no_loaded_page()
  {
     let mut ctx = TestContext::new();
     load_bc_with_target(&mut ctx, "BID-9", "TID-000000000A");
@@ -1109,7 +1109,7 @@ async fn runtime_remove_binding_on_background_target_session_routes_without_prom
                 .runtime_bindings
                 .iter()
                 .all(|binding| binding.name != "patchedBinding")),
-        "binding definition should be removed from the background DevTools session without promotion"
+        "binding definition should be removed from the background DevTools session without activation"
     );
 }
 
@@ -1725,9 +1725,9 @@ async fn same_context_targets_do_not_replay_bare_isolated_worlds_after_switching
         "params": { "expression": "document.title" }
     }))
     .await;
-    let second_promote = take_response_by_id(&mut ctx, 10415041);
+    let second_activate = take_response_by_id(&mut ctx, 10415041);
     assert_eq!(
-        second_promote["result"]["result"]["value"],
+        second_activate["result"]["result"]["value"],
         json!("second-target")
     );
     ctx.conn

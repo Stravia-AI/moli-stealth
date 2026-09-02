@@ -2036,7 +2036,7 @@ mod protocol_neutral_tests {
         browser_context.set_active_target_id("TID-chain".to_owned());
         browser_context.attach_active_session("SID-primary".to_owned());
         assert!(
-            browser_context.assign_auxiliary_session_to_target("TID-chain", "SID-aux".to_owned())
+            browser_context.assign_attached_session_to_target("TID-chain", "SID-aux".to_owned())
         );
         browser_context
             .active_page_target_mut()
@@ -2177,7 +2177,7 @@ mod protocol_neutral_tests {
         browser_context.attach_active_session("SID-primary".to_owned());
         assert!(
             browser_context
-                .assign_auxiliary_session_to_target("TID-response-chain", "SID-aux".to_owned())
+                .assign_attached_session_to_target("TID-response-chain", "SID-aux".to_owned())
         );
         browser_context
             .active_page_target_mut()
