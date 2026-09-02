@@ -89,14 +89,26 @@ table {
 
 thead {
   display: table-header-group;
+  vertical-align: middle;
+  border-color: inherit;
 }
 
 tbody {
   display: table-row-group;
+  vertical-align: middle;
+  border-color: inherit;
 }
 
 tfoot {
   display: table-footer-group;
+  vertical-align: middle;
+  border-color: inherit;
+}
+
+/* Dynamically-created XHTML tables need the section default without an
+   implied tbody. */
+table > tr {
+  vertical-align: middle;
 }
 
 col {
@@ -109,10 +121,13 @@ colgroup {
 
 tr {
   display: table-row;
+  vertical-align: inherit;
+  border-color: inherit;
 }
 
 td, th {
   display: table-cell;
+  vertical-align: inherit;
 }
 
 /* Normal table cells receive their padding from the nearest table's legacy
@@ -120,6 +135,11 @@ td, th {
 td:not(table td),
 th:not(table th) {
   padding: 1px;
+}
+
+th {
+  font-weight: bold;
+  text-align: -moz-center;
 }
 
 caption {

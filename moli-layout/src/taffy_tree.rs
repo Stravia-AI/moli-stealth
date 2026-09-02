@@ -1606,6 +1606,16 @@ where
         if self.should_hide(node_id, inputs) {
             return compute_hidden_layout(self, node_id);
         }
+        // A block parent's intrinsic height calculation consumes the child's
+        // collapsible-margin sets as well as its numeric size. Taffy's compact
+        // measurement cache intentionally retains only the latter, so a cache
+        // hit reconstructed as `LayoutOutput` would silently turn escaped
+        // descendant margins into zero. Keep this legacy LayoutOutput path
+        // uncached until block sizing uses the dedicated size protocol end to
+        // end; final layout remains cached below.
+        if inputs.run_mode == RunMode::ComputeSize {
+            return self.compute_child_layout_uncached(node_id, inputs, block_context);
+        }
         compute_cached_layout(self, node_id, inputs, |world, node_id, inputs| {
             world.compute_child_layout_uncached(node_id, inputs, block_context)
         })
