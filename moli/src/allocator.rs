@@ -1,11 +1,11 @@
-//! Process-wide allocator configuration for the `moli` executable.
+//! Process-wide fallback allocator configuration for the `moli` executable.
 //!
-//! Moli keeps one process alive while many page targets are opened and
-//! closed. The low-resource jemalloc profile below favors returning those
-//! short-lived page allocations to the operating system over maximizing
-//! allocator throughput. Keep this configuration beside the allocator
-//! declaration: changing either side requires another deterministic DOM and
-//! full Spider Bench A/B.
+//! Targets with an official pointer-compressed rusty_v8 archive use its
+//! PartitionAlloc shim instead. On other non-Windows targets, the low-resource
+//! jemalloc profile below favors returning short-lived page allocations to the
+//! operating system over maximizing allocator throughput. Keep this
+//! configuration beside the allocator declaration: changing either side
+//! requires another deterministic DOM and full Spider Bench A/B.
 //!
 //! `override_allocator_on_supported_platforms` makes jemalloc export the
 //! unprefixed C allocation symbols on Linux. This distinction is important:

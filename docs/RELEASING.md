@@ -27,9 +27,10 @@ only a staging copy, leaving the binary under `target/release` unchanged for
 debugging. Because stripping invalidates a Mach-O signature, macOS staging
 binaries are ad-hoc signed again and verified before packaging. They are not
 Developer ID signed or notarized. Windows executables are not Authenticode
-signed. The allocator behind the default `jemalloc` feature is target-gated
-out on Windows, so Windows builds use the system allocator because upstream
-treats the Windows/MSVC combination as untested.
+signed. Linux x86_64 and both macOS targets use the allocator shim bundled in
+their official pointer-compressed V8 archives, routing native allocations to
+PartitionAlloc. Targets without such an archive retain their existing
+allocator: Linux ARM64 uses jemalloc and Windows uses the system allocator.
 
 Release builds use one code-generation unit. The release workflow and the CI
 release-regression binaries both invoke Cargo with `--release`, so they consume
