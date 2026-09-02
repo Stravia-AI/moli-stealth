@@ -108,6 +108,127 @@ async fn websocket_page_agent_response_precedes_later_runtime_context_replay() {
     abort_test_cdp_server(protocol_server).await;
 }
 
+#[tokio::test]
+async fn websocket_page_response_barrier_preserves_same_session_command_fifo() {
+    let (cdp_addr, protocol_server) = spawn_test_protocol_server().await;
+    let (mut socket, _) = connect_async(format!(
+        "ws://{cdp_addr}/devtools/browser/{DEFAULT_BROWSER_ID}"
+    ))
+    .await
+    .expect("connect browser CDP websocket");
+    let browser_context_id = cdp_create_browser_context(&mut socket, 1).await;
+    let target = cdp_create_attached_target(&mut socket, 2, &browser_context_id).await;
+
+    for id in 4..=6 {
+        send_cdp_command_without_wait(
+            &mut socket,
+            id,
+            "Page.getFrameTree",
+            Some(&target.session_id),
+            json!({}),
+        )
+        .await;
+    }
+
+    let messages = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut messages: Vec<serde_json::Value> = Vec::new();
+        while !(4..=6).all(|id| messages.iter().any(|message| message["id"] == json!(id))) {
+            messages.push(recv_ws_json(&mut socket).await);
+        }
+        messages
+    })
+    .await
+    .expect("three pipelined Page.getFrameTree commands should settle");
+    let response_positions = (4..=6)
+        .map(|id| {
+            messages
+                .iter()
+                .position(|message| message["id"] == json!(id))
+                .unwrap_or_else(|| panic!("missing response {id}: {messages:?}"))
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        response_positions.windows(2).all(|pair| pair[0] < pair[1]),
+        "same-session command responses must preserve frontend FIFO: {messages:?}"
+    );
+
+    let _ = socket.close(None).await;
+    abort_test_cdp_server(protocol_server).await;
+}
+
+#[tokio::test]
+async fn websocket_immediate_errors_do_not_cross_page_response_barrier() {
+    let (cdp_addr, protocol_server) = spawn_test_protocol_server().await;
+    let (mut socket, _) = connect_async(format!(
+        "ws://{cdp_addr}/devtools/browser/{DEFAULT_BROWSER_ID}"
+    ))
+    .await
+    .expect("connect browser CDP websocket");
+    let browser_context_id = cdp_create_browser_context(&mut socket, 1).await;
+    let target = cdp_create_attached_target(&mut socket, 2, &browser_context_id).await;
+
+    send_cdp_command_without_wait(
+        &mut socket,
+        4,
+        "Page.getFrameTree",
+        Some(&target.session_id),
+        json!({}),
+    )
+    .await;
+    socket
+        .send(WsMessage::Text("{".into()))
+        .await
+        .expect("send malformed CDP command");
+    send_cdp_command_without_wait(
+        &mut socket,
+        5,
+        "Runtime.enable",
+        Some("UNKNOWN-SESSION"),
+        json!({}),
+    )
+    .await;
+
+    let messages = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut messages = Vec::new();
+        let mut saw_frame_tree = false;
+        let mut saw_parse_error = false;
+        let mut saw_unknown_session = false;
+        while !(saw_frame_tree && saw_parse_error && saw_unknown_session) {
+            let message = recv_ws_json(&mut socket).await;
+            saw_frame_tree |= message["id"] == json!(4_u64);
+            saw_parse_error |= message["id"].is_null() && message["error"]["code"] == json!(-32700);
+            saw_unknown_session |=
+                message["id"] == json!(5_u64) && message["error"]["code"] == json!(-32001);
+            messages.push(message);
+        }
+        messages
+    })
+    .await
+    .expect("frame-tree response and immediate errors should settle");
+
+    let frame_tree_index = messages
+        .iter()
+        .position(|message| message["id"] == json!(4_u64))
+        .expect("Page.getFrameTree response");
+    let parse_error_index = messages
+        .iter()
+        .position(|message| message["id"].is_null() && message["error"]["code"] == json!(-32700))
+        .expect("malformed JSON error response");
+    let unknown_session_index = messages
+        .iter()
+        .position(|message| {
+            message["id"] == json!(5_u64) && message["error"]["code"] == json!(-32001)
+        })
+        .expect("unknown session error response");
+    assert!(
+        frame_tree_index < parse_error_index && parse_error_index < unknown_session_index,
+        "immediate responses must wait behind an earlier response barrier and retain their own input order: {messages:?}"
+    );
+
+    let _ = socket.close(None).await;
+    abort_test_cdp_server(protocol_server).await;
+}
+
 async fn wait_for_cookie_profile(
     path: &Path,
     predicate: impl Fn(&[StoredCookie]) -> bool,
