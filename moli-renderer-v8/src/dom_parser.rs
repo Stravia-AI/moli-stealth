@@ -683,7 +683,7 @@ mod tests {
 
     #[test]
     fn child_plain_text_document_uses_pre_and_no_quirks_mode() {
-        let (document, kind) = parse_child_document_snapshot(
+        let (document, kind) = parse_browsing_context_document_snapshot(
             Url::parse("https://example.test/sample.txt").expect("test URL"),
             "alpha<&amp;\r\nbeta\rgamma\0",
             Some("text/plain"),

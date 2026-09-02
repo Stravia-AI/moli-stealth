@@ -49,7 +49,12 @@ fn child_list_under_dir_auto_invalidates_directionality_subtree() {
 
     assert!(!engine.computed_style_cache_contains_handle_for_document_for_test(document, auto));
     assert!(
-        !engine.computed_style_cache_contains_handle_for_document_for_test(document, descendant)
+        engine.computed_style_cache_contains_handle_for_document_for_test(document, descendant),
+        "lazy subtree invalidation keeps descendants published until observation"
+    );
+    assert!(
+        engine.retained_style_invalidation_root_count_for_document_for_test(document) > 0,
+        "directionality invalidation must retain a lazy subtree root"
     );
     assert!(engine.computed_style_cache_contains_handle_for_document_for_test(document, unrelated));
     assert_eq!(

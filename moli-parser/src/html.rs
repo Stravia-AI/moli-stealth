@@ -2164,12 +2164,13 @@ mod tests {
         );
         assert_eq!(document.select_option_elements(select).len(), 3);
 
-        let fragment = HtmlParser::SCRIPTING_ENABLED.parse_fragment(
-            Url::parse("https://example.test/").expect("test url"),
-            HTML_NS,
-            "select",
-            "<div id='fragment-wrapper'><option>value</option></div>".to_owned(),
-        );
+        let fragment = HtmlParser::SCRIPTING_ENABLED
+            .parse_fragment_without_declarative_shadow_roots(
+                Url::parse("https://example.test/").expect("test url"),
+                HTML_NS,
+                "select",
+                "<div id='fragment-wrapper'><option>value</option></div>".to_owned(),
+            );
         let fragment_wrapper = first_element_by_ns(&fragment, HTML_NS, "div");
         let fragment_option = first_element_by_ns(&fragment, HTML_NS, "option");
         assert_eq!(

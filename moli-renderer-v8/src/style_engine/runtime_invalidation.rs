@@ -146,7 +146,7 @@ impl MoliStyleEngine {
                 continue;
             };
             let world = self.world_for_document(document);
-            if !world_has_cached_style_state(&world) {
+            if !world_has_style_state(self, &world) {
                 continue;
             }
             // Tree and character-data mutation effects do not retain the old
@@ -167,7 +167,7 @@ impl MoliStyleEngine {
                     viewport,
                 );
             }
-            self.cache_cleanup_for_world(&world)
+            self.invalidation_cleanup_for_world(&world)
                 .invalidate_subtrees(host, [root]);
         }
     }
@@ -770,8 +770,8 @@ fn html_auto_directionality_roots_for_mutations(
                 }
             }
             StyleMutationEffect::Attribute { .. }
-            | StyleMutationEffect::ConnectedSubtree { .. }
-            | StyleMutationEffect::DisconnectedSubtree { .. } => {}
+            | StyleMutationEffect::ConnectedSubtrees { .. }
+            | StyleMutationEffect::DisconnectedSubtrees { .. } => {}
         }
     }
     roots

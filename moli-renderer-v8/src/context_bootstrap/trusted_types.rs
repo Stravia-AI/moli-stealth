@@ -1386,18 +1386,6 @@ fn trusted_types_for_script_is_required(scope: &mut v8::PinScope<'_, '_>) -> boo
     unsafe { &*host_ptr }.requires_trusted_types_for_script(scope)
 }
 
-fn trusted_types_for_script_requirements(
-    scope: &mut v8::PinScope<'_, '_>,
-) -> TrustedTypesForScriptRequirements {
-    if let Some(requirements) = crate::worker::worker_trusted_types_for_script_requirements(scope) {
-        return requirements;
-    }
-    let Some(host_ptr) = context_host_ptr_from_global_bridge(scope) else {
-        return TrustedTypesForScriptRequirements::default();
-    };
-    unsafe { &*host_ptr }.trusted_types_for_script_requirements(scope)
-}
-
 fn trusted_types_eval_is_allowed(scope: &mut v8::PinScope<'_, '_>) -> bool {
     if let Some(allowed) = crate::worker::worker_allows_trusted_types_eval(scope) {
         return allowed;

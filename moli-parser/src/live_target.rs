@@ -4393,6 +4393,55 @@ fn parser_stream_live_fragment_root_writes_fragment() {
 }
 
 #[test]
+fn live_fragment_parser_preserves_noscript_when_scripting_is_disabled() {
+    let url = Url::parse("https://example.test/").expect("test url");
+    let mut dom_host = DomHost::from_dom(NativeDom::new_html_with_scripting(url.clone(), false));
+    let document = dom_host.document_handle();
+    let html = dom_host.create_element("html");
+    let body = dom_host.create_element("body");
+    assert!(dom_host.append_child(document, html));
+    assert!(dom_host.append_child(html, body));
+    let existing_noscript = dom_host.create_element("noscript");
+    let existing_text = dom_host.create_text_node("<em>existing&</em>");
+    assert!(dom_host.append_child(existing_noscript, existing_text));
+    assert!(dom_host.append_child(body, existing_noscript));
+    let fragment = dom_host.create_document_fragment_for_document(document);
+    let ptr = &mut dom_host as *mut DomHost;
+    let mut effects = DomMutationEffects::default();
+
+    {
+        let mut collector = TestMutationEffectCollector {
+            host: ptr,
+            effects: &mut effects,
+            panic_on_mutation: false,
+        };
+        crate::HtmlParser::with_scripting_enabled(false).parse_fragment_into_live_dom(
+            url,
+            fragment,
+            document,
+            body,
+            "http://www.w3.org/1999/xhtml",
+            "body",
+            "<noscript>&lt;em&gt;fallback&amp;&lt;/em&gt;</noscript><span>tail</span>",
+            &mut collector,
+            false,
+        );
+    }
+
+    assert_eq!(
+        dom_host
+            .elements_by_tag_name(fragment, "noscript", false)
+            .len(),
+        1,
+        "a scripting-disabled live fragment must preserve its noscript root"
+    );
+    assert_eq!(
+        dom_host.elements_by_tag_name(fragment, "span", false).len(),
+        1
+    );
+}
+
+#[test]
 fn live_fragment_parser_uses_template_contents_owner_document() {
     let url = Url::parse("https://example.test/").expect("test url");
     let mut dom_host = DomHost::from_dom(NativeDom::new_html(url.clone()));

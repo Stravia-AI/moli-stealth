@@ -417,6 +417,9 @@ pub(in crate::native_bridge) fn set_detached_html_document_body_html(
         let Some(body) = detached_html_document_body_handle(runtime, document_handle) else {
             return false;
         };
+        if html.is_empty() && runtime.dom_host().child_handles(body).next().is_none() {
+            return true;
+        }
         runtime.set_inner_html(scope, runtime_ptr, body, html)
     })
 }

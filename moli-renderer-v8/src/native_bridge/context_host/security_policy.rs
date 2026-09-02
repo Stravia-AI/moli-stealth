@@ -1004,16 +1004,6 @@ impl JsContextHost {
             .unwrap_or_default()
     }
 
-    fn child_content_security_reporting_endpoints(
-        &self,
-        handle: DomHandle,
-    ) -> ContentSecurityPolicyReportingEndpoints {
-        self.child_browsing_contexts
-            .get(&handle)
-            .map(|entry| entry.content_security_reporting_endpoints())
-            .unwrap_or_default()
-    }
-
     pub(crate) fn dispatch_content_security_policy_violation_event_best_effort<'s>(
         &mut self,
         scope: &mut v8::PinScope<'s, '_>,

@@ -2116,7 +2116,10 @@ trustedTypes.createPolicy("default", {
         .expect("install javascript URL rewriting default policy");
     assert_eq!(
         rewritten
-            .eval_javascript_url_runtime_turn("globalThis.__javascriptUrlOriginal++")
+            .eval_javascript_url_runtime_turn(
+                "globalThis.__javascriptUrlOriginal++",
+                &Url::parse("https://javascript-url-rewritten.test/").expect("test URL"),
+            )
             .expect("rewritten javascript URL should execute"),
         None
     );
@@ -2156,7 +2159,9 @@ trustedTypes.createPolicy("default", {
             "report",
         ),
     ] {
-        let mut vm = new_storage_test_vm(&format!("https://javascript-url-{name}.test/"));
+        let base_url =
+            Url::parse(&format!("https://javascript-url-{name}.test/")).expect("test URL");
+        let mut vm = new_storage_test_vm(base_url.as_str());
         if report_only {
             vm.set_response_content_security_report_only_policies(std::slice::from_ref(&policy));
         } else {
@@ -2181,7 +2186,7 @@ trustedTypes.createPolicy("default", {{
         .expect("install failing javascript URL default policy");
 
         assert_eq!(
-            vm.eval_javascript_url_runtime_turn("globalThis.__javascriptUrlRuns++")
+            vm.eval_javascript_url_runtime_turn("globalThis.__javascriptUrlRuns++", &base_url)
                 .expect("default policy failure must not escape the navigation turn"),
             None
         );

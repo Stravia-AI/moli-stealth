@@ -975,6 +975,7 @@ impl DocumentRuntime {
             HtmlFragmentCustomElementUpgradeTiming::AfterInsertion,
             context_mode,
             scripting_enabled,
+            false,
         ) else {
             return false;
         };
