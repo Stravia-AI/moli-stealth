@@ -1,5 +1,51 @@
 use super::*;
 use moli_webapi_declare::DataPropertyDescriptorDeclaration;
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, HashMap},
+    sync::atomic::{AtomicU64, Ordering},
+};
+
+thread_local! {
+    static CSS_RULE_LIST_CACHES: RefCell<HashMap<u64, BTreeMap<u32, v8::Weak<v8::Object>>>> =
+        RefCell::new(HashMap::new());
+}
+
+static NEXT_CSS_RULE_LIST_CACHE_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_css_rule_list_cache_id() -> u64 {
+    let id = NEXT_CSS_RULE_LIST_CACHE_ID.fetch_add(1, Ordering::Relaxed);
+    assert_ne!(id, 0, "CSSRuleList cache id space exhausted");
+    id
+}
+
+fn css_rule_list_cache_id<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    list: v8::Local<'s, v8::Object>,
+) -> Option<u64> {
+    private_u64(scope, list, CSS_RULE_LIST_CACHE_ID_SLOT)
+}
+
+fn ensure_css_rule_list_cache<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    list: v8::Local<'s, v8::Object>,
+) -> u64 {
+    if let Some(id) = css_rule_list_cache_id(scope, list) {
+        return id;
+    }
+
+    let id = next_css_rule_list_cache_id();
+    CSS_RULE_LIST_CACHES.with(|caches| {
+        caches.borrow_mut().insert(id, Default::default());
+    });
+    set_private_u64(scope, list, CSS_RULE_LIST_CACHE_ID_SLOT, id);
+    crate::v8_finalizer::track_context_owned_v8_finalizer(scope, list, move || {
+        CSS_RULE_LIST_CACHES.with(|caches| {
+            caches.borrow_mut().remove(&id);
+        });
+    });
+    id
+}
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -235,33 +281,16 @@ fn css_rule_list_parent_rule<'s>(
     get_private_object(scope, list, CSS_RULE_LIST_PARENT_RULE_SLOT)
 }
 
-fn css_rule_list_materialized_items<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    list: v8::Local<'s, v8::Object>,
-) -> v8::Local<'s, v8::Map> {
-    if let Some(items) = get_private_value(scope, list, CSS_RULE_LIST_MATERIALIZED_ITEMS_SLOT)
-        .and_then(|value| v8::Local::<v8::Map>::try_from(value).ok())
-    {
-        return items;
-    }
-
-    reset_css_rule_list_materialized_items(scope, list);
-    get_private_value(scope, list, CSS_RULE_LIST_MATERIALIZED_ITEMS_SLOT)
-        .and_then(|value| v8::Local::<v8::Map>::try_from(value).ok())
-        .expect("CSSRuleList materialized item backing should initialize")
-}
-
 pub(crate) fn reset_css_rule_list_materialized_items<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     list: v8::Local<'s, v8::Object>,
 ) {
-    let items = v8::Map::new(scope);
-    set_private_value(
-        scope,
-        list,
-        CSS_RULE_LIST_MATERIALIZED_ITEMS_SLOT,
-        items.into(),
-    );
+    let id = ensure_css_rule_list_cache(scope, list);
+    CSS_RULE_LIST_CACHES.with(|caches| {
+        if let Some(cache) = caches.borrow_mut().get_mut(&id) {
+            cache.clear();
+        }
+    });
 }
 
 pub(crate) fn css_rule_list_materialized_rule<'s>(
@@ -269,41 +298,41 @@ pub(crate) fn css_rule_list_materialized_rule<'s>(
     list: v8::Local<'s, v8::Object>,
     index: u32,
 ) -> Option<v8::Local<'s, v8::Object>> {
-    let items = css_rule_list_materialized_items(scope, list);
-    let key = v8::Integer::new_from_unsigned(scope, index);
-    items
-        .get(scope, key.into())
-        .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())
+    let id = css_rule_list_cache_id(scope, list)?;
+    CSS_RULE_LIST_CACHES.with(|caches| {
+        let mut caches = caches.borrow_mut();
+        let cache = caches.get_mut(&id)?;
+        let rule = cache.get(&index)?.to_local(scope);
+        if rule.is_none() {
+            cache.remove(&index);
+        }
+        rule
+    })
 }
 
 pub(crate) fn css_rule_list_materialized_entries<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     list: v8::Local<'s, v8::Object>,
 ) -> Vec<(u32, v8::Local<'s, v8::Object>)> {
-    let items = css_rule_list_materialized_items(scope, list);
-    let item_count = items.size();
-    note_css_rule_list_materialized_traversal(item_count);
-    let flattened = items.as_array(scope);
-    debug_assert_eq!(flattened.length() as usize, item_count.saturating_mul(2));
-    let mut entries = Vec::with_capacity(item_count);
-    for entry_index in 0..item_count {
-        let key_index = (entry_index * 2) as u32;
-        let value_index = key_index + 1;
-        let Some(index) = flattened
-            .get_index(scope, key_index)
-            .and_then(|key| key.uint32_value(scope))
-        else {
-            continue;
+    let Some(id) = css_rule_list_cache_id(scope, list) else {
+        return Vec::new();
+    };
+    CSS_RULE_LIST_CACHES.with(|caches| {
+        let mut caches = caches.borrow_mut();
+        let Some(cache) = caches.get_mut(&id) else {
+            return Vec::new();
         };
-        if let Some(rule) = flattened
-            .get_index(scope, value_index)
-            .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())
-        {
-            entries.push((index, rule));
-        }
-    }
-    entries.sort_unstable_by_key(|(index, _)| *index);
-    entries
+        let mut entries = Vec::with_capacity(cache.len());
+        cache.retain(|index, rule| {
+            let Some(rule) = rule.to_local(scope) else {
+                return false;
+            };
+            entries.push((*index, rule));
+            true
+        });
+        note_css_rule_list_materialized_traversal(entries.len());
+        entries
+    })
 }
 
 pub(crate) fn set_css_rule_list_materialized_rule<'s>(
@@ -312,9 +341,12 @@ pub(crate) fn set_css_rule_list_materialized_rule<'s>(
     index: u32,
     rule: v8::Local<'s, v8::Object>,
 ) {
-    let items = css_rule_list_materialized_items(scope, list);
-    let key = v8::Integer::new_from_unsigned(scope, index);
-    let _ = items.set(scope, key.into(), rule.into());
+    let id = ensure_css_rule_list_cache(scope, list);
+    CSS_RULE_LIST_CACHES.with(|caches| {
+        if let Some(cache) = caches.borrow_mut().get_mut(&id) {
+            cache.insert(index, v8::Weak::new(scope, rule));
+        }
+    });
 }
 
 pub(crate) fn insert_css_rule_list_unmaterialized_rule<'s>(
@@ -337,9 +369,13 @@ pub(crate) fn delete_css_rule_list_materialized_rule<'s>(
     list: v8::Local<'s, v8::Object>,
     index: u32,
 ) {
-    let items = css_rule_list_materialized_items(scope, list);
-    let key = v8::Integer::new_from_unsigned(scope, index);
-    let _ = items.delete(scope, key.into());
+    if let Some(id) = css_rule_list_cache_id(scope, list) {
+        CSS_RULE_LIST_CACHES.with(|caches| {
+            if let Some(cache) = caches.borrow_mut().get_mut(&id) {
+                cache.remove(&index);
+            }
+        });
+    }
 }
 
 pub(crate) fn css_rule_list_item<'s>(

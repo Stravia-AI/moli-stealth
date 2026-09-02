@@ -137,7 +137,7 @@ pub const CSS_RULE_LIST_BRAND_SLOT: &str = "__moliCssRuleListBrand";
 
 pub const CSS_RULE_LIST_LENGTH_SLOT: &str = "__moliCssRuleListLength";
 
-pub const CSS_RULE_LIST_MATERIALIZED_ITEMS_SLOT: &str = "__moliCssRuleListMaterializedItems";
+pub const CSS_RULE_LIST_CACHE_ID_SLOT: &str = "__moliCssRuleListCacheId";
 
 pub const CSS_RULE_LIST_DETACHED_SNAPSHOTS_SLOT: &str = "__moliCssRuleListDetachedSnapshots";
 
