@@ -382,6 +382,16 @@ impl TestContext {
             .expect("test message must be a valid serialisable CDP command");
         let command_id = command.request().id();
         let session_id = command.request().session_id().map(str::to_owned);
+        let command_awaits_promise = match command.request().method() {
+            "Runtime.awaitPromise" => true,
+            "Runtime.evaluate" | "Runtime.callFunctionOn" | "Runtime.runScript" => command
+                .request()
+                .params()
+                .and_then(|params| params.get("awaitPromise"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            _ => false,
+        };
         let response_start = self.sent.len();
         Box::pin(self.process_parsed_command_like_scheduler(&command, true)).await;
         Box::pin(self.route_ready_test_command_response(command_id, response_start)).await;
@@ -389,6 +399,10 @@ impl TestContext {
             .conn
             .renderer_runtime_command_cause_for_frontend(session_id.as_deref(), command_id)
             .is_some()
+            && !(command_awaits_promise
+                && self
+                    .conn
+                    .has_pending_inspector_awaits_for_session_owner(session_id.as_deref()))
             && !self
                 .pending_runtime_deferred_replies
                 .iter()

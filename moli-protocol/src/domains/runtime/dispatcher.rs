@@ -480,6 +480,9 @@ struct RuntimeBindingCommandTask {
     execution_context_id: Option<i64>,
     inspector_json: Option<String>,
     command_response: Option<RuntimeBindingCommandResponse>,
+    response_delivery: RendererInspectorResponseDelivery,
+    session_response_predecessor: Option<moli_core::RendererOutputFence>,
+    session_response_succeeded: Option<bool>,
     should_persist: bool,
     skip_live_page_update_after_inspector_success: bool,
 }
@@ -1026,11 +1029,7 @@ fn start_main_runtime_inspector_command_for_owner(
         cmd,
         &owner_scope,
         inspector_json,
-        if await_promise {
-            RendererInspectorResponseDelivery::CommandReply
-        } else {
-            cmd.terminal_response_delivery(RendererInspectorResponseDelivery::DevToolsSession)
-        },
+        cmd.terminal_response_delivery(RendererInspectorResponseDelivery::DevToolsSession),
     ) {
         Ok(pending) => pending,
         Err(message) => {
@@ -1179,7 +1178,7 @@ pub(crate) fn start_heap_profiler_inspector_command_dispatch(
         cmd,
         &owner_scope,
         cmd.json.to_owned(),
-        RendererInspectorResponseDelivery::CommandReply,
+        cmd.terminal_response_delivery(RendererInspectorResponseDelivery::DevToolsSession),
     ) {
         Ok(pending) => pending,
         Err(message) => {
@@ -1794,6 +1793,10 @@ fn try_start_pending_runtime_binding_command(
         execution_context_id,
         inspector_json: Some(cmd.json.to_owned()),
         command_response: None,
+        response_delivery: cmd
+            .terminal_response_delivery(RendererInspectorResponseDelivery::DevToolsSession),
+        session_response_predecessor: None,
+        session_response_succeeded: None,
         should_persist,
         skip_live_page_update_after_inspector_success: false,
     };
@@ -1835,19 +1838,22 @@ fn try_start_pending_runtime_binding_command(
     }
     let action_label = action.label();
     let pending = match action {
-        RuntimeBindingCommand::Add => start_pending_runtime_context_resolved_inspector_dispatch(
-            conn,
-            cmd,
-            &owner_scope,
-            action_label,
-            cmd.json.to_owned(),
-        ),
+        RuntimeBindingCommand::Add => {
+            start_pending_runtime_context_resolved_inspector_dispatch_with_delivery(
+                conn,
+                cmd,
+                &owner_scope,
+                action_label,
+                cmd.json.to_owned(),
+                task.response_delivery,
+            )
+        }
         RuntimeBindingCommand::Remove => start_pending_runtime_inspector_dispatch_with_delivery(
             conn,
             cmd,
             &owner_scope,
             cmd.json.to_owned(),
-            RendererInspectorResponseDelivery::CommandReply,
+            task.response_delivery,
         ),
     };
     let pending = match pending {
@@ -1922,23 +1928,6 @@ fn start_pending_runtime_io_inspector_dispatch(
     } else {
         conn.start_runtime_io_protocol_message_for_owner(owner, inspector_json)
     }
-}
-
-fn start_pending_runtime_context_resolved_inspector_dispatch(
-    conn: &mut CdpConnection,
-    cmd: &Cmd<'_>,
-    owner: &CommandOwnerScope,
-    action: &'static str,
-    inspector_json: String,
-) -> Result<PendingRuntimeProtocolMessageDispatch, String> {
-    start_pending_runtime_context_resolved_inspector_dispatch_with_delivery(
-        conn,
-        cmd,
-        owner,
-        action,
-        inspector_json,
-        RendererInspectorResponseDelivery::CommandReply,
-    )
 }
 
 fn start_pending_runtime_context_resolved_inspector_dispatch_with_delivery(
@@ -2080,11 +2069,7 @@ fn start_cdp_devtools_script_runtime_command(
         command,
         inspector_json,
         await_promise,
-        if await_promise {
-            RendererInspectorResponseDelivery::CommandReply
-        } else {
-            cmd.terminal_response_delivery(RendererInspectorResponseDelivery::DevToolsSession)
-        },
+        cmd.terminal_response_delivery(RendererInspectorResponseDelivery::DevToolsSession),
     )
 }
 
@@ -7665,7 +7650,7 @@ fn start_pending_runtime_binding_inspector_phase(
                 let descriptor = RendererCommandDescriptor::from_frontend_policy(
                     inspector_json,
                     task.renderer_policy,
-                    RendererInspectorResponseDelivery::CommandReply,
+                    task.response_delivery,
                 );
                 conn.start_runtime_protocol_message_with_context_resolution_for_owner_with_deferred_response(
                     &completed.owner_scope,
@@ -7686,7 +7671,7 @@ fn start_pending_runtime_binding_inspector_phase(
                 let descriptor = RendererCommandDescriptor::from_frontend_policy(
                     inspector_json,
                     task.renderer_policy,
-                    RendererInspectorResponseDelivery::CommandReply,
+                    task.response_delivery,
                 );
                 conn.start_runtime_protocol_message_for_owner_with_deferred_response(
                     &completed.owner_scope,
@@ -8339,7 +8324,8 @@ async fn complete_pending_runtime_inspector_command(
             saw_current_response,
         );
     }
-    if completed.wait_for_deferred_reply
+    if response_delivery == RendererInspectorResponseDelivery::CommandReply
+        && completed.wait_for_deferred_reply
         && (renderer_response_rx.is_some() || !saw_current_response)
         && completed.command_id.is_some()
     {
@@ -8659,19 +8645,50 @@ async fn complete_pending_runtime_binding_inspector_command(
     completed_inspector: Result<CompletedRuntimeProtocolMessageDispatch, String>,
     response_flush: &crate::conn::CommandResponseFlushContext,
 ) -> RuntimeCommandTaskStep {
-    let (messages, mut renderer_response_rx) = match completed_inspector {
+    let (
+        messages,
+        mut renderer_response_rx,
+        response_delivery,
+        session_response_predecessor,
+        session_response_succeeded,
+    ) = match completed_inspector {
         Ok(mut completed_protocol) => {
+            let response_delivery = completed_protocol.response_delivery();
+            let session_response_predecessor = completed_protocol.session_response_predecessor();
+            let session_response_succeeded = completed_protocol.session_response_succeeded();
             let renderer_response_rx = completed_protocol.take_deferred_response_receiver();
             match conn
                 .complete_runtime_protocol_message_async(completed_protocol)
                 .await
             {
-                Ok(messages) => (messages, renderer_response_rx),
+                Ok(messages) => (
+                    messages,
+                    renderer_response_rx,
+                    response_delivery,
+                    session_response_predecessor,
+                    session_response_succeeded,
+                ),
                 Err(message) => {
-                    return RuntimeCommandTaskStep::Complete(runtime_inspector_error_plan(
-                        completed.command_id,
-                        message,
-                    ));
+                    if session_response_succeeded.is_some() {
+                        tracing::warn!(
+                            command_id = completed.command_id,
+                            session_id = completed.session_id(),
+                            error = %message,
+                            "could not apply Runtime binding browser projection after the renderer session settled the terminal response"
+                        );
+                        (
+                            None,
+                            renderer_response_rx,
+                            response_delivery,
+                            session_response_predecessor,
+                            session_response_succeeded,
+                        )
+                    } else {
+                        return RuntimeCommandTaskStep::Complete(runtime_inspector_error_plan(
+                            completed.command_id,
+                            message,
+                        ));
+                    }
                 }
             }
         }
@@ -8682,6 +8699,11 @@ async fn complete_pending_runtime_binding_inspector_command(
             ));
         }
     };
+    debug_assert_eq!(response_delivery, task.response_delivery);
+    if let Some(predecessor) = session_response_predecessor {
+        predecessor.merge_into_same_stream_tail(&mut task.session_response_predecessor);
+    }
+    task.session_response_succeeded = session_response_succeeded;
     let mut routed_output = RuntimeInspectorRoutedOutput::default();
     let saw_current_response = if let Some(messages) = messages {
         route_renderer_command_turn_output_into_routed_output(
@@ -8699,7 +8721,12 @@ async fn complete_pending_runtime_binding_inspector_command(
     if saw_current_response {
         renderer_response_rx.take();
     }
-    if let Some(renderer_response_rx) = renderer_response_rx {
+    if response_delivery == RendererInspectorResponseDelivery::DevToolsSession {
+        renderer_response_rx.take();
+    }
+    if response_delivery == RendererInspectorResponseDelivery::CommandReply
+        && let Some(renderer_response_rx) = renderer_response_rx
+    {
         route_registered_runtime_response_receiver_into(
             conn,
             completed.command_id,
@@ -8709,11 +8736,13 @@ async fn complete_pending_runtime_binding_inspector_command(
         )
         .await;
     }
-    record_runtime_binding_command_response_from_routed_events(
-        &mut task,
-        routed_output.events(),
-        completed.command_id,
-    );
+    if response_delivery == RendererInspectorResponseDelivery::CommandReply {
+        record_runtime_binding_command_response_from_routed_events(
+            &mut task,
+            routed_output.events(),
+            completed.command_id,
+        );
+    }
     if routed_output.background_event_count() > 0 {
         tracing::debug!(
             events = routed_output.background_event_count(),
@@ -8815,6 +8844,12 @@ fn complete_runtime_binding_after_live_update(
 
 fn runtime_binding_output_plan(task: RuntimeBindingCommandTask) -> CommandOutputPlan {
     let mut plan = CommandOutputPlan::default();
+    if let Some(predecessor) = task.session_response_predecessor {
+        plan.set_renderer_output_predecessor(predecessor);
+    }
+    if task.session_response_succeeded.is_some() {
+        return plan;
+    }
     match task.command_response {
         Some(response) => response.push_into_plan(&mut plan),
         None => plan.push_error(-32000, "MissingRuntimeBindingCommandResponse"),
@@ -8865,6 +8900,9 @@ fn record_runtime_binding_command_response_from_routed_events(
 }
 
 fn runtime_binding_command_response_succeeded(task: &RuntimeBindingCommandTask) -> bool {
+    if let Some(succeeded) = task.session_response_succeeded {
+        return succeeded;
+    }
     task.command_response
         .as_ref()
         .is_some_and(RuntimeBindingCommandResponse::succeeded)
@@ -9198,11 +9236,8 @@ fn start_pending_shared_worker_runtime_inspector_command(
         action.label(),
     )
     .map_err(|error| error.to_string())?;
-    let response_delivery = if await_promise {
-        RendererInspectorResponseDelivery::CommandReply
-    } else {
-        cmd.terminal_response_delivery(RendererInspectorResponseDelivery::DevToolsSession)
-    };
+    let response_delivery =
+        cmd.terminal_response_delivery(RendererInspectorResponseDelivery::DevToolsSession);
     let pending = match start_shared_worker_frontend_inspector_dispatch(
         conn,
         cmd,
@@ -9270,11 +9305,8 @@ fn start_pending_service_worker_runtime_inspector_command(
         action.label(),
     )
     .map_err(|error| error.to_string())?;
-    let response_delivery = if await_promise {
-        RendererInspectorResponseDelivery::CommandReply
-    } else {
-        cmd.terminal_response_delivery(RendererInspectorResponseDelivery::DevToolsSession)
-    };
+    let response_delivery =
+        cmd.terminal_response_delivery(RendererInspectorResponseDelivery::DevToolsSession);
     let pending = match start_service_worker_frontend_inspector_dispatch(
         conn,
         cmd,
@@ -9442,6 +9474,12 @@ async fn complete_pending_shared_worker_runtime_inspector_command(
     ) = match completed_inspector {
         Ok(mut completed_protocol) => {
             let response_delivery = completed_protocol.response_delivery();
+            if response_delivery == RendererInspectorResponseDelivery::DevToolsSession
+                && !completed.await_promise
+                && let Err(message) = completed_protocol.wait_for_session_response().await
+            {
+                return complete_shared_worker_runtime_inspector_error(conn, completed, message);
+            }
             let session_response_predecessor = completed_protocol.session_response_predecessor();
             let session_response_succeeded = completed_protocol.session_response_succeeded();
             let renderer_response_rx = completed_protocol.take_deferred_response_receiver();
@@ -9519,6 +9557,18 @@ async fn complete_pending_shared_worker_runtime_inspector_command(
             routed_output,
             renderer_response_rx,
         );
+    }
+    if response_delivery == RendererInspectorResponseDelivery::DevToolsSession
+        && completed.await_promise
+        && session_response_succeeded.is_none()
+    {
+        // The Worker accepted an asynchronous Inspector command. Its terminal
+        // response now belongs exclusively to the Worker target journal and
+        // may arrive on a later turn; releasing this command here lets the
+        // same or another DevTools session continue driving the worker.
+        routed_output
+            .push_background_events_before_response_events(&mut plan, completed.command_id);
+        return RuntimeCommandTaskStep::Complete(plan);
     }
     let succeeded = session_response_succeeded
         .unwrap_or_else(|| routed_output.command_response_succeeded(completed.command_id));
@@ -9613,6 +9663,12 @@ async fn complete_pending_service_worker_runtime_inspector_command(
     ) = match completed_inspector {
         Ok(mut completed_protocol) => {
             let response_delivery = completed_protocol.response_delivery();
+            if response_delivery == RendererInspectorResponseDelivery::DevToolsSession
+                && !completed.await_promise
+                && let Err(message) = completed_protocol.wait_for_session_response().await
+            {
+                return complete_service_worker_runtime_inspector_error(conn, completed, message);
+            }
             let session_response_predecessor = completed_protocol.session_response_predecessor();
             let session_response_succeeded = completed_protocol.session_response_succeeded();
             let renderer_response_rx = completed_protocol.take_deferred_response_receiver();
@@ -9690,6 +9746,14 @@ async fn complete_pending_service_worker_runtime_inspector_command(
             routed_output,
             renderer_response_rx,
         );
+    }
+    if response_delivery == RendererInspectorResponseDelivery::DevToolsSession
+        && completed.await_promise
+        && session_response_succeeded.is_none()
+    {
+        routed_output
+            .push_background_events_before_response_events(&mut plan, completed.command_id);
+        return RuntimeCommandTaskStep::Complete(plan);
     }
     let succeeded = session_response_succeeded
         .unwrap_or_else(|| routed_output.command_response_succeeded(completed.command_id));

@@ -445,6 +445,7 @@ struct CompletedWorkerRuntimeProtocolDispatch {
     messages: Vec<RendererRuntimeInspectorMessage>,
     session_response_predecessor: Option<RendererOutputFence>,
     session_response_succeeded: Option<bool>,
+    pending_session_response: Option<moli_core::page::PendingWorkerRuntimeInspectorSessionResponse>,
 }
 
 impl CompletedWorkerRuntimeProtocolDispatch {
@@ -453,18 +454,30 @@ impl CompletedWorkerRuntimeProtocolDispatch {
             messages,
             session_response_predecessor: None,
             session_response_succeeded: None,
+            pending_session_response: None,
         }
     }
 
     fn devtools_session(
         completed: moli_core::page::CompletedWorkerRuntimeInspectorCommandDispatch,
     ) -> Self {
-        let (messages, predecessor, response_succeeded) = completed.into_parts();
+        let (messages, pending_session_response) = completed.into_parts();
         Self {
             messages,
-            session_response_predecessor: Some(predecessor),
-            session_response_succeeded: Some(response_succeeded),
+            session_response_predecessor: None,
+            session_response_succeeded: None,
+            pending_session_response: Some(pending_session_response),
         }
+    }
+
+    async fn wait_for_session_response(&mut self) -> Result<(), String> {
+        let Some(pending) = self.pending_session_response.take() else {
+            return Ok(());
+        };
+        let (predecessor, response_succeeded) = pending.wait().await?;
+        self.session_response_predecessor = Some(predecessor);
+        self.session_response_succeeded = Some(response_succeeded);
+        Ok(())
     }
 }
 
@@ -693,6 +706,10 @@ impl CompletedRuntimeProtocolMessageDispatch {
 }
 
 impl CompletedSharedWorkerRuntimeProtocolMessageDispatch {
+    pub(crate) async fn wait_for_session_response(&mut self) -> Result<(), String> {
+        self.dispatch.wait_for_session_response().await
+    }
+
     pub(crate) fn take_deferred_response_receiver(
         &mut self,
     ) -> Option<RuntimeInspectorResponseReceiver> {
@@ -713,6 +730,10 @@ impl CompletedSharedWorkerRuntimeProtocolMessageDispatch {
 }
 
 impl CompletedServiceWorkerRuntimeProtocolMessageDispatch {
+    pub(crate) async fn wait_for_session_response(&mut self) -> Result<(), String> {
+        self.dispatch.wait_for_session_response().await
+    }
+
     pub(crate) fn take_deferred_response_receiver(
         &mut self,
     ) -> Option<RuntimeInspectorResponseReceiver> {
@@ -1053,6 +1074,27 @@ impl CdpConnection {
             );
         }
         self.target_devtools_session_state_for_session(session_id)?
+            .renderer_command_descriptor_for_renderer_if_attachment_matches(
+                renderer_call_id,
+                dispatched_attachment_id,
+            )
+    }
+
+    fn renderer_command_descriptor_for_renderer_if_attachment_matches_for_owner(
+        &self,
+        owner: &CommandOwnerScope,
+        renderer_call_id: RendererCallId,
+        dispatched_attachment_id: Option<RendererAgentAttachmentId>,
+    ) -> Option<RendererCommandDescriptor> {
+        if owner.session_id().is_some() {
+            return self
+                .renderer_command_descriptor_for_renderer_if_attachment_matches_for_session_owner(
+                    owner.session_id(),
+                    renderer_call_id,
+                    dispatched_attachment_id,
+                );
+        }
+        self.target_devtools_session_state_for_owner(owner)?
             .renderer_command_descriptor_for_renderer_if_attachment_matches(
                 renderer_call_id,
                 dispatched_attachment_id,
@@ -3640,73 +3682,22 @@ impl CdpConnection {
         }
     }
 
-    /// Resolves terminal responses carried by the renderer's concrete
-    /// DevTools session output stream.
+    /// Resolves terminal responses carried by a concrete renderer DevTools
+    /// session stream.
     ///
-    /// Notifications have no renderer call id and remain in place. A response
-    /// without an exact `(session, attachment, renderer call)` registration is
-    /// stale and must not expose the renderer-private id on the wire.
-    pub(crate) fn restore_frontend_command_ids_in_devtools_session_output(
+    /// The command owner, renderer call id, and attachment id form the complete
+    /// response authority. Document observations are validated separately, so
+    /// a response that won its lease immediately before a navigation can still
+    /// settle the session without granting the retired document permission to
+    /// publish notifications or mutate replacement-document state.
+    pub(crate) fn restore_frontend_command_ids_in_devtools_session_output_for_owner(
         &mut self,
-        session_id: Option<&str>,
-        dispatched_attachment_id: RendererAgentAttachmentId,
-        messages: &mut Vec<RendererRuntimeInspectorMessage>,
-    ) {
-        self.restore_frontend_command_ids_in_devtools_session_output_with_projection(
-            session_id,
-            Some(dispatched_attachment_id),
-            messages,
-            true,
-        );
-    }
-
-    /// Resolves terminal responses carried by a Worker target's concrete
-    /// renderer output stream. Worker Inspector sessions do not use a Page
-    /// attachment id; the exact worker session lifetime is validated by the
-    /// prepared-output authority at the same ingress boundary.
-    pub(crate) fn restore_frontend_command_ids_in_worker_devtools_session_output(
-        &mut self,
-        session_id: &str,
-        messages: &mut Vec<RendererRuntimeInspectorMessage>,
-    ) {
-        self.restore_frontend_command_ids_in_devtools_session_output_with_projection(
-            Some(session_id),
-            None,
-            messages,
-            true,
-        );
-    }
-
-    /// Resolves a terminal response which won its renderer response lease
-    /// before navigation, but whose old Page journal reached protocol ingress
-    /// after the replacement attachment committed.
-    ///
-    /// The exact `(session, renderer call, attachment)` correlation remains
-    /// the terminal authority in this race.  Notifications and V8 state from
-    /// the retired attachment are discarded by the caller, and remote-object
-    /// ownership is intentionally not projected onto the replacement
-    /// document.
-    pub(crate) fn restore_frontend_command_ids_in_retired_devtools_session_output(
-        &mut self,
-        session_id: Option<&str>,
-        dispatched_attachment_id: RendererAgentAttachmentId,
-        messages: &mut Vec<RendererRuntimeInspectorMessage>,
-    ) {
-        self.restore_frontend_command_ids_in_devtools_session_output_with_projection(
-            session_id,
-            Some(dispatched_attachment_id),
-            messages,
-            false,
-        );
-    }
-
-    fn restore_frontend_command_ids_in_devtools_session_output_with_projection(
-        &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         dispatched_attachment_id: Option<RendererAgentAttachmentId>,
         messages: &mut Vec<RendererRuntimeInspectorMessage>,
         project_runtime_object_ownership: bool,
     ) {
+        let session_id = owner.session_id().map(str::to_owned);
         messages.retain_mut(|message| {
             let RendererRuntimeInspectorMessage::Protocol(message) = message else {
                 return true;
@@ -3715,46 +3706,50 @@ impl CdpConnection {
                 return true;
             };
             let descriptor = self
-                .renderer_command_descriptor_for_renderer_if_attachment_matches_for_session_owner(
-                    session_id,
+                .renderer_command_descriptor_for_renderer_if_attachment_matches_for_owner(
+                    owner,
                     renderer_call_id,
                     dispatched_attachment_id,
                 );
             let result_object_group = descriptor.as_ref().and_then(|descriptor| {
                 self.runtime_result_object_group_for_renderer_command_descriptor(
-                    session_id, descriptor,
+                    session_id.as_deref(),
+                    descriptor,
                 )
             });
             let Some(correlation) = self
-                .take_frontend_command_for_renderer_if_attachment_matches_for_session_owner(
-                    session_id,
+                .take_frontend_command_for_renderer_if_attachment_matches_for_owner(
+                    owner,
                     renderer_call_id,
                     dispatched_attachment_id,
                 )
             else {
                 tracing::debug!(
-                    session_id,
+                    session_id = session_id.as_deref(),
                     renderer_call_id = renderer_call_id.get(),
                     attachment_id = ?dispatched_attachment_id.map(RendererAgentAttachmentId::get),
                     "dropping DevTools session response without a live renderer correlation"
                 );
                 return false;
             };
-            message.value_mut()["id"] = json!(correlation.frontend_command_id().get());
+            let frontend_command_id = correlation.frontend_command_id().get();
+            message.value_mut()["id"] = json!(frontend_command_id);
             if project_runtime_object_ownership && message.value().get("result").is_some() {
                 if let Some(object_group) = result_object_group.as_deref() {
-                    self.register_runtime_remote_object_ids_from_value_for_session_owner_with_group(
-                        session_id,
+                    self.register_runtime_remote_object_ids_from_value_for_owner_with_group(
+                        owner,
                         message.value(),
                         object_group,
                     );
                 } else {
-                    self.register_runtime_remote_object_ids_from_value_for_session_owner(
-                        session_id,
+                    self.register_runtime_remote_object_ids_from_value_for_owner(
+                        owner,
                         message.value(),
                     );
                 }
             }
+            self.complete_runtime_await_job(frontend_command_id, session_id.as_deref());
+            let _ = self.remove_pending_inspector_await_for_owner(frontend_command_id, owner);
             true
         });
     }
@@ -5653,8 +5648,11 @@ impl CdpConnection {
             return;
         };
         debug_assert_eq!(resolved, correlation);
+        let frontend_command_id = resolved.frontend_command_id().get();
+        self.complete_runtime_await_job(frontend_command_id, frontend_session_id);
+        let _ = self.remove_pending_inspector_await(frontend_command_id, frontend_session_id);
         let mut response = json!({
-            "id": resolved.frontend_command_id().get(),
+            "id": frontend_command_id,
             "error": {
                 "code": -32000,
                 "message": message,
@@ -7210,10 +7208,11 @@ mod tests {
         };
 
         let mut stale_messages = vec![response()];
-        conn.restore_frontend_command_ids_in_devtools_session_output(
-            Some("SID-attachment-race"),
-            stale_attachment,
+        conn.restore_frontend_command_ids_in_devtools_session_output_for_owner(
+            &CommandOwnerScope::for_session("SID-attachment-race"),
+            Some(stale_attachment),
             &mut stale_messages,
+            true,
         );
         assert!(
             stale_messages.is_empty(),
@@ -7226,10 +7225,11 @@ mod tests {
         );
 
         let mut live_messages = vec![response()];
-        conn.restore_frontend_command_ids_in_devtools_session_output(
-            Some("SID-attachment-race"),
-            live_attachment,
+        conn.restore_frontend_command_ids_in_devtools_session_output_for_owner(
+            &CommandOwnerScope::for_session("SID-attachment-race"),
+            Some(live_attachment),
             &mut live_messages,
+            true,
         );
         let [RendererRuntimeInspectorMessage::Protocol(message)] = live_messages.as_slice() else {
             panic!("the live attachment must publish exactly one response");
@@ -7269,10 +7269,11 @@ mod tests {
             })),
         ];
 
-        conn.restore_frontend_command_ids_in_devtools_session_output(
-            Some("SID-duplicate-response"),
-            attachment_id,
+        conn.restore_frontend_command_ids_in_devtools_session_output_for_owner(
+            &CommandOwnerScope::for_session("SID-duplicate-response"),
+            Some(attachment_id),
             &mut messages,
+            true,
         );
 
         let [RendererRuntimeInspectorMessage::Protocol(message)] = messages.as_slice() else {
@@ -7320,10 +7321,11 @@ mod tests {
             })),
         ];
 
-        conn.restore_frontend_command_ids_in_devtools_session_output(
-            Some("SID-interleaved-response"),
-            attachment_id,
+        conn.restore_frontend_command_ids_in_devtools_session_output_for_owner(
+            &CommandOwnerScope::for_session("SID-interleaved-response"),
+            Some(attachment_id),
             &mut messages,
+            true,
         );
 
         assert_eq!(messages.len(), 3);
@@ -7395,10 +7397,11 @@ mod tests {
             })),
         ];
 
-        conn.restore_frontend_command_ids_in_devtools_session_output(
-            Some("SID-session-output"),
-            attachment_id,
+        conn.restore_frontend_command_ids_in_devtools_session_output_for_owner(
+            &CommandOwnerScope::for_session("SID-session-output"),
+            Some(attachment_id),
             &mut messages,
+            true,
         );
 
         assert_eq!(
@@ -7472,10 +7475,11 @@ mod tests {
                 }]
             },
         }))];
-        conn.restore_frontend_command_ids_in_devtools_session_output(
-            session_id,
-            attachment_id,
+        conn.restore_frontend_command_ids_in_devtools_session_output_for_owner(
+            &CommandOwnerScope::for_session("SID-session-projection"),
+            Some(attachment_id),
             &mut messages,
+            true,
         );
         assert_eq!(
             conn.runtime_remote_object_group_for_session_owner(session_id, "nested-child-object",),

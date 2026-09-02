@@ -1858,7 +1858,8 @@ async fn protocol_neutral_await_promise_keeps_background_owner_route_across_pend
 
 #[tokio::test]
 async fn pending_runtime_binding_page_phase_keeps_background_owner_route_across_completion() {
-    let mut conn = CdpConnection::new();
+    let mut ctx = crate::testing::TestContext::from_conn(CdpConnection::new());
+    let conn = &mut ctx.conn;
     let context = DevToolsCommandContext {
         protocol: DevToolsProtocol::WebDriverBidi,
         session_id: Some(DevToolsSessionId::from("bidi-binding-owner-route")),
@@ -1868,7 +1869,7 @@ async fn pending_runtime_binding_page_phase_keeps_background_owner_route_across_
 
     let (first_result, _) =
         crate::domains::target::execute_immediate_devtools_target_command_with_protocol_events(
-            &mut conn,
+            conn,
             DevToolsCommand::CreateTarget(DevToolsCreateTargetCommand {
                 context: context.clone(),
                 url: "about:blank".to_owned(),
@@ -1882,7 +1883,7 @@ async fn pending_runtime_binding_page_phase_keeps_background_owner_route_across_
         panic!("expected create target result");
     };
     let first_target_id = first_result.target_id;
-    ensure_initial_document_for_target_id_for_test(&mut conn, &first_target_id).await;
+    ensure_initial_document_for_target_id_for_test(conn, &first_target_id).await;
 
     let (second_result, _) = conn
         .execute_devtools_command(DevToolsCommand::CreateTarget(DevToolsCreateTargetCommand {
@@ -1899,7 +1900,7 @@ async fn pending_runtime_binding_page_phase_keeps_background_owner_route_across_
         panic!("expected create target result");
     };
     let second_target_id = second_result.target_id;
-    ensure_initial_document_for_target_id_for_test(&mut conn, &second_target_id).await;
+    ensure_initial_document_for_target_id_for_test(conn, &second_target_id).await;
 
     let first_context = DevToolsCommandContext {
         target_id: Some(first_target_id.clone()),
@@ -1911,7 +1912,7 @@ async fn pending_runtime_binding_page_phase_keeps_background_owner_route_across_
     };
     assert_eq!(
         evaluate_string_for_test(
-            &mut conn,
+            conn,
             first_context,
             "globalThis.__bindingOwnerProbe = 'active'; globalThis.__bindingOwnerProbe",
             "active binding owner marker",
@@ -1921,7 +1922,7 @@ async fn pending_runtime_binding_page_phase_keeps_background_owner_route_across_
     );
     assert_eq!(
         evaluate_string_for_test(
-            &mut conn,
+            conn,
             second_context,
             "globalThis.__bindingOwnerProbe = 'background'; globalThis.__bindingOwnerProbe",
             "background binding owner marker",
@@ -1931,25 +1932,15 @@ async fn pending_runtime_binding_page_phase_keeps_background_owner_route_across_
     );
 
     let background_session =
-        attach_page_session_for_test(&mut conn, second_target_id.as_str()).await;
-    let raw = serde_json::to_string(&json!({
+        attach_page_session_for_test(&mut ctx.conn, second_target_id.as_str()).await;
+    ctx.process_and_wait_for_response_async(json!({
         "id": 1269,
         "method": "Runtime.addBinding",
         "params": { "name": "backgroundRouteBinding" },
-        "sessionId": background_session
+        "sessionId": background_session.clone()
     }))
-    .unwrap();
-    let pending = match conn.start_command_dispatch(&raw) {
-        CdpCommandTaskStep::Pending(pending) => pending,
-        CdpCommandTaskStep::Complete(outcome) => {
-            panic!(
-                "background Runtime.addBinding should pend through renderer binding state apply: {:?}",
-                outcome.into_parts().0
-            )
-        }
-    };
-
-    let messages = complete_command_task_for_test(&mut conn, *pending).await;
+    .await;
+    let messages = ctx.take_all();
     assert!(
         messages
             .iter()
@@ -1957,7 +1948,8 @@ async fn pending_runtime_binding_page_phase_keeps_background_owner_route_across_
         "Runtime.addBinding should complete successfully on the original background owner: {messages:?}"
     );
     assert!(
-        conn.target_devtools_session_state_for_session(None)
+        ctx.conn
+            .target_devtools_session_state_for_session(None)
             .is_none_or(|state| state
                 .runtime_bindings
                 .iter()
@@ -1965,7 +1957,8 @@ async fn pending_runtime_binding_page_phase_keeps_background_owner_route_across_
         "binding state apply completion must not write the active owner"
     );
     assert!(
-        conn.target_devtools_session_state_for_session(Some(&background_session))
+        ctx.conn
+            .target_devtools_session_state_for_session(Some(&background_session))
             .is_some_and(|state| state
                 .runtime_bindings
                 .iter()
@@ -1973,7 +1966,8 @@ async fn pending_runtime_binding_page_phase_keeps_background_owner_route_across_
         "binding state apply completion should persist on the original background owner"
     );
     assert_eq!(
-        conn.browser_context
+        ctx.conn
+            .browser_context
             .as_ref()
             .expect("browser context")
             .active_target_id(),
