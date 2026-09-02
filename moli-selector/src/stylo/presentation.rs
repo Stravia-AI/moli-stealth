@@ -21,7 +21,7 @@ use style::{
         specified::{LengthPercentage, NoCalcLength, NoCalcPercentage},
     },
 };
-use style_traits::ParsingMode;
+use style_traits::{ParsingMode, ToCss};
 
 use crate::dom::native::Element;
 
@@ -126,10 +126,8 @@ impl QueryElement<'_> {
                     &mut block,
                 );
             }
-        } else if element.namespace() == HTML_NAMESPACE
-            && matches!(element.local_name(), "td" | "th")
-        {
-            append_html_table_cell_padding_declarations(*self, &mut block);
+        } else if element.namespace() == HTML_NAMESPACE {
+            append_html_table_presentation_declarations(*self, &mut block);
         } else {
             return;
         }
@@ -142,6 +140,288 @@ impl QueryElement<'_> {
             ));
         }
     }
+}
+
+fn append_html_table_presentation_declarations(
+    element: QueryElement<'_>,
+    block: &mut PropertyDeclarationBlock,
+) {
+    let native = element.element();
+    let local_name = native.local_name();
+    if local_name == "table" {
+        if let Some(width) = native
+            .attribute("width")
+            .and_then(|value| parse_html_dimension(value, true, false))
+        {
+            use style::values::generics::length::Size;
+            block.push(
+                PropertyDeclaration::Width(Size::LengthPercentage(NonNegative(width))),
+                Importance::Normal,
+            );
+        }
+
+        if let Some(spacing) = native
+            .attribute("cellspacing")
+            .filter(|value| !value.is_empty())
+            .and_then(|value| parse_html_dimension(value, false, true))
+        {
+            append_parsed_presentation_declaration(
+                element,
+                "border-spacing",
+                &spacing.to_css_string(),
+                block,
+            );
+        }
+
+        if let Some(vertical_align) = native.attribute("valign").filter(|value| !value.is_empty()) {
+            append_parsed_presentation_declaration(
+                element,
+                "vertical-align",
+                vertical_align,
+                block,
+            );
+        }
+    }
+
+    if matches!(
+        local_name,
+        "table" | "thead" | "tbody" | "tfoot" | "tr" | "td" | "th"
+    ) && let Some(color) = native
+        .attribute("bgcolor")
+        .and_then(parse_html_legacy_color)
+    {
+        append_parsed_presentation_declaration(element, "background-color", &color, block);
+    }
+
+    if matches!(local_name, "thead" | "tbody" | "tfoot" | "tr" | "td" | "th") {
+        append_html_table_part_alignment_declarations(element, block);
+    }
+
+    if matches!(local_name, "td" | "th") {
+        append_html_table_cell_padding_declarations(element, block);
+    }
+}
+
+fn append_html_table_part_alignment_declarations(
+    element: QueryElement<'_>,
+    block: &mut PropertyDeclarationBlock,
+) {
+    let native = element.element();
+    if let Some(vertical_align) = native.attribute("valign") {
+        let vertical_align = match vertical_align.to_ascii_lowercase().as_str() {
+            "top" => "top",
+            "middle" => "middle",
+            "bottom" => "bottom",
+            "baseline" => "baseline",
+            _ => vertical_align,
+        };
+        append_parsed_presentation_declaration(element, "vertical-align", vertical_align, block);
+    }
+
+    if let Some(text_align) = native.attribute("align") {
+        let text_align = match text_align.to_ascii_lowercase().as_str() {
+            "middle" | "center" => "-moz-center",
+            "absmiddle" => "center",
+            "left" => "left",
+            "right" => "right",
+            _ => text_align,
+        };
+        append_parsed_presentation_declaration(element, "text-align", text_align, block);
+    }
+}
+
+fn append_parsed_presentation_declaration(
+    element: QueryElement<'_>,
+    property_name: &str,
+    value: &str,
+    block: &mut PropertyDeclarationBlock,
+) {
+    let Some(base_url) = element
+        .host()
+        .owner_document_handle(element.handle())
+        .and_then(|document| element.host().document_base_url_for_handle(document))
+    else {
+        return;
+    };
+    let Ok(property) = PropertyId::parse_enabled_for_all_content(property_name) else {
+        return;
+    };
+    let mut declarations = SourcePropertyDeclaration::default();
+    if parse_one_declaration_into(
+        &mut declarations,
+        property,
+        value,
+        Origin::Author,
+        &UrlExtraData::from(base_url),
+        None,
+        ParsingMode::DEFAULT,
+        element.read_quirks_mode(),
+        CssRuleType::Style,
+    )
+    .is_ok()
+    {
+        block.extend(declarations.drain(), Importance::Normal);
+    }
+}
+
+/// Parses the legacy HTML dimension grammar used by table attributes.
+///
+/// Blink accepts an initial run of ASCII digits, an optional fractional part,
+/// and then either `%` or arbitrary trailing garbage. A leading `+`, a leading
+/// decimal point, and percentage values in `cellspacing` remain invalid.
+fn parse_html_dimension(
+    value: &str,
+    allow_percentage: bool,
+    allow_zero: bool,
+) -> Option<LengthPercentage> {
+    let bytes = value.as_bytes();
+    let mut current = bytes
+        .iter()
+        .position(|byte| !is_html_space(*byte))
+        .unwrap_or(bytes.len());
+    let number_start = current;
+    if !bytes.get(current).is_some_and(u8::is_ascii_digit) {
+        return None;
+    }
+    current += 1;
+    while bytes.get(current).is_some_and(u8::is_ascii_digit) {
+        current += 1;
+    }
+    if bytes.get(current) == Some(&b'.') {
+        current += 1;
+        while bytes.get(current).is_some_and(u8::is_ascii_digit) {
+            current += 1;
+        }
+    }
+
+    let number = value[number_start..current].parse::<f64>().ok()?;
+    let number = number.min(f64::from(f32::MAX)) as f32;
+    if number == 0.0 && !allow_zero {
+        return None;
+    }
+    if bytes.get(current) == Some(&b'%') {
+        return allow_percentage
+            .then(|| LengthPercentage::Percentage(NoCalcPercentage::new(number / 100.0)));
+    }
+    Some(LengthPercentage::Length(NoCalcLength::from_px(number)))
+}
+
+fn is_html_space(byte: u8) -> bool {
+    matches!(byte, b'\t' | b'\n' | 0x0c | b'\r' | b' ')
+}
+
+/// Parses an HTML legacy color and returns an opaque CSS hex color.
+///
+/// This follows Blink's `ParseColorWithLegacyRules`: standard three/six digit
+/// hex and named colors win, while other non-empty values use HTML's historical
+/// replacement-and-component algorithm.
+fn parse_html_legacy_color(value: &str) -> Option<String> {
+    if value.is_empty() {
+        return None;
+    }
+    let value =
+        value.trim_matches(|character| matches!(character, '\t' | '\n' | '\u{000c}' | '\r' | ' '));
+    if value.eq_ignore_ascii_case("transparent") {
+        return None;
+    }
+
+    if let Some(color) = parse_short_or_long_hex_color(value) {
+        return Some(color);
+    }
+    if let Ok((red, green, blue)) = cssparser::color::parse_named_color(value) {
+        return Some(format!("#{red:02x}{green:02x}{blue:02x}"));
+    }
+
+    let mut digits = Vec::with_capacity(130);
+    let value = value.strip_prefix('#').unwrap_or(value);
+    for character in value.chars() {
+        for unit in 0..character.len_utf16() {
+            if digits.len() == 128 {
+                break;
+            }
+            digits.push(if unit == 0 && character.is_ascii_hexdigit() {
+                character as u8
+            } else {
+                b'0'
+            });
+        }
+        if digits.len() == 128 {
+            break;
+        }
+    }
+    if digits.is_empty() {
+        return Some("#000000".to_owned());
+    }
+
+    digits.extend_from_slice(b"00");
+    if digits.len() < 6 {
+        return Some(format!(
+            "#{:02x}{:02x}{:02x}",
+            hex_nibble(digits[0]),
+            hex_nibble(digits[1]),
+            hex_nibble(digits[2]),
+        ));
+    }
+
+    let component_length = digits.len() / 3;
+    let search_window = component_length.min(8);
+    let mut red = component_length - search_window;
+    let mut green = component_length * 2 - search_window;
+    let mut blue = component_length * 3 - search_window;
+    while digits[red] == b'0'
+        && digits[green] == b'0'
+        && digits[blue] == b'0'
+        && component_length - red > 2
+    {
+        red += 1;
+        green += 1;
+        blue += 1;
+    }
+    Some(format!(
+        "#{:02x}{:02x}{:02x}",
+        hex_byte(digits[red], digits[red + 1]),
+        hex_byte(digits[green], digits[green + 1]),
+        hex_byte(digits[blue], digits[blue + 1]),
+    ))
+}
+
+fn parse_short_or_long_hex_color(value: &str) -> Option<String> {
+    let digits = value.strip_prefix('#')?.as_bytes();
+    match digits {
+        [red, green, blue] if digits.iter().all(u8::is_ascii_hexdigit) => Some(format!(
+            "#{0:01x}{0:01x}{1:01x}{1:01x}{2:01x}{2:01x}",
+            hex_nibble(*red),
+            hex_nibble(*green),
+            hex_nibble(*blue),
+        )),
+        [
+            red_high,
+            red_low,
+            green_high,
+            green_low,
+            blue_high,
+            blue_low,
+        ] if digits.iter().all(u8::is_ascii_hexdigit) => Some(format!(
+            "#{:02x}{:02x}{:02x}",
+            hex_byte(*red_high, *red_low),
+            hex_byte(*green_high, *green_low),
+            hex_byte(*blue_high, *blue_low),
+        )),
+        _ => None,
+    }
+}
+
+fn hex_nibble(byte: u8) -> u8 {
+    match byte {
+        b'0'..=b'9' => byte - b'0',
+        b'a'..=b'f' => byte - b'a' + 10,
+        b'A'..=b'F' => byte - b'A' + 10,
+        _ => 0,
+    }
+}
+
+fn hex_byte(high: u8, low: u8) -> u8 {
+    hex_nibble(high) * 16 + hex_nibble(low)
 }
 
 fn append_root_svg_size_declarations(element: &Element, block: &mut PropertyDeclarationBlock) {
@@ -344,5 +624,41 @@ mod tests {
         assert_eq!(parse_html_table_cell_padding(Some("not-a-number")), 0);
         assert_eq!(parse_html_table_cell_padding(Some("   ")), 0);
         assert_eq!(parse_html_table_cell_padding(Some("2147483648")), 0);
+    }
+
+    #[test]
+    fn html_table_dimensions_match_blink_legacy_parsing() {
+        assert_eq!(
+            parse_html_dimension("85%", true, false),
+            Some(LengthPercentage::Percentage(NoCalcPercentage::new(0.85)))
+        );
+        assert_eq!(
+            parse_html_dimension(" 10foo", true, true),
+            Some(LengthPercentage::Length(NoCalcLength::from_px(10.0)))
+        );
+        assert_eq!(
+            parse_html_dimension("10.%", true, true),
+            Some(LengthPercentage::Percentage(NoCalcPercentage::new(0.1)))
+        );
+        assert!(parse_html_dimension("+10", true, true).is_none());
+        assert!(parse_html_dimension(".5", true, true).is_none());
+        assert!(parse_html_dimension("50%", false, true).is_none());
+        assert!(parse_html_dimension("0", true, false).is_none());
+    }
+
+    #[test]
+    fn html_table_colors_match_blink_legacy_parsing() {
+        assert_eq!(
+            parse_html_legacy_color("#f6f6ef").as_deref(),
+            Some("#f6f6ef")
+        );
+        assert_eq!(parse_html_legacy_color("#f60").as_deref(), Some("#ff6600"));
+        assert_eq!(parse_html_legacy_color("red").as_deref(), Some("#ff0000"));
+        assert_eq!(
+            parse_html_legacy_color("chucknorris").as_deref(),
+            Some("#c00000")
+        );
+        assert_eq!(parse_html_legacy_color("transparent"), None);
+        assert_eq!(parse_html_legacy_color(""), None);
     }
 }
