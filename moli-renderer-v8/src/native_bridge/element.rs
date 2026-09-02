@@ -455,11 +455,12 @@ pub(super) use global_attributes::{
     node_dir_getter_function, node_dir_setter_function, node_draggable_getter_function,
     node_draggable_setter_function, node_enter_key_hint_getter_function,
     node_enter_key_hint_setter_function, node_hidden_getter_function, node_hidden_setter_function,
-    node_input_mode_getter_function, node_input_mode_setter_function,
-    node_is_content_editable_getter_function, node_lang_getter_function, node_lang_setter_function,
-    node_spellcheck_getter_function, node_spellcheck_setter_function,
-    node_tab_index_getter_function, node_tab_index_setter_function, node_title_getter_function,
-    node_title_setter_function, node_translate_getter_function, node_translate_setter_function,
+    node_inert_getter_function, node_inert_setter_function, node_input_mode_getter_function,
+    node_input_mode_setter_function, node_is_content_editable_getter_function,
+    node_lang_getter_function, node_lang_setter_function, node_spellcheck_getter_function,
+    node_spellcheck_setter_function, node_tab_index_getter_function,
+    node_tab_index_setter_function, node_title_getter_function, node_title_setter_function,
+    node_translate_getter_function, node_translate_setter_function,
     node_writing_suggestions_getter_function, node_writing_suggestions_setter_function,
     null_to_empty_dom_string_reflection_getter_function,
     null_to_empty_dom_string_reflection_setter_function, object_archive_getter_function,
@@ -1497,6 +1498,13 @@ struct HtmlElementStandardPrototypeDeclaration {
         setter = node_hidden_setter_function
     )]
     hidden: (),
+    #[webapi(
+        accessor_property,
+        enumerable,
+        getter = node_inert_getter_function,
+        setter = node_inert_setter_function
+    )]
+    inert: (),
     #[webapi(
         accessor_property = "accessKey",
         enumerable,
