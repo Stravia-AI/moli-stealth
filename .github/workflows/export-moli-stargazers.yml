@@ -101,11 +101,8 @@ jobs:
                       time.sleep(min(2 ** attempt, 30))
               raise RuntimeError(f"Request failed after retries: {url}")
 
-          viewer = request_json("https://api.github.com/user")
           repository = request_json("https://api.github.com/repos/lexmount/moli")
-          print("Token diagnostics:", json.dumps({
-              "login": viewer.get("login"),
-              "token_type": viewer.get("type"),
+          print("Repository token diagnostics:", json.dumps({
               "repository_full_name": repository.get("full_name"),
               "repository_visibility": repository.get("visibility"),
               "repository_permissions": repository.get("permissions"),
