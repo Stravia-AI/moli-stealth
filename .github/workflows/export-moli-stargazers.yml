@@ -1,5 +1,9 @@
 name: Export Moli community interactions
 
+concurrency:
+  group: moli-community-export
+  cancel-in-progress: true
+
 on:
   pull_request:
     branches: [main]
@@ -114,14 +118,6 @@ jobs:
 
           pr_reviews = []
           pr_review_comments = []
-          for pull in pulls:
-              number = pull["number"]
-              for review in paginate(f"{api}/pulls/{number}/reviews?"):
-                  review["_pull_number"] = number
-                  pr_reviews.append(review)
-              for comment in paginate(f"{api}/pulls/{number}/comments?"):
-                  comment["_pull_number"] = number
-                  pr_review_comments.append(comment)
 
           def login_of(value):
               if not value:
