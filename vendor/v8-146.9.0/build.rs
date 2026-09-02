@@ -130,6 +130,7 @@ fn main() {
   print_prebuilt_src_binding_path();
 
   download_static_lib_binaries();
+  remove_allocator_shim_from_static_archive();
   build_moli_v8_ext(&moli_v8_ext_sources);
 }
 
@@ -366,6 +367,10 @@ fn build_v8(is_asan: bool) {
     gn_args.push(arg.to_string());
   }
 
+  if env::var("CARGO_FEATURE_MOLI_DISABLE_ALLOCATOR_SHIM").is_ok() {
+    gn_args.push("use_allocator_shim=false".to_string());
+  }
+
   gn_args.push(format!(
     "v8_enable_v8_checks={}",
     env::var("CARGO_FEATURE_V8_ENABLE_V8_CHECKS").is_ok()
@@ -508,6 +513,20 @@ fn build_moli_v8_ext(sources: &[PathBuf]) {
     .include("v8/include")
     .std("c++20")
     .flag_if_supported("-w");
+  // These definitions change V8's public header ABI and must match the
+  // prebuilt archive (or the GN configuration used for a source build).
+  if env::var("CARGO_FEATURE_V8_ENABLE_POINTER_COMPRESSION").is_ok() {
+    build
+      .define("V8_COMPRESS_POINTERS", None)
+      .define("V8_COMPRESS_POINTERS_IN_SHARED_CAGE", None)
+      .define("V8_31BIT_SMIS_ON_64BIT_ARCH", None);
+  }
+  if env::var("CARGO_FEATURE_V8_ENABLE_SANDBOX").is_ok() {
+    build.define("V8_ENABLE_SANDBOX", None);
+  }
+  if env::var("CARGO_FEATURE_V8_ENABLE_V8_CHECKS").is_ok() {
+    build.define("V8_ENABLE_CHECKS", None);
+  }
   let compiler = build.get_compiler();
   if compiler.is_like_msvc() && !compiler.is_like_clang_cl() {
     build.flag("/Zc:__cplusplus");
@@ -808,6 +827,44 @@ fn download_static_lib_binaries() {
   println!("cargo:rustc-link-search={}", dir.display());
 
   download_file(&url, &static_lib_path());
+}
+
+fn remove_allocator_shim_from_static_archive() {
+  if env::var("CARGO_FEATURE_MOLI_DISABLE_ALLOCATOR_SHIM").is_err()
+    || env::var("CARGO_CFG_TARGET_OS").is_ok_and(|os| os == "windows")
+  {
+    return;
+  }
+
+  let archive = static_lib_path();
+  let archiver = cc::Build::new().get_archiver();
+  let archiver = archiver.get_program();
+  let members = Command::new(archiver)
+    .arg("t")
+    .arg(&archive)
+    .output()
+    .expect("failed to list V8 static archive members");
+  assert!(
+    members.status.success(),
+    "failed to list V8 static archive members"
+  );
+  if !String::from_utf8_lossy(&members.stdout)
+    .lines()
+    .any(|member| member == "allocator_shim.o")
+  {
+    return;
+  }
+
+  let status = Command::new(archiver)
+    .arg("d")
+    .arg(&archive)
+    .arg("allocator_shim.o")
+    .status()
+    .expect("failed to remove V8 allocator shim from static archive");
+  assert!(
+    status.success(),
+    "failed to remove V8 allocator shim from static archive"
+  );
 }
 
 fn decompress_to_writer<R, W>(input: &mut R, output: &mut W) -> io::Result<()>
