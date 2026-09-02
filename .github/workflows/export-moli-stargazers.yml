@@ -13,7 +13,7 @@ jobs:
   export:
     if: github.head_ref == 'codex/export-moli-stargazers'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     env:
       STARGAZER_TOKEN: ${{ secrets.GH_TOKEN }}
 
@@ -33,145 +33,139 @@ jobs:
           import csv
           import json
           import os
-          import random
           import time
           import urllib.error
-          import urllib.parse
           import urllib.request
-          from concurrent.futures import ThreadPoolExecutor, as_completed
           from datetime import datetime, timezone
 
-          TOKEN = os.environ["STARGAZER_TOKEN"]
-          API = "https://api.github.com"
-          REPOSITORY = "lexmount/moli"
-          HEADERS = {
-              "Accept": "application/vnd.github+json",
-              "Authorization": f"Bearer {TOKEN}",
-              "X-GitHub-Api-Version": "2022-11-28",
-              "User-Agent": "lexmount-moli-stargazer-export",
+          token = os.environ["STARGAZER_TOKEN"]
+          query = """
+          query($owner: String!, $name: String!, $cursor: String) {
+            repository(owner: $owner, name: $name) {
+              stargazers(
+                first: 100
+                after: $cursor
+                orderBy: {field: STARRED_AT, direction: DESC}
+              ) {
+                totalCount
+                pageInfo { hasNextPage endCursor }
+                edges {
+                  starredAt
+                  node {
+                    login
+                    name
+                    url
+                    company
+                    location
+                    bio
+                    websiteUrl
+                    twitterUsername
+                    repositories { totalCount }
+                    followers { totalCount }
+                    following { totalCount }
+                    isHireable
+                    createdAt
+                    updatedAt
+                  }
+                }
+              }
+            }
           }
+          """
 
-          def api_get(path, accept=None, attempts=6):
-              headers = dict(HEADERS)
-              if accept:
-                  headers["Accept"] = accept
-              url = f"{API}{path}"
+          def graphql(variables, attempts=6):
+              payload = json.dumps({"query": query, "variables": variables}).encode()
+              request = urllib.request.Request(
+                  "https://api.github.com/graphql",
+                  data=payload,
+                  method="POST",
+                  headers={
+                      "Accept": "application/vnd.github+json",
+                      "Authorization": f"Bearer {token}",
+                      "Content-Type": "application/json",
+                      "User-Agent": "lexmount-moli-stargazer-export",
+                  },
+              )
               for attempt in range(attempts):
-                  req = urllib.request.Request(url, headers=headers)
                   try:
-                      with urllib.request.urlopen(req, timeout=45) as response:
-                          return json.load(response)
-                  except urllib.error.HTTPError as exc:
-                      if exc.code == 404:
-                          return None
-                      if exc.code in (403, 429) or 500 <= exc.code < 600:
-                          retry_after = exc.headers.get("Retry-After")
-                          reset_at = exc.headers.get("X-RateLimit-Reset")
-                          if retry_after:
-                              delay = min(float(retry_after), 120)
-                          elif exc.code == 403 and reset_at:
-                              delay = max(1, min(int(reset_at) - int(time.time()) + 2, 120))
-                          else:
-                              delay = min(2 ** attempt + random.random(), 60)
-                          time.sleep(delay)
-                          continue
-                      raise
+                      with urllib.request.urlopen(request, timeout=60) as response:
+                          result = json.load(response)
+                      if result.get("errors"):
+                          raise RuntimeError(json.dumps(result["errors"], ensure_ascii=False))
+                      return result["data"]
                   except (urllib.error.URLError, TimeoutError):
                       if attempt == attempts - 1:
                           raise
-                      time.sleep(min(2 ** attempt + random.random(), 30))
-              raise RuntimeError(f"GitHub API request failed after retries: {path}")
+                      time.sleep(min(2 ** attempt, 30))
+              raise RuntimeError("GraphQL request failed after retries")
 
-          stargazers = []
-          page = 1
+          rows = []
+          cursor = None
+          expected_total = None
+          page = 0
           while True:
-              batch = api_get(
-                  f"/repos/{REPOSITORY}/stargazers?per_page=100&page={page}",
-                  accept="application/vnd.github.star+json",
-              )
-              if not batch:
-                  break
-              stargazers.extend(batch)
-              print(f"Fetched stargazer page {page}: {len(batch)} users")
-              if len(batch) < 100:
-                  break
               page += 1
-
-          def fetch_profile(item):
-              user = item.get("user") or {}
-              login = user.get("login")
-              base = {
-                  "login": login,
-                  "starred_at": item.get("starred_at"),
-                  "profile_url": user.get("html_url") or (f"https://github.com/{login}" if login else None),
-                  "account_type": user.get("type"),
-              }
-              if not login:
-                  base["profile_error"] = "missing_login"
-                  return base
-              try:
-                  profile = api_get(f"/users/{urllib.parse.quote(login)}")
-                  if not profile:
-                      base["profile_error"] = "profile_not_found"
-                      return base
-                  base.update({
-                      "name": profile.get("name"),
-                      "company": profile.get("company"),
-                      "location": profile.get("location"),
-                      "bio": profile.get("bio"),
-                      "blog": profile.get("blog"),
-                      "twitter_username": profile.get("twitter_username"),
-                      "public_repos": profile.get("public_repos"),
-                      "followers": profile.get("followers"),
-                      "following": profile.get("following"),
-                      "hireable": profile.get("hireable"),
-                      "account_created_at": profile.get("created_at"),
-                      "account_updated_at": profile.get("updated_at"),
+              data = graphql({"owner": "lexmount", "name": "moli", "cursor": cursor})
+              connection = data["repository"]["stargazers"]
+              expected_total = connection["totalCount"]
+              for edge in connection["edges"]:
+                  user = edge["node"]
+                  rows.append({
+                      "login": user.get("login"),
+                      "name": user.get("name"),
+                      "starred_at": edge.get("starredAt"),
+                      "profile_url": user.get("url"),
+                      "account_type": "User",
+                      "company": user.get("company"),
+                      "location": user.get("location"),
+                      "bio": user.get("bio"),
+                      "blog": user.get("websiteUrl"),
+                      "twitter_username": user.get("twitterUsername"),
+                      "public_repos": (user.get("repositories") or {}).get("totalCount"),
+                      "followers": (user.get("followers") or {}).get("totalCount"),
+                      "following": (user.get("following") or {}).get("totalCount"),
+                      "hireable": user.get("isHireable"),
+                      "account_created_at": user.get("createdAt"),
+                      "account_updated_at": user.get("updatedAt"),
                       "profile_error": None,
                   })
-                  return base
-              except Exception as exc:
-                  base["profile_error"] = type(exc).__name__
-                  return base
+              print(f"Fetched page {page}: {len(connection['edges'])} users; total {len(rows)}/{expected_total}")
+              page_info = connection["pageInfo"]
+              if not page_info["hasNextPage"]:
+                  break
+              cursor = page_info["endCursor"]
 
-          profiles = []
-          with ThreadPoolExecutor(max_workers=4) as pool:
-              futures = {pool.submit(fetch_profile, item): item for item in stargazers}
-              for index, future in enumerate(as_completed(futures), 1):
-                  profiles.append(future.result())
-                  if index % 100 == 0:
-                      print(f"Fetched {index}/{len(stargazers)} profiles")
-
-          profiles.sort(key=lambda row: row.get("starred_at") or "", reverse=True)
           fields = [
               "login", "name", "starred_at", "profile_url", "account_type",
               "company", "location", "bio", "blog", "twitter_username",
               "public_repos", "followers", "following", "hireable",
               "account_created_at", "account_updated_at", "profile_error",
           ]
-
           with open("moli-stargazers.csv", "w", newline="", encoding="utf-8-sig") as handle:
-              writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
+              writer = csv.DictWriter(handle, fieldnames=fields)
               writer.writeheader()
-              writer.writerows(profiles)
+              writer.writerows(rows)
 
           output = {
-              "repository": REPOSITORY,
+              "repository": "lexmount/moli",
               "exported_at": datetime.now(timezone.utc).isoformat(),
-              "stargazer_count": len(stargazers),
-              "profile_count": len(profiles),
-              "profile_error_count": sum(bool(row.get("profile_error")) for row in profiles),
+              "stargazer_count": expected_total,
+              "profile_count": len(rows),
+              "profile_error_count": 0,
               "fields": fields,
-              "profiles": profiles,
+              "profiles": rows,
           }
           with open("moli-stargazers.json", "w", encoding="utf-8") as handle:
               json.dump(output, handle, ensure_ascii=False, indent=2)
 
+          if len(rows) != expected_total:
+              raise RuntimeError(f"Count mismatch: fetched {len(rows)}, expected {expected_total}")
+
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as handle:
               handle.write("## Moli stargazer export\n\n")
-              handle.write(f"- Stargazers: {len(stargazers)}\n")
-              handle.write(f"- Profiles: {len(profiles)}\n")
-              handle.write(f"- Profile errors: {output['profile_error_count']}\n")
+              handle.write(f"- Stargazers: {expected_total}\n")
+              handle.write(f"- Profiles: {len(rows)}\n")
+              handle.write("- Profile errors: 0\n")
           PY
 
       - name: Upload export
