@@ -980,12 +980,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da220af51a1a335e9a930beaaef53d261e41ea9eecfb3d973a3ddae1a7284b9c"
 
 [[package]]
-name = "deno_core_icudata"
-version = "0.78.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b963d2d79672b4c379e4511acccd27bb35b4c1b32a93f596d52ff14a064293bc"
-
-[[package]]
 name = "deno_error"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3104,7 +3098,6 @@ dependencies = [
 name = "moli-v8-init"
 version = "0.1.0"
 dependencies = [
- "deno_core_icudata",
  "v8",
 ]
 
