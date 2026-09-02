@@ -2675,7 +2675,7 @@ impl ScriptVm {
         }
         let resources = resources.web_fonts().to_vec();
         self._context_host
-            .borrow()
+            .borrow_mut()
             .retain_document_web_font_slots(resources.iter());
         if resources.is_empty() {
             self._context_host
@@ -2803,7 +2803,7 @@ impl ScriptVm {
     ) {
         match self
             ._context_host
-            .borrow()
+            .borrow_mut()
             .complete_document_web_font(terminal)
         {
             web_fonts::DocumentWebFontCompletion::Registered(outcome) => tracing::debug!(
