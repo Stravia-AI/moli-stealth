@@ -1241,13 +1241,22 @@ async fn commit_dedicated_worker_retirement_output_async(
                     conn.prepared_target_info_changed_event_plan_for_discovery_owners(target_delta),
                 );
             }
-            events.extend(
-                conn.detach_dedicated_worker_session_with_binding_cleanup_event_plan_async(
-                    cleanup_plan,
-                )
-                .await
-                .expect("retired dedicated-worker session cleanup should succeed"),
+            let mut response_events = Vec::new();
+            let outcome = super::session_disposal::dispose_dedicated_worker_session_after_prepared_state_delta_async(
+                conn,
+                &mut events,
+                &mut response_events,
+                cleanup_plan,
+            )
+            .await
+            .expect("retired dedicated-worker session cleanup should succeed");
+            let (event_plan, predecessor) = outcome.into_parts();
+            debug_assert!(
+                predecessor.is_none(),
+                "DedicatedWorker disposal cannot publish a Page renderer fence"
             );
+            events.extend(response_events);
+            events.extend(event_plan);
         }
         WorkerTargetLifecycleOutput::DedicatedWorkerDestroyed {
             browser_context_id,
@@ -1332,7 +1341,8 @@ fn commit_failed_dedicated_worker_retirement_sync(
                     );
                 }
                 events.extend(
-                    conn.detach_dedicated_worker_session_after_target_removal_event_plan(
+                    super::session_disposal::dispose_removed_dedicated_worker_session_after_failed_retirement(
+                        conn,
                         cleanup_plan,
                     ),
                 );
@@ -2953,10 +2963,12 @@ async fn emit_target_lifecycle_events(
                     retirement.identity().session_id(),
                     "shared-worker detach plan must retain its exact attachment"
                 );
-                let event_plan = conn
-                    .detach_session_with_binding_cleanup_event_plan_async(cleanup_plan)
-                    .await
-                    .expect("retired shared-worker session cleanup should succeed");
+                let event_plan = super::session_disposal::dispose_removed_worker_session_async(
+                    conn,
+                    cleanup_plan,
+                )
+                .await
+                .expect("retired shared-worker session cleanup should succeed");
                 side_effects.extend_background_events(event_plan);
                 retirement.retire();
             }
@@ -2977,10 +2989,12 @@ async fn emit_target_lifecycle_events(
                     retirement.identity().session_id(),
                     "service-worker detach plan must retain its exact attachment"
                 );
-                let event_plan = conn
-                    .detach_session_with_binding_cleanup_event_plan_async(cleanup_plan)
-                    .await
-                    .expect("retired service-worker session cleanup should succeed");
+                let event_plan = super::session_disposal::dispose_removed_worker_session_async(
+                    conn,
+                    cleanup_plan,
+                )
+                .await
+                .expect("retired service-worker session cleanup should succeed");
                 side_effects.extend_background_events(event_plan);
                 retirement.retire();
             }

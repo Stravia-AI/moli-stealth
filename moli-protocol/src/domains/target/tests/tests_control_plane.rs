@@ -726,6 +726,50 @@ async fn detach_from_target_error_restores_previously_active_context() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn detach_from_inactive_context_cleans_exact_session_without_activating_context() {
+    let mut ctx = TestContext::new();
+    load_bc_with_target(&mut ctx, "BID-A", "TID-A");
+    let mut inactive = BrowserContext::new_with_page_for_test("BID-B", "TID-B");
+    inactive.attach_active_session("SID-B");
+    ctx.conn.inactive_browser_contexts.push(inactive);
+    ctx.conn
+        .register_auto_attached_session_for_target("SID-B".to_owned(), None, Some("TID-B"));
+    ctx.conn
+        .set_service_worker_pause_on_start_owner(Some("SID-B"), true);
+    ctx.conn
+        .set_dedicated_worker_pause_on_start_owner(Some("SID-B"), true);
+
+    ctx.process_async(json!({
+        "id": 1503,
+        "method": "Target.detachFromTarget",
+        "params": { "sessionId": "SID-B" }
+    }))
+    .await;
+
+    ctx.expect_result(1503, json!({}), None);
+    ctx.expect_event(
+        "Target.detachedFromTarget",
+        Some(&json!({
+            "sessionId": "SID-B",
+            "targetId": "TID-B",
+        })),
+    );
+    assert_eq!(
+        ctx.conn.browser_context.as_ref().map(|bc| bc.id.as_str()),
+        Some("BID-A"),
+        "disposing another context's session must not change the active context"
+    );
+    assert!(
+        ctx.conn
+            .browser_context_by_id("BID-B")
+            .is_some_and(|context| !context.has_active_session()),
+        "the exact inactive-context binding must be disposed"
+    );
+    assert!(!ctx.conn.service_worker_pause_on_start_for_devtools());
+    assert!(!ctx.conn.dedicated_worker_pause_on_start_for_devtools());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn detach_from_target_aborts_paused_request_stage_navigation() {
     async fn page() -> impl axum::response::IntoResponse {
         (

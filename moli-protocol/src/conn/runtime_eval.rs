@@ -3132,14 +3132,22 @@ impl CdpConnection {
         false
     }
 
-    pub(crate) async fn release_shared_worker_runtime_remote_objects_for_session_best_effort_async(
+    pub(crate) async fn release_worker_runtime_remote_objects_for_session_best_effort_async(
         &mut self,
         session_id: &str,
     ) {
-        let Some((object_groups, object_ids)) = self
-            .shared_worker_target_for_session_mut(Some(session_id))
-            .map(|target| target.take_runtime_remote_object_cleanup_plan(session_id))
-        else {
+        let service_worker = matches!(
+            self.session_route(Some(session_id)),
+            Some(CdpSessionRoute::ServiceWorkerTarget { .. })
+        );
+        let cleanup_plan = if service_worker {
+            self.service_worker_target_for_session_mut(Some(session_id))
+                .map(|target| target.take_runtime_remote_object_cleanup_plan(session_id))
+        } else {
+            self.shared_worker_target_for_session_mut(Some(session_id))
+                .map(|target| target.take_runtime_remote_object_cleanup_plan(session_id))
+        };
+        let Some((object_groups, object_ids)) = cleanup_plan else {
             return;
         };
         if object_groups.is_empty() && object_ids.is_empty() {
@@ -3154,18 +3162,26 @@ impl CdpConnection {
                 "params": { "objectGroup": object_group }
             })
             .to_string();
-            if let Err(error) = self
-                .dispatch_shared_worker_runtime_helper_protocol_message_for_session_async(
+            let release = if service_worker {
+                self.dispatch_service_worker_runtime_helper_protocol_message_for_session_async(
                     Some(session_id),
                     &raw_json,
                     command_id,
                 )
                 .await
-            {
+            } else {
+                self.dispatch_shared_worker_runtime_helper_protocol_message_for_session_async(
+                    Some(session_id),
+                    &raw_json,
+                    command_id,
+                )
+                .await
+            };
+            if let Err(error) = release {
                 tracing::warn!(
                     object_group = %object_group,
                     error = %error,
-                    "failed to release shared worker Runtime object group during target detach"
+                    "failed to release worker Runtime object group during target detach"
                 );
             }
             command_id = command_id.saturating_add(1);
@@ -3177,18 +3193,26 @@ impl CdpConnection {
                 "params": { "objectId": object_id }
             })
             .to_string();
-            if let Err(error) = self
-                .dispatch_shared_worker_runtime_helper_protocol_message_for_session_async(
+            let release = if service_worker {
+                self.dispatch_service_worker_runtime_helper_protocol_message_for_session_async(
                     Some(session_id),
                     &raw_json,
                     command_id,
                 )
                 .await
-            {
+            } else {
+                self.dispatch_shared_worker_runtime_helper_protocol_message_for_session_async(
+                    Some(session_id),
+                    &raw_json,
+                    command_id,
+                )
+                .await
+            };
+            if let Err(error) = release {
                 tracing::warn!(
                     object_id = %object_id,
                     error = %error,
-                    "failed to release shared worker Runtime object during target detach"
+                    "failed to release worker Runtime object during target detach"
                 );
             }
             command_id = command_id.saturating_add(1);
@@ -4638,16 +4662,51 @@ impl CdpConnection {
         session_id: Option<&str>,
         raw_json: &str,
         command_id: u64,
-    ) -> Result<Vec<RendererRuntimeInspectorMessage>, String> {
-        let descriptor = RendererCommandDescriptor::from_synthesized_payload(raw_json.to_owned())?;
+    ) -> anyhow::Result<Vec<RendererRuntimeInspectorMessage>> {
+        let descriptor = RendererCommandDescriptor::from_synthesized_payload(raw_json.to_owned())
+            .map_err(anyhow::Error::msg)?;
         let pending = self
             .start_shared_worker_runtime_protocol_message_for_session_with_deferred_response(
                 session_id, descriptor, command_id,
-            )?;
-        let mut completed = pending.wait().await?;
+            )
+            .map_err(anyhow::Error::msg)?;
+        let mut completed = pending.wait().await.map_err(anyhow::Error::msg)?;
         let response_rx = completed.take_deferred_response_receiver();
-        let mut messages =
-            self.complete_shared_worker_runtime_protocol_message_for_session(completed)?;
+        let mut messages = self
+            .complete_shared_worker_runtime_protocol_message_for_session(completed)
+            .map_err(anyhow::Error::msg)?;
+        if let Some(response_rx) = response_rx
+            && let Some(message) = self
+                .await_registered_runtime_inspector_response_for_session_owner_async(
+                    session_id,
+                    command_id,
+                    response_rx,
+                )
+                .await
+        {
+            messages.push(message);
+        }
+        Ok(messages)
+    }
+
+    async fn dispatch_service_worker_runtime_helper_protocol_message_for_session_async(
+        &mut self,
+        session_id: Option<&str>,
+        raw_json: &str,
+        command_id: u64,
+    ) -> anyhow::Result<Vec<RendererRuntimeInspectorMessage>> {
+        let descriptor = RendererCommandDescriptor::from_synthesized_payload(raw_json.to_owned())
+            .map_err(anyhow::Error::msg)?;
+        let pending = self
+            .start_service_worker_runtime_protocol_message_for_session_with_deferred_response(
+                session_id, descriptor, command_id,
+            )
+            .map_err(anyhow::Error::msg)?;
+        let mut completed = pending.wait().await.map_err(anyhow::Error::msg)?;
+        let response_rx = completed.take_deferred_response_receiver();
+        let mut messages = self
+            .complete_service_worker_runtime_protocol_message_for_session(completed)
+            .map_err(anyhow::Error::msg)?;
         if let Some(response_rx) = response_rx
             && let Some(message) = self
                 .await_registered_runtime_inspector_response_for_session_owner_async(

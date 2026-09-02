@@ -2131,6 +2131,82 @@ async fn detach_from_shared_worker_target_clears_session_and_emits_detached_even
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn detach_from_service_worker_target_disposes_session_runtime_state() {
+    let mut ctx = TestContext::new();
+    load_bc(&mut ctx, "BID-9");
+    push_service_worker_target(
+        &mut ctx,
+        91,
+        "TID-service-worker",
+        "https://example.test/service-worker.js",
+        "https://example.test/",
+        Some("SID-service-worker"),
+    );
+    {
+        let target = ctx
+            .conn
+            .service_worker_target_for_session_mut(Some("SID-service-worker"))
+            .expect("service worker target should be attached");
+        target.register_pending_inspector_await(
+            "SID-service-worker",
+            14_001,
+            Some("SID-service-worker"),
+            None,
+        );
+        target.register_runtime_remote_object_ids_for_session(
+            "SID-service-worker",
+            ["service-worker-object".to_owned()],
+        );
+    }
+    ctx.conn
+        .set_service_worker_pause_on_start_owner(Some("SID-service-worker"), true);
+
+    ctx.process_async(json!({
+        "id": 14,
+        "method": "Target.detachFromTarget",
+        "params": {
+            "targetId": "TID-service-worker",
+            "sessionId": "SID-service-worker"
+        }
+    }))
+    .await;
+
+    ctx.expect_result(14, json!({}), None);
+    let failed_await = ctx.take_one();
+    assert_eq!(failed_await["id"], json!(14_001));
+    assert_eq!(failed_await["sessionId"], json!("SID-service-worker"));
+    assert_eq!(failed_await["error"]["message"], json!("Target detached"));
+    ctx.expect_event(
+        "Target.detachedFromTarget",
+        Some(&json!({
+            "targetId": "TID-service-worker",
+            "sessionId": "SID-service-worker",
+        })),
+    );
+
+    assert_eq!(ctx.conn.session_route(Some("SID-service-worker")), None);
+    assert!(!ctx.conn.has_pending_inspector_awaits());
+    assert!(
+        ctx.conn
+            .validate_runtime_remote_object_ids_for_session_owner(
+                None,
+                &["service-worker-object".to_owned()],
+            )
+            .is_ok(),
+        "service worker remote-object ownership must be retired with its session"
+    );
+    assert!(!ctx.conn.service_worker_pause_on_start_for_devtools());
+    let target = ctx
+        .conn
+        .browser_context
+        .as_ref()
+        .unwrap()
+        .service_worker_target("TID-service-worker")
+        .expect("service worker target remains live after detach");
+    assert!(!target.has_session());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn detach_from_target_invalid_session_errors() {
     let mut ctx = TestContext::new();
     load_bc_with_target(&mut ctx, "BID-9", "TID-000000000C");

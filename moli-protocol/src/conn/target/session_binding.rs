@@ -12,12 +12,18 @@ impl CdpConnection {
         &mut self,
         session_id: &str,
     ) -> anyhow::Result<()> {
-        let browser_identity_changed = match self.browser_context.as_mut() {
-            Some(browser_context) => {
-                browser_context
-                    .clear_target_session_overrides_async(session_id)
-                    .await?
-            }
+        let browser_context_id = self
+            .session_route(Some(session_id))
+            .and_then(|route| route.browser_context_id().map(str::to_owned));
+        let browser_identity_changed = match browser_context_id {
+            Some(browser_context_id) => match self.browser_context_by_id_mut(&browser_context_id) {
+                Some(browser_context) => {
+                    browser_context
+                        .clear_target_session_overrides_async(session_id)
+                        .await?
+                }
+                None => false,
+            },
             None => false,
         };
         if !browser_identity_changed {
@@ -70,10 +76,12 @@ impl CdpConnection {
         true
     }
 
-    pub(crate) fn detach_browser_session_owner_without_event(
+    pub(crate) async fn dispose_browser_session_owner_without_event_async(
         &mut self,
         session_id: &str,
     ) -> Option<TargetEventPlan> {
+        self.cancel_tracing_for_session_owner_async(Some(session_id))
+            .await;
         if !self.clear_browser_session_owner_state(session_id) {
             return None;
         }
@@ -81,10 +89,12 @@ impl CdpConnection {
         Some(rollback_plan)
     }
 
-    pub(crate) fn detach_browser_session_owner_event_plan(
+    pub(crate) async fn dispose_browser_session_owner_event_plan_async(
         &mut self,
         session_id: &str,
     ) -> Option<TargetEventPlan> {
+        self.cancel_tracing_for_session_owner_async(Some(session_id))
+            .await;
         let owner_session_id = self
             .target_control
             .attached_session_owner_session_id(session_id)
@@ -114,9 +124,14 @@ impl CdpConnection {
         &mut self,
         session_id: &str,
     ) -> bool {
+        let Some(browser_context_id) = self
+            .session_route(Some(session_id))
+            .and_then(|route| route.browser_context_id().map(str::to_owned))
+        else {
+            return false;
+        };
         let released = self
-            .browser_context
-            .as_mut()
+            .browser_context_by_id_mut(&browser_context_id)
             .is_some_and(|browser_context| {
                 browser_context
                     .release_primary_session_binding_preserving_frontend_state(session_id)
@@ -565,7 +580,23 @@ impl CdpConnection {
         plan
     }
 
-    pub(crate) fn detach_target_closure_cleanup_event_plan(
+    pub(crate) async fn dispose_target_closure_sessions_event_plan_async(
+        &mut self,
+        cleanup_plan: TargetClosureCleanupPlan,
+        parent_session_id: Option<&str>,
+    ) -> TargetEventPlan {
+        let session_ids = cleanup_plan
+            .session_ids()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        for session_id in session_ids {
+            self.cancel_tracing_for_session_owner_async(Some(&session_id))
+                .await;
+        }
+        self.commit_target_closure_session_detachment_events(cleanup_plan, parent_session_id)
+    }
+
+    fn commit_target_closure_session_detachment_events(
         &mut self,
         cleanup_plan: TargetClosureCleanupPlan,
         parent_session_id: Option<&str>,
@@ -615,22 +646,19 @@ impl CdpConnection {
                     "primary Page target rollback requires async binding cleanup"
                 );
             } else {
-                self.execute_target_binding_cleanup_without_event_sync(cleanup_plan);
+                self.dispose_target_binding_sync(cleanup_plan);
             }
         }
         self.rollback_attached_session_without_event(rollback_plan.session_id())
     }
 
-    fn execute_target_binding_cleanup_without_event_sync(
-        &mut self,
-        cleanup_plan: &TargetBindingCleanupPlan,
-    ) {
+    fn dispose_target_binding_sync(&mut self, cleanup_plan: &TargetBindingCleanupPlan) {
         match cleanup_plan.action() {
             TargetBindingCleanupAction::PageTarget {
                 session_key: moli_page_types::DevToolsSessionKey::Attached(_),
                 ..
             } => {
-                if let Some(bc) = self.browser_context.as_mut() {
+                if let Some(bc) = self.target_binding_browser_context_mut(cleanup_plan) {
                     let _ = bc.remove_auxiliary_session(cleanup_plan.session_id());
                 }
             }
@@ -638,22 +666,21 @@ impl CdpConnection {
                 self.remove_tab_session(cleanup_plan.session_id());
             }
             TargetBindingCleanupAction::SharedWorkerTarget { .. } => {
-                if let Some(bc) = self.browser_context.as_mut() {
+                if let Some(bc) = self.target_binding_browser_context_mut(cleanup_plan) {
                     let _ = bc.detach_shared_worker_target_session(cleanup_plan.session_id());
                 }
             }
             TargetBindingCleanupAction::DedicatedWorkerTarget { .. } => {
-                if let Some(bc) = self.browser_context.as_mut() {
+                if let Some(bc) = self.target_binding_browser_context_mut(cleanup_plan) {
                     let _ = bc.detach_dedicated_worker_target_session(cleanup_plan.session_id());
                 }
             }
             TargetBindingCleanupAction::ServiceWorkerTarget { .. } => {
-                if let Some(bc) = self.browser_context.as_mut() {
+                if let Some(bc) = self.target_binding_browser_context_mut(cleanup_plan) {
                     let _ = bc.detach_service_worker_target_session(cleanup_plan.session_id());
                 }
             }
-            TargetBindingCleanupAction::None
-            | TargetBindingCleanupAction::PageTarget {
+            TargetBindingCleanupAction::PageTarget {
                 session_key: moli_page_types::DevToolsSessionKey::Primary,
                 ..
             } => {}
@@ -664,16 +691,6 @@ impl CdpConnection {
         &mut self,
         rollback_plan: TargetAttachRollbackPlan,
     ) -> TargetEventPlan {
-        let Some(browser_context_id) = rollback_plan.browser_context_id().map(str::to_owned) else {
-            return self.rollback_attached_session_without_event(rollback_plan.session_id());
-        };
-        if !self
-            .activate_browser_context_by_id_async(&browser_context_id)
-            .await
-        {
-            return self.rollback_attached_session_without_event(rollback_plan.session_id());
-        }
-
         if let Some(cleanup_plan) = rollback_plan.cleanup_plan() {
             if let Err(error) = self
                 .remove_document_start_scripts_for_detached_session_async(cleanup_plan.session_id())
@@ -685,10 +702,7 @@ impl CdpConnection {
                     "failed to remove target scripts during attach rollback"
                 );
             }
-            if let Err(error) = self
-                .execute_target_binding_cleanup_without_event_async(cleanup_plan)
-                .await
-            {
+            if let Err(error) = self.dispose_target_binding_async(cleanup_plan).await {
                 tracing::warn!(
                     session_id = rollback_plan.session_id(),
                     %error,
@@ -716,7 +730,7 @@ impl CdpConnection {
         self.rollback_attached_session_without_event(detach_plan.session_id())
     }
 
-    pub(crate) async fn execute_target_binding_cleanup_without_event_async(
+    pub(crate) async fn dispose_target_binding_async(
         &mut self,
         cleanup_plan: &TargetBindingCleanupPlan,
     ) -> anyhow::Result<()> {
@@ -725,65 +739,89 @@ impl CdpConnection {
                 target_id,
                 session_key: moli_page_types::DevToolsSessionKey::Primary,
             } => {
-                if let Some(bc) = self.browser_context.as_mut() {
-                    let disposed = bc
-                        .dispose_primary_page_session_async(target_id, cleanup_plan.session_id())
-                        .await?;
-                    if !disposed {
-                        anyhow::bail!("InvalidSessionId");
-                    }
-                }
+                let bc = self
+                    .browser_context_by_id_mut(cleanup_plan.browser_context_id())
+                    .ok_or_else(|| anyhow::anyhow!("InvalidSessionId"))?;
+                let disposed = bc
+                    .dispose_primary_page_session_async(target_id, cleanup_plan.session_id())
+                    .await?;
+                anyhow::ensure!(disposed, "InvalidSessionId");
             }
             TargetBindingCleanupAction::PageTarget {
+                target_id,
                 session_key: moli_page_types::DevToolsSessionKey::Attached(_),
-                ..
             } => {
-                if let Some(bc) = self.browser_context.as_mut() {
-                    let _ = bc.remove_auxiliary_session(cleanup_plan.session_id());
-                }
+                let bc = self
+                    .browser_context_by_id_mut(cleanup_plan.browser_context_id())
+                    .ok_or_else(|| anyhow::anyhow!("InvalidSessionId"))?;
+                let removed_target_id = bc
+                    .remove_auxiliary_session(cleanup_plan.session_id())
+                    .ok_or_else(|| anyhow::anyhow!("InvalidSessionId"))?;
+                anyhow::ensure!(removed_target_id == *target_id, "UnknownTargetId");
             }
-            TargetBindingCleanupAction::TabTarget { .. } => {
-                self.remove_tab_session(cleanup_plan.session_id());
+            TargetBindingCleanupAction::TabTarget { tab_target_id } => {
+                let removed_target_id = self
+                    .remove_tab_session(cleanup_plan.session_id())
+                    .ok_or_else(|| anyhow::anyhow!("InvalidSessionId"))?;
+                anyhow::ensure!(removed_target_id == *tab_target_id, "UnknownTargetId");
             }
-            TargetBindingCleanupAction::SharedWorkerTarget { .. } => {
-                if let Some(bc) = self.browser_context.as_mut() {
-                    let _ = bc.detach_shared_worker_target_session(cleanup_plan.session_id());
-                }
+            TargetBindingCleanupAction::SharedWorkerTarget { target_id } => {
+                let bc = self
+                    .browser_context_by_id_mut(cleanup_plan.browser_context_id())
+                    .ok_or_else(|| anyhow::anyhow!("InvalidSessionId"))?;
+                let removed_target_id = bc
+                    .detach_shared_worker_target_session(cleanup_plan.session_id())
+                    .ok_or_else(|| anyhow::anyhow!("InvalidSessionId"))?;
+                anyhow::ensure!(removed_target_id == *target_id, "UnknownTargetId");
             }
-            TargetBindingCleanupAction::DedicatedWorkerTarget { .. } => {
-                if let Some(bc) = self.browser_context.as_mut() {
-                    let _ = bc.detach_dedicated_worker_target_session(cleanup_plan.session_id());
-                }
+            TargetBindingCleanupAction::DedicatedWorkerTarget { target_id } => {
+                let bc = self
+                    .browser_context_by_id_mut(cleanup_plan.browser_context_id())
+                    .ok_or_else(|| anyhow::anyhow!("InvalidSessionId"))?;
+                let removed_target_id = bc
+                    .detach_dedicated_worker_target_session(cleanup_plan.session_id())
+                    .ok_or_else(|| anyhow::anyhow!("InvalidSessionId"))?;
+                anyhow::ensure!(removed_target_id == *target_id, "UnknownTargetId");
             }
-            TargetBindingCleanupAction::ServiceWorkerTarget { .. } => {
-                if let Some(bc) = self.browser_context.as_mut() {
-                    let _ = bc.detach_service_worker_target_session(cleanup_plan.session_id());
-                }
+            TargetBindingCleanupAction::ServiceWorkerTarget { target_id } => {
+                let bc = self
+                    .browser_context_by_id_mut(cleanup_plan.browser_context_id())
+                    .ok_or_else(|| anyhow::anyhow!("InvalidSessionId"))?;
+                let removed_target_id = bc
+                    .detach_service_worker_target_session(cleanup_plan.session_id())
+                    .ok_or_else(|| anyhow::anyhow!("InvalidSessionId"))?;
+                anyhow::ensure!(removed_target_id == *target_id, "UnknownTargetId");
             }
-            TargetBindingCleanupAction::None => {}
         }
         Ok(())
     }
 
-    pub(crate) async fn execute_target_binding_cleanup_for_session_without_event_async(
+    fn target_binding_browser_context_mut(
         &mut self,
-        session_id: &str,
-    ) -> anyhow::Result<bool> {
-        let Some(route) = self.session_route(Some(session_id)) else {
-            return Ok(false);
-        };
-        self.cancel_tracing_for_session_owner_async(Some(session_id))
-            .await;
-        let cleanup_plan = TargetBindingCleanupPlan::from_route(session_id, &route);
-        self.execute_target_binding_cleanup_without_event_async(&cleanup_plan)
-            .await?;
-        Ok(true)
+        cleanup_plan: &TargetBindingCleanupPlan,
+    ) -> Option<&mut crate::conn::BrowserContext> {
+        self.browser_context_by_id_mut(cleanup_plan.browser_context_id())
     }
 
-    pub(crate) async fn detach_session_with_binding_cleanup_event_plan_async(
+    pub(crate) fn commit_target_session_detachment_event_plan(
         &mut self,
         cleanup_plan: TargetSessionDetachCleanupPlan,
-    ) -> anyhow::Result<TargetEventPlan> {
+    ) -> TargetEventPlan {
+        self.commit_target_session_detachment_event_plan_inner(cleanup_plan, true)
+    }
+
+    pub(crate) fn commit_target_session_detachment_after_prepared_state_delta_event_plan(
+        &mut self,
+        cleanup_plan: TargetSessionDetachCleanupPlan,
+    ) -> TargetEventPlan {
+        self.commit_target_session_detachment_event_plan_inner(cleanup_plan, false)
+    }
+
+    fn commit_target_session_detachment_event_plan_inner(
+        &mut self,
+        cleanup_plan: TargetSessionDetachCleanupPlan,
+        emit_attached_state_delta: bool,
+    ) -> TargetEventPlan {
         let session_id = cleanup_plan.session_id().to_owned();
         let target_id = cleanup_plan.target_id().to_owned();
         let reason = cleanup_plan.reason().map(str::to_owned);
@@ -794,69 +832,22 @@ impl CdpConnection {
                     .attached_session_owner_session_id(&session_id)
             })
             .map(str::to_owned);
-        let cleaned = self
-            .execute_target_binding_cleanup_for_session_without_event_async(&session_id)
-            .await?;
-        if !cleaned {
-            anyhow::bail!("InvalidSessionId");
-        }
-        Ok(self.detach_known_session_event_plan(
-            &target_id,
-            &session_id,
-            reason.as_deref(),
-            parent_session_id.as_deref(),
-        ))
-    }
-
-    pub(crate) async fn detach_dedicated_worker_session_with_binding_cleanup_event_plan_async(
-        &mut self,
-        cleanup_plan: TargetSessionDetachCleanupPlan,
-    ) -> anyhow::Result<TargetEventPlan> {
-        let session_id = cleanup_plan.session_id().to_owned();
-        let target_id = cleanup_plan.target_id().to_owned();
-        let reason = cleanup_plan.reason().map(str::to_owned);
-        let parent_session_id = cleanup_plan
-            .parent_session_id()
-            .or_else(|| {
-                self.target_control
-                    .attached_session_owner_session_id(&session_id)
-            })
-            .map(str::to_owned);
-        let cleaned = self
-            .execute_target_binding_cleanup_for_session_without_event_async(&session_id)
-            .await?;
-        if !cleaned {
-            anyhow::bail!("InvalidSessionId");
-        }
-        Ok(
+        if emit_attached_state_delta {
+            self.detach_known_session_event_plan(
+                &target_id,
+                &session_id,
+                reason.as_deref(),
+                parent_session_id.as_deref(),
+            )
+        } else {
             self.detach_known_session_event_plan_with_attached_state_delta(
                 &target_id,
                 &session_id,
                 reason.as_deref(),
                 parent_session_id.as_deref(),
                 false,
-            ),
-        )
-    }
-
-    pub(crate) fn detach_dedicated_worker_session_after_target_removal_event_plan(
-        &mut self,
-        cleanup_plan: TargetSessionDetachCleanupPlan,
-    ) -> TargetEventPlan {
-        let parent_session_id = cleanup_plan
-            .parent_session_id()
-            .or_else(|| {
-                self.target_control
-                    .attached_session_owner_session_id(cleanup_plan.session_id())
-            })
-            .map(str::to_owned);
-        self.detach_known_session_event_plan_with_attached_state_delta(
-            cleanup_plan.target_id(),
-            cleanup_plan.session_id(),
-            cleanup_plan.reason(),
-            parent_session_id.as_deref(),
-            false,
-        )
+            )
+        }
     }
 
     fn clear_detached_target_session_owner_state(&mut self, session_id: &str) {
@@ -865,6 +856,7 @@ impl CdpConnection {
         self.cancel_tracing_for_session_owner(Some(session_id));
         self.clear_auto_attach_owner(Some(session_id));
         self.set_service_worker_pause_on_start_owner(Some(session_id), false);
+        self.set_dedicated_worker_pause_on_start_owner(Some(session_id), false);
         self.target_control.remove_owner(Some(session_id));
     }
 

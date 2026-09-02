@@ -3399,7 +3399,7 @@ impl CdpConnection {
             })
     }
 
-    pub(crate) fn close_default_target_placeholder(
+    pub(crate) async fn close_default_target_placeholder(
         &mut self,
         target_id: &str,
     ) -> Option<TargetEventPlan> {
@@ -3413,10 +3413,15 @@ impl CdpConnection {
         let target_host_closure = self.prepare_target_host_closure(DEFAULT_CDP_PAGE_TARGET_ID);
         let (detached_info_deltas, destroyed_deltas) = target_host_closure.into_parts();
         let mut plan = self.prepared_target_host_deltas_event_plan(detached_info_deltas);
-        plan.extend(self.detach_closed_top_level_target_sessions_event_plan(
+        if let Some(tab_cleanup) = self.take_closed_top_level_target_sessions_cleanup_plan(
             DEFAULT_CDP_PAGE_TARGET_ID,
             Some("Render process gone."),
-        ));
+        ) {
+            plan.extend(
+                self.dispose_target_closure_sessions_event_plan_async(tab_cleanup, None)
+                    .await,
+            );
+        }
         let closed = self.default_target_lifecycle.close_placeholder(target_id);
         debug_assert!(closed, "validated default placeholder must close");
         plan.extend(self.prepared_target_host_deltas_event_plan(destroyed_deltas));
@@ -3493,14 +3498,12 @@ impl CdpConnection {
         Some(closure_plan)
     }
 
-    pub(crate) fn detach_closed_top_level_target_sessions_event_plan(
+    pub(crate) fn take_closed_top_level_target_sessions_cleanup_plan(
         &mut self,
         page_target_id: &str,
         reason: Option<&str>,
-    ) -> TargetEventPlan {
-        let Some(closure_plan) = self.remove_tab_for_page_target(page_target_id) else {
-            return TargetEventPlan::default();
-        };
+    ) -> Option<TargetClosureCleanupPlan> {
+        let closure_plan = self.remove_tab_for_page_target(page_target_id)?;
         debug_assert!(
             closure_plan
                 .destroyed_target_ids()
@@ -3509,10 +3512,11 @@ impl CdpConnection {
         let target = closure_plan.tab_target();
         let tab_target_id = target.id().to_owned();
         let tab_session_ids = target.session_ids();
-        self.detach_target_closure_cleanup_event_plan(
-            TargetClosureCleanupPlan::new(tab_target_id, reason, tab_session_ids),
-            None,
-        )
+        Some(TargetClosureCleanupPlan::new(
+            tab_target_id,
+            reason,
+            tab_session_ids,
+        ))
     }
 
     pub(crate) fn rollback_top_level_target_tab_sessions_without_event(

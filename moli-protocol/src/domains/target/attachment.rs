@@ -557,12 +557,6 @@ async fn detach_from_target_inner_async(
             out.push_error(-31998, "InvalidSessionId");
             return;
         };
-        if let Some(browser_context_id) = route.browser_context_id()
-            && !conn.activate_browser_context_by_id(browser_context_id)
-        {
-            out.push_error(-31998, "InvalidSessionId");
-            return;
-        }
         if let Some(requested_target_id) = params.target_id.as_deref()
             && detach_session_route_target_id(&route)
                 .is_some_and(|target_id| target_id != requested_target_id)
@@ -591,9 +585,9 @@ async fn detach_from_target_inner_async(
     if let Some(session_id) = params.session_id.as_deref()
         && conn.is_browser_session_id(Some(session_id))
     {
-        conn.cancel_tracing_for_session_owner_async(Some(session_id))
+        let detached = conn
+            .dispose_browser_session_owner_event_plan_async(session_id)
             .await;
-        let detached = conn.detach_browser_session_owner_event_plan(session_id);
         debug_assert!(detached.is_some());
         if let Some(detached) = detached {
             out.target_events_mut().extend_background_events(detached);

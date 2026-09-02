@@ -1000,40 +1000,27 @@ pub(super) async fn release_attached_sessions_for_root_frontend_async(
             continue;
         }
 
-        let Some(browser_context_id) = detach_plan.browser_context_id().map(str::to_owned) else {
-            conn.rollback_auto_attached_session_detach_plan_without_event(&detach_plan);
-            continue;
-        };
-        if !conn
-            .activate_browser_context_by_id_async(&browser_context_id)
+        let predecessor =
+            match super::session_disposal::dispose_primary_page_session_preserving_frontend_async(
+                conn,
+                out.background_events_mut(),
+                command_context.protocol_events_mut(),
+                &session_id,
+            )
             .await
-        {
-            conn.rollback_auto_attached_session_detach_plan_without_event(&detach_plan);
-            continue;
-        }
-        let predecessor = match super::session_disposal::dispose_page_session_runtime_state_async(
-            conn,
-            out.background_events_mut(),
-            command_context.protocol_events_mut(),
-            &session_id,
-        )
-        .await
-        {
-            Ok(predecessor) => predecessor,
-            Err(error) => {
-                tracing::warn!(
-                session_id,
-                %error,
-                    "failed to dispose root-owned page session runtime state"
-                );
-                continue;
-            }
-        };
+            {
+                Ok(predecessor) => predecessor,
+                Err(error) => {
+                    tracing::warn!(
+                    session_id,
+                    %error,
+                        "failed to dispose root-owned page session runtime state"
+                    );
+                    continue;
+                }
+            };
         if let Some(predecessor) = predecessor {
             command_context.set_renderer_output_predecessor(predecessor);
-        }
-        if !conn.release_primary_target_session_binding_without_event(&session_id) {
-            conn.rollback_auto_attached_session_detach_plan_without_event(&detach_plan);
         }
     }
 }
@@ -1045,25 +1032,13 @@ async fn detach_attached_session_for_owner_async(
     command_context: &mut crate::conn::CommandDispatchContext,
 ) {
     if conn.is_browser_session_id(Some(session_id)) {
-        conn.cancel_tracing_for_session_owner_async(Some(session_id))
+        let detached = conn
+            .dispose_browser_session_owner_without_event_async(session_id)
             .await;
-        let detached = conn.detach_browser_session_owner_without_event(session_id);
         debug_assert!(detached.is_some());
         return;
     }
     let detach_plan = conn.auto_attached_session_detach_plan(session_id);
-    let Some(browser_context_id) = detach_plan.browser_context_id().map(str::to_owned) else {
-        conn.rollback_auto_attached_session_detach_plan_without_event(&detach_plan);
-        return;
-    };
-    if !conn
-        .activate_browser_context_by_id_async(&browser_context_id)
-        .await
-    {
-        conn.rollback_auto_attached_session_detach_plan_without_event(&detach_plan);
-        return;
-    }
-
     let Some(cleanup_plan) = detach_plan.cleanup_plan() else {
         conn.rollback_auto_attached_session_detach_plan_without_event(&detach_plan);
         return;
@@ -1077,10 +1052,6 @@ async fn detach_attached_session_for_owner_async(
         }
         crate::conn::TargetBindingCleanupAction::TabTarget { tab_target_id } => {
             tab_target_id.clone()
-        }
-        crate::conn::TargetBindingCleanupAction::None => {
-            conn.rollback_auto_attached_session_detach_plan_without_event(&detach_plan);
-            return;
         }
     };
     match super::session_disposal::dispose_target_session_async(
