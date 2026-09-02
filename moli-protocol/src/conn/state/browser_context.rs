@@ -1677,11 +1677,6 @@ impl BrowserContext {
         self.page_targets.rekey_active(target_id.into())
     }
 
-    #[cfg(test)]
-    pub(crate) fn clear_active_target_id(&mut self) {
-        self.page_targets.clear_selection();
-    }
-
     pub(crate) fn active_session_id(&self) -> Option<&str> {
         self.page_targets.active()?.session_id()
     }

@@ -338,11 +338,6 @@ impl PageTargetRegistry {
         true
     }
 
-    #[cfg(test)]
-    pub(crate) fn clear_selection(&mut self) {
-        self.active_target_id = None;
-    }
-
     pub(crate) fn iter(&self) -> impl DoubleEndedIterator<Item = &PageTargetHost> {
         self.hosts.values()
     }

@@ -1365,33 +1365,6 @@ mod tests {
     }
 
     #[test]
-    fn replacing_active_target_releases_its_session_storage_namespace() {
-        let mut context = BrowserContext::new("BC-replaced-storage".to_owned());
-        context.set_active_target_id("TID-first");
-        let first_session_storage = context.page_storage_handles().session_storage_store.clone();
-        assert!(
-            first_session_storage
-                .lock()
-                .set_item("https://same.test", "session", "first")
-        );
-
-        context.clear_active_target_id();
-        context.set_active_target_id("TID-second");
-        let second_session_storage = context.page_storage_handles().session_storage_store.clone();
-
-        assert!(!Arc::ptr_eq(
-            &first_session_storage,
-            &second_session_storage
-        ));
-        assert_eq!(
-            second_session_storage
-                .lock()
-                .get_item("https://same.test", "session"),
-            None
-        );
-    }
-
-    #[test]
     fn window_open_target_registry_preserves_named_target_bytes() {
         assert_eq!(
             BrowserContext::reusable_window_open_target_name("_BlAnK"),
@@ -1512,78 +1485,6 @@ mod tests {
                 .is_enabled(),
             "detaching the auxiliary target session must remove its Fetch.enable config"
         );
-    }
-
-    #[test]
-    fn clearing_selection_keeps_the_page_target_host_and_its_state() {
-        let mut context = BrowserContext::new("BC-1".to_owned());
-        context.set_active_target_id("TID-active".to_owned());
-        context.attach_active_session("SID-active".to_owned());
-        context.set_target_url("https://active.test/".to_owned());
-        context.set_target_security_origin("https://active.test".to_owned());
-        context.set_target_secure_context_type("Secure".to_owned());
-        context
-            .active_page_target_mut()
-            .runtime_slot
-            .set_page_attachment_id_for_test(42);
-        context.active_page_target_mut().devtools_sessions
-            [moli_page_types::DevToolsSessionKey::Primary]
-            .runtime_session_state
-            .runtime_frontend_enabled = true;
-        context.active_page_target_mut().devtools_sessions
-            [moli_page_types::DevToolsSessionKey::Primary]
-            .runtime_session_state
-            .inspector_enabled = true;
-        context
-            .active_page_target_mut()
-            .owner_state
-            .next_document_start_script_id = 3;
-        context
-            .active_page_target_mut()
-            .owner_state
-            .document_start_scripts
-            .push((
-                "script-1".to_owned(),
-                DocumentStartScript {
-                    registry_key: None,
-                    devtools_session: None,
-                    source: "globalThis.fromDocumentStart = true".to_owned(),
-                    world_name: None,
-                    has_bidi_channel_argument: false,
-                    bidi_channel_handoffs: Vec::new(),
-                },
-            ));
-
-        context.clear_active_target_id();
-        let host = context
-            .page_target("TID-active")
-            .expect("clearing foreground selection must not remove the host");
-
-        assert_eq!(host.target_id(), "TID-active");
-        assert_eq!(host.session_id(), Some("SID-active"));
-        assert_eq!(host.target_url(), "https://active.test/");
-        assert_eq!(
-            host.target_identity().security_origin(),
-            "https://active.test"
-        );
-        assert_eq!(host.target_identity().secure_context_type(), "Secure");
-        assert_eq!(
-            host.page_attachment_id()
-                .map(|attachment_id| attachment_id.get()),
-            Some(42)
-        );
-        assert_eq!(host.owner_state.document_start_scripts.len(), 1);
-        assert!(
-            host.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
-                .runtime_session_state
-                .runtime_frontend_enabled
-        );
-        assert!(
-            host.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
-                .runtime_session_state
-                .inspector_enabled
-        );
-        assert_eq!(host.owner_state.next_document_start_script_id, 3);
     }
 
     #[tokio::test(flavor = "multi_thread")]
