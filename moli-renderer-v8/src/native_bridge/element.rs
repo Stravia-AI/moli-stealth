@@ -238,6 +238,7 @@ pub(crate) use forms::{
 };
 pub(super) use forms::{
     button_command_for_element_getter_function, button_command_for_element_setter_function,
+    button_command_getter_function, button_command_setter_function,
     button_disabled_getter_function, button_disabled_setter_function,
     button_form_action_getter_function, button_form_action_setter_function,
     button_form_enctype_getter_function, button_form_enctype_setter_function,
@@ -4964,6 +4965,12 @@ struct HtmlLegendElementPrototypeDeclaration {
 #[derive(WebApiFunctionTemplate)]
 #[webapi(name = "HTMLButtonElement", enumerable)]
 struct HtmlButtonElementValuePrototypeDeclaration {
+    #[webapi(
+        accessor_property,
+        getter = button_command_getter_function,
+        setter = button_command_setter_function
+    )]
+    command: (),
     #[webapi(
         accessor_property,
         getter = button_disabled_getter_function,
