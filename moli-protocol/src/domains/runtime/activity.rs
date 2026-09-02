@@ -274,10 +274,8 @@ impl RuntimePreparedOutputs {
         owner: &CommandOwnerScope,
         call: moli_core::page::PendingRuntimeBindingCall,
     ) -> Self {
-        let Some(attachment) = conn.target_page_protocol_attachment_identity_for_route(
-            owner.session_id(),
-            owner.session_owner_route(),
-        ) else {
+        let Some(attachment) = conn.target_page_protocol_attachment_identity_for_owner(owner)
+        else {
             return Self::default();
         };
         Self {

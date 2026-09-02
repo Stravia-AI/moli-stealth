@@ -527,9 +527,8 @@ fn start_devtools_add_network_intercept_command(
             .as_ref()
             .map(|session_id| session_id.as_str().to_owned())
     };
-    match conn.start_add_network_intercept_for_route(
-        owner.session_id(),
-        owner.session_owner_route(),
+    match conn.start_add_network_intercept_for_owner(
+        owner,
         intercept_session_id,
         command.intercept_id.as_str().to_owned(),
         handle_auth_requests,
@@ -565,12 +564,7 @@ fn start_devtools_remove_network_intercept_command(
     intercept_id: &str,
     allow_global_lookup: bool,
 ) -> FetchCommandTaskStep {
-    match conn.start_remove_network_intercept_for_route(
-        owner.session_id(),
-        owner.session_owner_route(),
-        intercept_id,
-        allow_global_lookup,
-    ) {
+    match conn.start_remove_network_intercept_for_owner(owner, intercept_id, allow_global_lookup) {
         Ok(Some(pending)) => {
             FetchCommandTaskStep::Pending(PendingFetchCommandDispatch::new_for_owner(
                 command_id,
@@ -813,10 +807,7 @@ fn complete_fetch_config_update_command(
         Ok(completion) => completion,
         Err(error) => return CommandOutputPlan::error(-32000, error),
     };
-    let page = match conn.loaded_page_mut_for_protocol_access_for_route(
-        owner_scope.session_id(),
-        owner_scope.session_owner_route(),
-    ) {
+    let page = match conn.loaded_page_mut_for_protocol_access_for_owner(&owner_scope) {
         Ok(page) => page,
         Err(message) if message == "NoDocumentLoaded" => {
             return CommandOutputPlan::from_devtools_result(result);
@@ -873,10 +864,7 @@ async fn complete_disable_command_async(
                 return;
             }
         };
-        match conn.loaded_page_mut_for_protocol_access_for_route(
-            owner.session_id(),
-            owner.session_owner_route(),
-        ) {
+        match conn.loaded_page_mut_for_protocol_access_for_owner(owner) {
             Ok(page) => {
                 if let Err(error) = page.finish_set_fetch_subresource_interception(completion) {
                     out.push_error(
@@ -948,9 +936,8 @@ async fn complete_disable_command_async(
     }
     for (_, pending) in pending_subresource_fetches {
         if let Ok(predecessor) = conn
-            .fail_pending_subresource_fetch_for_route_async(
-                owner.session_id(),
-                owner.session_owner_route(),
+            .fail_pending_subresource_fetch_for_owner_async(
+                owner,
                 pending.internal_id,
                 "Fetch interception disabled".to_owned(),
             )
@@ -972,9 +959,8 @@ async fn complete_disable_command_async(
     }
     for (_, pending) in pending_subresource_auths {
         if let Ok(predecessor) = conn
-            .fail_pending_subresource_auth_for_route_async(
-                owner.session_id(),
-                owner.session_owner_route(),
+            .fail_pending_subresource_auth_for_owner_async(
+                owner,
                 pending.internal_id,
                 "Fetch interception disabled".to_owned(),
             )
@@ -996,9 +982,8 @@ async fn complete_disable_command_async(
     }
     for (_, pending) in pending_subresource_responses {
         if let Ok(predecessor) = conn
-            .fail_pending_subresource_response_for_route_async(
-                owner.session_id(),
-                owner.session_owner_route(),
+            .fail_pending_subresource_response_for_owner_async(
+                owner,
                 pending.internal_id,
                 "Fetch interception disabled".to_owned(),
             )

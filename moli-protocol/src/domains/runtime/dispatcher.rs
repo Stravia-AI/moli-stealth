@@ -1656,10 +1656,7 @@ fn start_runtime_enable_command_for_owner(
     command_id: Option<u64>,
     owner_scope: CommandOwnerScope,
 ) -> RuntimeCommandTaskStep {
-    let has_loaded_page = match conn.runtime_session_owner_slot_for_route(
-        owner_scope.session_id(),
-        owner_scope.session_owner_route(),
-    ) {
+    let has_loaded_page = match conn.runtime_session_owner_slot_for_owner(&owner_scope) {
         Ok(slot) => slot.has_loaded_page(),
         Err(_) if owner_scope.session_id().is_some() => {
             return RuntimeCommandTaskStep::Complete(CommandOutputPlan::error(
@@ -1729,7 +1726,7 @@ fn runtime_remove_binding_should_skip_live_page_update(
     conn: &CdpConnection,
     owner: &CommandOwnerScope,
 ) -> bool {
-    conn.target_runtime_session_state_for_route(owner.session_id(), owner.session_owner_route())
+    conn.target_runtime_session_state_for_owner(owner)
         .is_some_and(|state| state.runtime_frontend_enabled)
 }
 
@@ -1801,17 +1798,11 @@ fn try_start_pending_runtime_binding_command(
         skip_live_page_update_after_inspector_success: false,
     };
     let live_page_update_unavailable = conn
-        .runtime_session_owner_slot_for_route(
-            owner_scope.session_id(),
-            owner_scope.session_owner_route(),
-        )
+        .runtime_session_owner_slot_for_owner(&owner_scope)
         .is_ok_and(|slot| !slot.has_loaded_page())
         || should_persist
             && conn
-                .runtime_session_owner_slot_for_route(
-                    owner_scope.session_id(),
-                    owner_scope.session_owner_route(),
-                )
+                .runtime_session_owner_slot_for_owner(&owner_scope)
                 .is_ok_and(|slot| slot.renderer_document_navigation_is_suspended());
     if live_page_update_unavailable {
         task.command_response = Some(RuntimeBindingCommandResponse::empty_success());
@@ -4219,26 +4210,19 @@ pub(crate) async fn start_bidi_preload_channel_listeners_for_execution_context_b
     out: &mut Vec<BackgroundProtocolEvent>,
 ) {
     let session_id = owner.session_id();
-    let handoff_owners = conn.target_owner_bidi_channel_preload_handoffs_for_route(
-        session_id,
-        owner.session_owner_route(),
-    );
+    let handoff_owners = conn.target_owner_bidi_channel_preload_handoffs_for_owner(owner);
     if handoff_owners.is_empty() {
         return;
     }
     let target_id = conn
-        .target_owner_identity_for_route(session_id, owner.session_owner_route())
+        .target_owner_identity_for_owner(owner)
         .and_then(|(_, target_id)| target_id)
         .map(DevToolsTargetId::from);
-    let route = owner
-        .session_owner_route()
-        .cloned()
-        .or_else(|| conn.session_route(session_id))
-        .or_else(|| {
-            target_id
-                .as_ref()
-                .and_then(|target_id| conn.target_session_route_for_target_id(target_id.as_str()))
-        });
+    let route = owner.resolve_route(conn).or_else(|| {
+        target_id
+            .as_ref()
+            .and_then(|target_id| conn.target_session_route_for_target_id(target_id.as_str()))
+    });
     let Some(route) = route else {
         return;
     };
@@ -7819,7 +7803,7 @@ fn prepare_runtime_inspector_payload_for_owner(
         }
         RuntimeInspectorPayloadPreparation::PrepareCallFunctionOn => {
             let (browser_context_id, target_id) = conn
-                .target_owner_identity_for_route(owner.session_id(), owner.session_owner_route())
+                .target_owner_identity_for_owner(owner)
                 .map(|(browser_context_id, target_id)| (Some(browser_context_id), target_id))
                 .unwrap_or((None, None));
             let command = build_cdp_call_function_command(
@@ -8320,12 +8304,8 @@ async fn complete_pending_runtime_inspector_command(
     if !saw_current_response
         && renderer_response_rx.is_some()
         && completed.command_id.is_some_and(|command_id| {
-            conn.renderer_runtime_command_cause_for_route(
-                completed.session_id(),
-                completed.owner_scope.session_owner_route(),
-                command_id,
-            )
-            .is_none()
+            conn.renderer_runtime_command_cause_for_owner(&completed.owner_scope, command_id)
+                .is_none()
         })
     {
         renderer_response_rx.take();
@@ -8571,10 +8551,7 @@ fn complete_pending_runtime_enable_command(
     {
         return CommandOutputPlan::error(-32000, message);
     }
-    let frame_id = conn.runtime_session_owner_frame_id_for_route(
-        completed.owner_scope.session_id(),
-        completed.owner_scope.session_owner_route(),
-    );
+    let frame_id = conn.runtime_session_owner_frame_id_for_owner(&completed.owner_scope);
 
     let mut plan = CommandOutputPlan::success();
     for event in replay.into_events() {
@@ -10346,10 +10323,7 @@ fn start_runtime_disable_command_for_owner(
     response_delivery: RendererInspectorResponseDelivery,
 ) -> RuntimeCommandTaskStep {
     if !conn
-        .runtime_session_owner_slot_for_route(
-            owner_scope.session_id(),
-            owner_scope.session_owner_route(),
-        )
+        .runtime_session_owner_slot_for_owner(&owner_scope)
         .is_ok_and(|slot| slot.has_loaded_page())
     {
         return RuntimeCommandTaskStep::Complete(disable_command_output_plan_sync_for_owner(
@@ -10460,7 +10434,7 @@ fn apply_runtime_disable_projection_after_success_for_owner(
     owner: &CommandOwnerScope,
 ) -> Result<(), String> {
     let was_enabled = conn
-        .target_runtime_session_state_for_route(owner.session_id(), owner.session_owner_route())
+        .target_runtime_session_state_for_owner(owner)
         .is_some_and(|state| state.runtime_frontend_enabled);
     match conn.set_runtime_frontend_enabled_for_owner(owner, false) {
         SessionOwnerRuntimeFrontendEnableResult::Handled => {

@@ -2426,7 +2426,9 @@ async fn page_navigate_network_failure_commits_error_document() {
     );
     let error_document_loader_id = ctx
         .conn
-        .target_session_owner_frame_tree_loader_id_for_route(Some("SID-1"), None)
+        .target_session_owner_frame_tree_loader_id_for_owner(
+            &crate::conn::CommandOwnerScope::for_session("SID-1"),
+        )
         .expect("error Document loader id");
     let stale_request_id = "REQ-before-network-error";
     let stale_body_completion = BackgroundNavigationCompletion::main_document_body(
@@ -2470,7 +2472,9 @@ async fn page_navigate_network_failure_commits_error_document() {
     assert!(stale_completion_scheduler_events.is_empty());
     assert_eq!(
         ctx.conn
-            .target_session_owner_frame_tree_loader_id_for_route(Some("SID-1"), None)
+            .target_session_owner_frame_tree_loader_id_for_owner(
+                &crate::conn::CommandOwnerScope::for_session("SID-1")
+            )
             .as_deref(),
         Some(error_document_loader_id.as_str()),
         "stale body completion must not replace the error Document loader"

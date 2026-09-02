@@ -309,7 +309,7 @@ impl TestContext {
         let owner = crate::conn::CommandOwnerScope::capture(&self.conn, session_id);
         let (_, target_id) = self
             .conn
-            .target_owner_identity_for_route(owner.session_id(), owner.session_owner_route())
+            .target_owner_identity_for_owner(&owner)
             .expect("navigation fixture requires an installed browser context");
         let target_id = target_id.expect("navigation fixture requires an exact target");
         let navigation_engine = navigation.take_navigation_engine_replacement();
@@ -357,10 +357,8 @@ impl TestContext {
                 .adopt_loaded_navigation_engine_for_owner(&owner, navigation_engine);
         }
         assert_eq!(
-            self.conn.target_root_document_lifecycle_identity_for_route(
-                owner.session_id(),
-                owner.session_owner_route(),
-            ),
+            self.conn
+                .target_root_document_lifecycle_identity_for_owner(&owner,),
             Some(binding.renderer_document_identity()),
             "navigation fixture must retain its exact renderer Document binding"
         );

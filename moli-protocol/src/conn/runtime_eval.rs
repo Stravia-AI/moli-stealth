@@ -232,8 +232,7 @@ enum BidiChannelListenerRoute {
 #[derive(Debug)]
 pub(crate) struct OwnerRuntimeResponse {
     command_id: u64,
-    session_id: Option<String>,
-    owner_route: Option<CdpSessionRoute>,
+    owner: CommandOwnerScope,
     object_group: Option<String>,
     message: Value,
     bidi_channel_listener: Option<BidiChannelListenerResidence>,
@@ -284,13 +283,12 @@ impl OwnerRuntimeResponse {
     fn from_pending_inspector_await(
         command_id: u64,
         entry: PendingInspectorAwait,
-        owner_route: Option<CdpSessionRoute>,
+        owner: &CommandOwnerScope,
         message: Value,
     ) -> Self {
         Self {
             command_id,
-            session_id: entry.session_id().map(str::to_owned),
-            owner_route,
+            owner: owner.clone(),
             object_group: entry.object_group().map(str::to_owned),
             message,
             bidi_channel_listener: entry.bidi_channel_listener().cloned(),
@@ -298,11 +296,11 @@ impl OwnerRuntimeResponse {
     }
 
     fn session_id(&self) -> Option<&str> {
-        self.session_id.as_deref()
+        self.owner.session_id()
     }
 
-    fn owner_route(&self) -> Option<&CdpSessionRoute> {
-        self.owner_route.as_ref()
+    fn owner(&self) -> &CommandOwnerScope {
+        &self.owner
     }
 
     fn object_group(&self) -> Option<&str> {
@@ -905,13 +903,9 @@ impl CdpConnection {
                 object_group,
             );
         }
-        self.with_target_devtools_session_state_for_route_mut(
-            owner.session_id(),
-            owner.session_owner_route(),
-            |state| {
-                state.try_register_pending_inspector_await(cdp_request_id, session_id, object_group)
-            },
-        )
+        self.with_target_devtools_session_state_for_owner_mut(owner, |state| {
+            state.try_register_pending_inspector_await(cdp_request_id, session_id, object_group)
+        })
         .unwrap_or(Ok(()))
     }
 
@@ -970,17 +964,9 @@ impl CdpConnection {
                 descriptor,
             );
         }
-        self.with_target_devtools_session_state_for_route_mut(
-            owner.session_id(),
-            owner.session_owner_route(),
-            |state| {
-                state.try_register_renderer_call(
-                    cdp_request_id,
-                    dispatched_attachment_id,
-                    descriptor,
-                )
-            },
-        )
+        self.with_target_devtools_session_state_for_owner_mut(owner, |state| {
+            state.try_register_renderer_call(cdp_request_id, dispatched_attachment_id, descriptor)
+        })
         .ok_or_else(|| "UnknownSession".to_owned())?
         .map_err(|error| error.to_string())
     }
@@ -1017,11 +1003,9 @@ impl CdpConnection {
                 cdp_request_id,
             );
         }
-        self.with_target_devtools_session_state_for_route_mut(
-            owner.session_id(),
-            owner.session_owner_route(),
-            |state| state.take_renderer_call_for_frontend(cdp_request_id),
-        )
+        self.with_target_devtools_session_state_for_owner_mut(owner, |state| {
+            state.take_renderer_call_for_frontend(cdp_request_id)
+        })
         .flatten()
     }
 
@@ -1080,23 +1064,23 @@ impl CdpConnection {
         session_id: Option<&str>,
         cdp_request_id: u64,
     ) -> Option<RendererRuntimeCommandCausalIdentity> {
-        self.renderer_runtime_command_cause_for_route(session_id, None, cdp_request_id)
+        let owner = CommandOwnerScope::capture(self, session_id);
+        self.renderer_runtime_command_cause_for_owner(&owner, cdp_request_id)
     }
 
-    pub(crate) fn renderer_runtime_command_cause_for_route(
+    pub(crate) fn renderer_runtime_command_cause_for_owner(
         &self,
-        session_id: Option<&str>,
-        owner_route: Option<&CdpSessionRoute>,
+        owner: &CommandOwnerScope,
         cdp_request_id: u64,
     ) -> Option<RendererRuntimeCommandCausalIdentity> {
-        let correlation = if session_id.is_some() {
-            self.renderer_call_for_frontend_for_session_owner(session_id, cdp_request_id)
+        let correlation = if owner.session_id().is_some() {
+            self.renderer_call_for_frontend_for_session_owner(owner.session_id(), cdp_request_id)
         } else {
-            self.target_devtools_session_state_for_route(session_id, owner_route)?
+            self.target_devtools_session_state_for_owner(owner)?
                 .renderer_call_for_frontend(cdp_request_id)
         }?;
         Some(RendererRuntimeCommandCausalIdentity::new(
-            self.target_renderer_runtime_inspector_session_id_for_route(session_id, owner_route),
+            self.target_renderer_runtime_inspector_session_id_for_owner(owner),
             correlation.renderer_call_id().get(),
         ))
     }
@@ -1153,17 +1137,13 @@ impl CdpConnection {
                 dispatched_attachment_id,
             );
         }
-        self.with_target_devtools_session_state_for_route_mut(
-            owner.session_id(),
-            owner.session_owner_route(),
-            |state| {
-                state.take_renderer_call_for_frontend_if_matches(
-                    cdp_request_id,
-                    renderer_call_id,
-                    dispatched_attachment_id,
-                )
-            },
-        )
+        self.with_target_devtools_session_state_for_owner_mut(owner, |state| {
+            state.take_renderer_call_for_frontend_if_matches(
+                cdp_request_id,
+                renderer_call_id,
+                dispatched_attachment_id,
+            )
+        })
         .flatten()
     }
 
@@ -1180,19 +1160,18 @@ impl CdpConnection {
         ) == Some(correlation)
     }
 
-    pub(crate) fn take_renderer_call_if_correlation_matches_for_route(
+    pub(crate) fn take_renderer_call_if_correlation_matches_for_owner(
         &mut self,
-        session_id: Option<&str>,
-        owner_route: Option<&CdpSessionRoute>,
+        owner: &CommandOwnerScope,
         correlation: RendererCommandCorrelation,
     ) -> bool {
-        if session_id.is_some() {
+        if owner.session_id().is_some() {
             return self.take_renderer_call_if_correlation_matches_for_session_owner(
-                session_id,
+                owner.session_id(),
                 correlation,
             );
         }
-        self.with_target_devtools_session_state_for_route_mut(session_id, owner_route, |state| {
+        self.with_target_devtools_session_state_for_owner_mut(owner, |state| {
             state.take_renderer_call_for_frontend_if_matches(
                 correlation.frontend_command_id().get(),
                 correlation.renderer_call_id(),
@@ -1250,16 +1229,12 @@ impl CdpConnection {
                     dispatched_attachment_id,
                 );
         }
-        self.with_target_devtools_session_state_for_route_mut(
-            owner.session_id(),
-            owner.session_owner_route(),
-            |state| {
-                state.take_frontend_command_for_renderer_if_attachment_matches(
-                    renderer_call_id,
-                    dispatched_attachment_id,
-                )
-            },
-        )
+        self.with_target_devtools_session_state_for_owner_mut(owner, |state| {
+            state.take_frontend_command_for_renderer_if_attachment_matches(
+                renderer_call_id,
+                dispatched_attachment_id,
+            )
+        })
         .flatten()
     }
 
@@ -1398,7 +1373,7 @@ impl CdpConnection {
             );
         }
         let owner_target_id = self
-            .target_owner_identity_for_route(owner.session_id(), owner.session_owner_route())
+            .target_owner_identity_for_owner(owner)
             .and_then(|(_, target_id)| target_id);
         rewrite_runtime_inspector_command_for_renderer(
             raw_json,
@@ -1415,17 +1390,7 @@ impl CdpConnection {
         action: &'static str,
     ) {
         let session_id = owner.session_id();
-        let owner_route = owner
-            .session_owner_route()
-            .cloned()
-            .or_else(|| self.session_route(session_id));
-        let job = RuntimeAwaitJob::new(
-            cdp_request_id,
-            session_id,
-            owner_route,
-            object_group,
-            action,
-        );
+        let job = RuntimeAwaitJob::new(cdp_request_id, owner, object_group, action);
         let trace_fields = job.trace_fields();
         let key = PendingRendererCommandKey::new(session_id, cdp_request_id);
         match self.pending_runtime_await_jobs.entry(key) {
@@ -1603,18 +1568,14 @@ impl CdpConnection {
             owner,
             "BiDi listener residence must be registered under its exact Page owner"
         );
-        let _ = self.with_target_devtools_session_state_for_route_mut(
-            owner.session_id(),
-            owner.session_owner_route(),
-            |state| {
-                state.register_pending_bidi_channel_listener(
-                    cdp_request_id,
-                    owner.session_id(),
-                    Some(BIDI_SCRIPT_RESULT_OBJECT_GROUP),
-                    listener,
-                );
-            },
-        );
+        let _ = self.with_target_devtools_session_state_for_owner_mut(owner, |state| {
+            state.register_pending_bidi_channel_listener(
+                cdp_request_id,
+                owner.session_id(),
+                Some(BIDI_SCRIPT_RESULT_OBJECT_GROUP),
+                listener,
+            );
+        });
     }
 
     pub(crate) fn publish_bidi_channel_listener_start(
@@ -1919,11 +1880,9 @@ impl CdpConnection {
         if owner.session_id().is_some() {
             return self.remove_pending_inspector_await(cdp_request_id, owner.session_id());
         }
-        self.with_target_devtools_session_state_for_route_mut(
-            owner.session_id(),
-            owner.session_owner_route(),
-            |state| state.remove_pending_inspector_await(cdp_request_id),
-        )
+        self.with_target_devtools_session_state_for_owner_mut(owner, |state| {
+            state.remove_pending_inspector_await(cdp_request_id)
+        })
         .flatten()
     }
 
@@ -2244,11 +2203,9 @@ impl CdpConnection {
             reason,
         );
         let drained = self
-            .with_target_devtools_session_state_for_route_mut(
-                None,
-                owner.session_owner_route(),
-                |state| state.drain_pending_inspector_awaits(),
-            )
+            .with_target_devtools_session_state_for_owner_mut(owner, |state| {
+                state.drain_pending_inspector_awaits()
+            })
             .unwrap_or_default();
         for (cdp_id, entry) in drained {
             self.cancel_runtime_await_job(cdp_id, entry.session_id(), reason);
@@ -2267,11 +2224,9 @@ impl CdpConnection {
             );
         }
         let terminated = self
-            .with_target_devtools_session_state_for_route_mut(
-                None,
-                owner.session_owner_route(),
-                |state| state.terminate_all_renderer_calls(reason),
-            )
+            .with_target_devtools_session_state_for_owner_mut(owner, |state| {
+                state.terminate_all_renderer_calls(reason)
+            })
             .unwrap_or_default();
         push_terminated_renderer_call_error_background_events(out, terminated, None, reason);
     }
@@ -2360,11 +2315,8 @@ impl CdpConnection {
             return self
                 .runtime_remote_object_id_known_for_session_owner(owner.session_id(), object_id);
         }
-        self.target_devtools_session_state_for_route(
-            owner.session_id(),
-            owner.session_owner_route(),
-        )
-        .is_some_and(|state| state.has_runtime_remote_object_id(object_id))
+        self.target_devtools_session_state_for_owner(owner)
+            .is_some_and(|state| state.has_runtime_remote_object_id(object_id))
     }
 
     pub(crate) fn register_runtime_remote_object_ids_from_value_for_session_owner(
@@ -2374,20 +2326,6 @@ impl CdpConnection {
     ) {
         let object_ids = runtime_remote_object_ids_in_value(value);
         self.register_runtime_remote_object_ids_for_session_owner(session_id, object_ids);
-    }
-
-    pub(crate) fn register_runtime_remote_object_ids_from_value_for_route(
-        &mut self,
-        session_id: Option<&str>,
-        owner_route: Option<&CdpSessionRoute>,
-        value: &Value,
-    ) {
-        let object_ids = runtime_remote_object_ids_in_value(value);
-        let _ = self.with_target_devtools_session_state_for_route_mut(
-            session_id,
-            owner_route,
-            |state| state.register_runtime_remote_object_ids(object_ids),
-        );
     }
 
     pub(crate) fn register_runtime_remote_object_ids_from_value_for_owner(
@@ -2402,11 +2340,10 @@ impl CdpConnection {
             );
             return;
         }
-        self.register_runtime_remote_object_ids_from_value_for_route(
-            owner.session_id(),
-            owner.session_owner_route(),
-            value,
-        );
+        let object_ids = runtime_remote_object_ids_in_value(value);
+        let _ = self.with_target_devtools_session_state_for_owner_mut(owner, |state| {
+            state.register_runtime_remote_object_ids(object_ids)
+        });
     }
 
     pub(crate) fn register_runtime_remote_object_ids_from_value_for_session_owner_with_group(
@@ -2420,21 +2357,6 @@ impl CdpConnection {
             session_id,
             object_ids,
             object_group,
-        );
-    }
-
-    pub(crate) fn register_runtime_remote_object_ids_from_value_for_route_with_group(
-        &mut self,
-        session_id: Option<&str>,
-        owner_route: Option<&CdpSessionRoute>,
-        value: &Value,
-        object_group: &str,
-    ) {
-        let object_ids = runtime_remote_object_ids_in_value(value);
-        let _ = self.with_target_devtools_session_state_for_route_mut(
-            session_id,
-            owner_route,
-            |state| state.register_runtime_remote_object_ids_with_group(object_ids, object_group),
         );
     }
 
@@ -2452,12 +2374,10 @@ impl CdpConnection {
             );
             return;
         }
-        self.register_runtime_remote_object_ids_from_value_for_route_with_group(
-            owner.session_id(),
-            owner.session_owner_route(),
-            value,
-            object_group,
-        );
+        let object_ids = runtime_remote_object_ids_in_value(value);
+        let _ = self.with_target_devtools_session_state_for_owner_mut(owner, |state| {
+            state.register_runtime_remote_object_ids_with_group(object_ids, object_group)
+        });
     }
 
     pub(crate) fn runtime_remote_object_group_for_session_owner(
@@ -2493,12 +2413,9 @@ impl CdpConnection {
             return self
                 .runtime_remote_object_group_for_session_owner(owner.session_id(), object_id);
         }
-        self.target_devtools_session_state_for_route(
-            owner.session_id(),
-            owner.session_owner_route(),
-        )?
-        .runtime_remote_object_group(object_id)
-        .map(str::to_owned)
+        self.target_devtools_session_state_for_owner(owner)?
+            .runtime_remote_object_group(object_id)
+            .map(str::to_owned)
     }
 
     pub(crate) fn runtime_remote_object_realm_for_session_owner(
@@ -2534,12 +2451,9 @@ impl CdpConnection {
             return self
                 .runtime_remote_object_realm_for_session_owner(owner.session_id(), object_id);
         }
-        self.target_devtools_session_state_for_route(
-            owner.session_id(),
-            owner.session_owner_route(),
-        )?
-        .runtime_remote_object_realm(object_id)
-        .map(str::to_owned)
+        self.target_devtools_session_state_for_owner(owner)?
+            .runtime_remote_object_realm(object_id)
+            .map(str::to_owned)
     }
 
     pub(crate) fn runtime_remote_object_alias_for_session_owner(
@@ -2575,12 +2489,9 @@ impl CdpConnection {
             return self
                 .runtime_remote_object_alias_for_session_owner(owner.session_id(), object_id);
         }
-        self.target_devtools_session_state_for_route(
-            owner.session_id(),
-            owner.session_owner_route(),
-        )?
-        .runtime_remote_object_alias(object_id)
-        .map(str::to_owned)
+        self.target_devtools_session_state_for_owner(owner)?
+            .runtime_remote_object_alias(object_id)
+            .map(str::to_owned)
     }
 
     pub(crate) fn register_runtime_remote_object_alias_for_owner_with_realm(
@@ -2599,14 +2510,9 @@ impl CdpConnection {
             );
             return;
         }
-        let _ = self.with_target_devtools_session_state_for_route_mut(
-            owner.session_id(),
-            owner.session_owner_route(),
-            |state| {
-                state
-                    .register_runtime_remote_object_alias_with_realm(alias_id, object_id, realm_id);
-            },
-        );
+        let _ = self.with_target_devtools_session_state_for_owner_mut(owner, |state| {
+            state.register_runtime_remote_object_alias_with_realm(alias_id, object_id, realm_id);
+        });
     }
 
     pub(crate) fn unregister_runtime_remote_object_ids_for_session_owner(
@@ -2646,11 +2552,9 @@ impl CdpConnection {
             );
             return;
         }
-        let _ = self.with_target_devtools_session_state_for_route_mut(
-            owner.session_id(),
-            owner.session_owner_route(),
-            |state| state.unregister_runtime_remote_object_ids(object_ids),
-        );
+        let _ = self.with_target_devtools_session_state_for_owner_mut(owner, |state| {
+            state.unregister_runtime_remote_object_ids(object_ids)
+        });
     }
 
     pub(crate) fn unregister_runtime_remote_object_group_for_session_owner(
@@ -2687,11 +2591,9 @@ impl CdpConnection {
             );
             return;
         }
-        let _ = self.with_target_devtools_session_state_for_route_mut(
-            owner.session_id(),
-            owner.session_owner_route(),
-            |state| state.unregister_runtime_remote_object_group(object_group),
-        );
+        let _ = self.with_target_devtools_session_state_for_owner_mut(owner, |state| {
+            state.unregister_runtime_remote_object_group(object_group)
+        });
     }
 
     pub(crate) fn clear_runtime_remote_object_tracking_for_session_owner(
@@ -2723,9 +2625,8 @@ impl CdpConnection {
             self.clear_runtime_remote_object_tracking_for_session_owner(owner.session_id());
             return;
         }
-        let _ = self.with_target_devtools_session_state_for_route_mut(
-            owner.session_id(),
-            owner.session_owner_route(),
+        let _ = self.with_target_devtools_session_state_for_owner_mut(
+            owner,
             DevToolsSessionState::clear_runtime_remote_object_tracking,
         );
     }
@@ -2756,9 +2657,8 @@ impl CdpConnection {
             self.record_runtime_contexts_reported_for_session_owner(owner.session_id());
             return;
         }
-        let _ = self.with_target_devtools_session_state_for_route_mut(
-            owner.session_id(),
-            owner.session_owner_route(),
+        let _ = self.with_target_devtools_session_state_for_owner_mut(
+            owner,
             DevToolsSessionState::record_runtime_contexts_reported_to_frontend,
         );
     }
@@ -2789,9 +2689,8 @@ impl CdpConnection {
             self.record_runtime_contexts_cleared_for_session_owner(owner.session_id());
             return;
         }
-        let _ = self.with_target_devtools_session_state_for_route_mut(
-            owner.session_id(),
-            owner.session_owner_route(),
+        let _ = self.with_target_devtools_session_state_for_owner_mut(
+            owner,
             DevToolsSessionState::record_runtime_contexts_cleared_for_frontend,
         );
     }
@@ -2877,11 +2776,9 @@ impl CdpConnection {
             );
             return;
         }
-        let _ = self.with_target_devtools_session_state_for_route_mut(
-            owner.session_id(),
-            owner.session_owner_route(),
-            |state| state.clear_runtime_remote_objects_for_realm(realm_id),
-        );
+        let _ = self.with_target_devtools_session_state_for_owner_mut(owner, |state| {
+            state.clear_runtime_remote_objects_for_realm(realm_id)
+        });
     }
 
     pub(crate) fn register_runtime_remote_object_ids_for_session_owner_with_realm(
@@ -2935,11 +2832,9 @@ impl CdpConnection {
         if object_ids.is_empty() {
             return;
         }
-        let _ = self.with_target_devtools_session_state_for_route_mut(
-            owner.session_id(),
-            owner.session_owner_route(),
-            |state| state.register_runtime_remote_object_ids_with_realm(object_ids, realm_id),
-        );
+        let _ = self.with_target_devtools_session_state_for_owner_mut(owner, |state| {
+            state.register_runtime_remote_object_ids_with_realm(object_ids, realm_id)
+        });
     }
 
     pub(crate) fn register_runtime_remote_object_alias_for_session_owner_with_realm(
@@ -3098,8 +2993,7 @@ impl CdpConnection {
         if owner.session_id().is_some() {
             return self.runtime_remote_object_owner_identity_for_session(owner.session_id());
         }
-        let (browser_context_id, target_id) =
-            self.target_owner_identity_for_route(owner.session_id(), owner.session_owner_route())?;
+        let (browser_context_id, target_id) = self.target_owner_identity_for_owner(owner)?;
         Some(RuntimeRemoteObjectOwnerIdentity::Page {
             browser_context_id,
             target_id,
@@ -3386,11 +3280,7 @@ impl CdpConnection {
         if output.renderer_agent_attachment_id().is_some()
             && let Some(state) = output.v8_state_update().cloned()
         {
-            let _ = self.merge_v8_inspector_session_state_for_route(
-                owner.session_id(),
-                owner.session_owner_route(),
-                state,
-            );
+            let _ = self.merge_v8_inspector_session_state_for_owner(owner, state);
         }
         let mut current_seen = false;
         for message in output.into_messages() {
@@ -3452,15 +3342,8 @@ impl CdpConnection {
             Some(id) => {
                 let entry = self.remove_pending_inspector_await_for_owner(id, owner);
                 if let Some(entry) = entry {
-                    let owner_route = owner
-                        .session_owner_route()
-                        .cloned()
-                        .or_else(|| self.runtime_await_owner_route_for_session(entry.session_id()));
                     let response = OwnerRuntimeResponse::from_pending_inspector_await(
-                        id,
-                        entry,
-                        owner_route,
-                        message,
+                        id, entry, owner, message,
                     );
                     return self.route_owner_runtime_response_into(
                         response,
@@ -3521,11 +3404,10 @@ impl CdpConnection {
                         .into_iter()
                         .map(str::to_owned)
                         .collect::<Vec<_>>();
-                    crate::domains::page::emit_page_window_open_background_events_for_route(
+                    crate::domains::page::emit_page_window_open_background_events_for_owner(
                         self,
                         background_events,
-                        owner.session_id(),
-                        owner.session_owner_route(),
+                        owner,
                         url,
                         window_name,
                         &window_features,
@@ -3986,16 +3868,14 @@ impl CdpConnection {
         }
         let routed_session_id = response.session_id().map(str::to_owned);
         if let Some(object_group) = response.object_group() {
-            self.register_runtime_remote_object_ids_from_value_for_route_with_group(
-                routed_session_id.as_deref(),
-                response.owner_route(),
+            self.register_runtime_remote_object_ids_from_value_for_owner_with_group(
+                response.owner(),
                 &response.message,
                 object_group,
             );
         } else {
-            self.register_runtime_remote_object_ids_from_value_for_route(
-                routed_session_id.as_deref(),
-                response.owner_route(),
+            self.register_runtime_remote_object_ids_from_value_for_owner(
+                response.owner(),
                 &response.message,
             );
         }
@@ -4011,11 +3891,12 @@ impl CdpConnection {
 
     fn trace_owner_runtime_response_route(&mut self, response: &OwnerRuntimeResponse) {
         let current_route = self.runtime_await_owner_route_for_session(response.session_id());
-        if current_route != response.owner_route {
+        let response_owner_route = response.owner().resolve_route(self);
+        if current_route != response_owner_route {
             tracing::debug!(
                 command_id = response.command_id,
                 session_id = response.session_id(),
-                response_owner_route = ?response.owner_route(),
+                ?response_owner_route,
                 current_owner_route = ?current_route,
                 "owner runtime response route no longer matches current session owner"
             );
@@ -4025,7 +3906,7 @@ impl CdpConnection {
             Some(response.command_id),
             response.session_id(),
             json!({
-                "ownerRoute": response.owner_route().map(|route| format!("{route:?}")),
+                "ownerRoute": response_owner_route.as_ref().map(|route| format!("{route:?}")),
                 "currentOwnerRoute": current_route.as_ref().map(|route| format!("{route:?}")),
             }),
         );
@@ -4112,15 +3993,10 @@ impl CdpConnection {
         depth: i32,
         pierce: bool,
     ) -> Result<Option<DocumentNodeObjectSnapshot>, String> {
-        let include_whitespace = crate::domains::dom::dom_agent_includes_whitespace_for_route(
-            self,
-            owner.session_id(),
-            owner.session_owner_route(),
-        );
-        let inspector_session_id = self.target_renderer_runtime_inspector_session_id_for_route(
-            owner.session_id(),
-            owner.session_owner_route(),
-        );
+        let include_whitespace =
+            crate::domains::dom::dom_agent_includes_whitespace_for_owner(self, owner);
+        let inspector_session_id =
+            self.target_renderer_runtime_inspector_session_id_for_owner(owner);
         let pending = {
             let page = self.runtime_session_owner_page_mut_for_owner(owner)?;
             page.start_document_node_snapshot_for_object_id_in_inspector_session(
@@ -4162,27 +4038,14 @@ impl CdpConnection {
             .map_err(|error| format!("resolve backend node snapshot failed: {error}"))
     }
 
-    pub(crate) async fn register_document_bidi_node_binding_for_session_owner_async(
-        &mut self,
-        session_id: Option<&str>,
-        shared_id: &str,
-        backend_node_id: u32,
-    ) -> Result<(), String> {
-        let owner = CommandOwnerScope::capture(self, session_id);
-        self.register_document_bidi_node_binding_for_owner_async(&owner, shared_id, backend_node_id)
-            .await
-    }
-
     pub(crate) async fn register_document_bidi_node_binding_for_owner_async(
         &mut self,
         owner: &CommandOwnerScope,
         shared_id: &str,
         backend_node_id: u32,
     ) -> Result<(), String> {
-        let inspector_session_id = self.target_renderer_runtime_inspector_session_id_for_route(
-            owner.session_id(),
-            owner.session_owner_route(),
-        );
+        let inspector_session_id =
+            self.target_renderer_runtime_inspector_session_id_for_owner(owner);
         let pending = {
             let page = self.runtime_session_owner_page_mut_for_owner(owner)?;
             page.start_register_document_bidi_node_binding(
@@ -4206,10 +4069,8 @@ impl CdpConnection {
         owner: &CommandOwnerScope,
         shared_id: &str,
     ) -> Result<RendererDomBidiNodeBindingResolution, String> {
-        let inspector_session_id = self.target_renderer_runtime_inspector_session_id_for_route(
-            owner.session_id(),
-            owner.session_owner_route(),
-        );
+        let inspector_session_id =
+            self.target_renderer_runtime_inspector_session_id_for_owner(owner);
         let pending = {
             let page = self.runtime_session_owner_page_mut_for_owner(owner)?;
             page.start_document_bidi_node_binding(inspector_session_id, shared_id.to_owned())
@@ -4224,15 +4085,15 @@ impl CdpConnection {
             .map_err(|error| format!("resolve BiDi node binding failed: {error}"))
     }
 
-    pub(crate) async fn document_bidi_node_shared_id_for_backend_node_id_for_session_owner_async(
+    pub(crate) async fn document_bidi_node_shared_id_for_backend_node_id_for_owner_async(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         backend_node_id: u32,
     ) -> Result<RendererDomBidiNodeSharedIdResolution, String> {
         let inspector_session_id =
-            self.target_renderer_runtime_inspector_session_id_for_session(session_id);
+            self.target_renderer_runtime_inspector_session_id_for_owner(owner);
         let pending = {
-            let page = self.runtime_session_owner_page_mut(session_id)?;
+            let page = self.runtime_session_owner_page_mut_for_owner(owner)?;
             page.start_document_bidi_node_shared_id_for_backend_node_id(
                 inspector_session_id,
                 backend_node_id,
@@ -4243,7 +4104,7 @@ impl CdpConnection {
             .wait()
             .await
             .map_err(|error| format!("resolve BiDi node shared id failed: {error}"))?;
-        let page = self.runtime_session_owner_page_mut(session_id)?;
+        let page = self.runtime_session_owner_page_mut_for_owner(owner)?;
         page.finish_document_bidi_node_shared_id_for_backend_node_id(completion)
             .map_err(|error| format!("resolve BiDi node shared id failed: {error}"))
     }
@@ -4255,10 +4116,8 @@ impl CdpConnection {
         execution_context_id: Option<i64>,
         object_group: Option<&str>,
     ) -> Result<Option<Value>, String> {
-        let inspector_session_id = self.target_renderer_runtime_inspector_session_id_for_route(
-            owner.session_id(),
-            owner.session_owner_route(),
-        );
+        let inspector_session_id =
+            self.target_renderer_runtime_inspector_session_id_for_owner(owner);
         let pending = {
             let page = self.runtime_session_owner_page_mut_for_owner(owner)?;
             page.start_resolve_runtime_object_for_backend_node_id_in_inspector_session(
@@ -4362,10 +4221,8 @@ impl CdpConnection {
         owner: &CommandOwnerScope,
     ) -> Result<PendingRuntimeEnableEventsDispatch, String> {
         let route = self.runtime_protocol_message_page_route_for_owner(owner)?;
-        let inspector_session_id = self.target_renderer_runtime_inspector_session_id_for_route(
-            owner.session_id(),
-            owner.session_owner_route(),
-        );
+        let inspector_session_id =
+            self.target_renderer_runtime_inspector_session_id_for_owner(owner);
         let page = self.runtime_session_owner_page_mut_for_owner(owner)?;
         let pending = page
             .start_runtime_enable_events_for_inspector_session(inspector_session_id.as_deref())
@@ -4394,21 +4251,14 @@ impl CdpConnection {
             );
         }
         if let Some(state) = v8_state_update
-            && !self.merge_v8_inspector_session_state_for_route(
-                owner.session_id(),
-                owner.session_owner_route(),
-                state,
-            )
+            && !self.merge_v8_inspector_session_state_for_owner(&owner, state)
         {
             return Err("Runtime.enable completed after session owner disappeared".to_owned());
         }
         let mut replay = RuntimeEnableEventsReplay::from_renderer_messages(messages);
         let _ =
             self.set_renderer_runtime_agent_owns_page_console_api_events_for_owner(&owner, true);
-        self.ingest_runtime_session_owner_output_updates_for_route(
-            owner.session_id(),
-            owner.session_owner_route(),
-        );
+        self.ingest_runtime_session_owner_output_updates_for_owner(&owner);
         for event in replay.events_mut() {
             match event {
                 RuntimeEnableReplayEvent::Context(event) => {
@@ -4433,20 +4283,14 @@ impl CdpConnection {
         &mut self,
         owner: &CommandOwnerScope,
     ) -> Result<&mut Page, String> {
-        self.loaded_page_mut_for_protocol_access_for_route(
-            owner.session_id(),
-            owner.session_owner_route(),
-        )
+        self.loaded_page_mut_for_protocol_access_for_owner(owner)
     }
 
     fn runtime_session_owner_page_mut_for_interruptible_control_for_owner(
         &mut self,
         owner: &CommandOwnerScope,
     ) -> Result<&mut Page, String> {
-        self.loaded_page_mut_for_interruptible_protocol_access_for_route(
-            owner.session_id(),
-            owner.session_owner_route(),
-        )
+        self.loaded_page_mut_for_interruptible_protocol_access_for_owner(owner)
     }
 
     fn runtime_protocol_message_page_route_for_session_owner(
@@ -4473,12 +4317,9 @@ impl CdpConnection {
         owner: &CommandOwnerScope,
     ) -> Result<RuntimeProtocolMessagePageRoute, String> {
         let (browser_context_id, target_id) = self
-            .target_owner_identity_for_route(owner.session_id(), owner.session_owner_route())
+            .target_owner_identity_for_owner(owner)
             .ok_or_else(|| "NoDocumentLoaded".to_owned())?;
-        let slot = self.runtime_session_owner_slot_for_route(
-            owner.session_id(),
-            owner.session_owner_route(),
-        )?;
+        let slot = self.runtime_session_owner_slot_for_owner(owner)?;
         let renderer_agent_attachment_id = slot
             .current_renderer_attachment()
             .ok_or_else(|| "NoDocumentLoaded".to_owned())?
@@ -5045,15 +4886,15 @@ impl CdpConnection {
     }
 
     pub(crate) fn ingest_runtime_session_owner_output_updates(&mut self, session_id: Option<&str>) {
-        self.ingest_runtime_session_owner_output_updates_for_route(session_id, None)
+        let owner = CommandOwnerScope::capture(self, session_id);
+        self.ingest_runtime_session_owner_output_updates_for_owner(&owner)
     }
 
-    pub(crate) fn ingest_runtime_session_owner_output_updates_for_route(
+    pub(crate) fn ingest_runtime_session_owner_output_updates_for_owner(
         &mut self,
-        session_id: Option<&str>,
-        owner_route: Option<&CdpSessionRoute>,
+        owner: &CommandOwnerScope,
     ) {
-        if let Ok(slot) = self.runtime_session_owner_slot_mut_for_route(session_id, owner_route) {
+        if let Ok(slot) = self.runtime_session_owner_slot_mut_for_owner(owner) {
             let _ = slot.ingest_owner_page_observable_output_updates();
         }
     }
@@ -5062,38 +4903,27 @@ impl CdpConnection {
         &self,
         session_id: Option<&str>,
     ) -> Option<String> {
-        self.runtime_session_owner_frame_id_for_route(session_id, None)
+        let owner = CommandOwnerScope::capture(self, session_id);
+        self.runtime_session_owner_frame_id_for_owner(&owner)
     }
 
-    pub(crate) fn runtime_session_owner_frame_id_for_route(
+    pub(crate) fn runtime_session_owner_frame_id_for_owner(
         &self,
-        session_id: Option<&str>,
-        owner_route: Option<&CdpSessionRoute>,
+        owner: &CommandOwnerScope,
     ) -> Option<String> {
-        if let Some((_, target_id)) = self.target_owner_identity_for_route(session_id, owner_route)
-            && target_id.is_some()
-        {
-            return target_id;
-        }
-        match session_id {
-            None => self
+        match owner.resolve_route(self)? {
+            CdpSessionRoute::Browser => self
                 .browser_context
                 .as_ref()
                 .and_then(|bc| bc.active_target_id_owned()),
-            Some(session_id) => match self.session_route(Some(session_id))? {
-                CdpSessionRoute::Browser => self
-                    .browser_context
-                    .as_ref()
-                    .and_then(|bc| bc.active_target_id_owned()),
-                CdpSessionRoute::BrowserContext { browser_context_id } => self
-                    .browser_context_by_id(&browser_context_id)
-                    .and_then(|bc| bc.active_target_id_owned()),
-                CdpSessionRoute::PageTarget { target_id, .. } => Some(target_id),
-                CdpSessionRoute::TabTarget { .. }
-                | CdpSessionRoute::SharedWorkerTarget { .. }
-                | CdpSessionRoute::DedicatedWorkerTarget { .. }
-                | CdpSessionRoute::ServiceWorkerTarget { .. } => None,
-            },
+            CdpSessionRoute::BrowserContext { browser_context_id } => self
+                .browser_context_by_id(&browser_context_id)
+                .and_then(|bc| bc.active_target_id_owned()),
+            CdpSessionRoute::PageTarget { target_id, .. } => Some(target_id),
+            CdpSessionRoute::TabTarget { .. }
+            | CdpSessionRoute::SharedWorkerTarget { .. }
+            | CdpSessionRoute::DedicatedWorkerTarget { .. }
+            | CdpSessionRoute::ServiceWorkerTarget { .. } => None,
         }
     }
 
@@ -5228,10 +5058,8 @@ impl CdpConnection {
     ) -> Result<PendingRuntimeProtocolMessageDispatch, String> {
         let route = self.runtime_protocol_message_page_route_for_owner(owner)?;
         let raw_json = self.rewrite_runtime_inspector_command_for_owner(owner, &raw_json, None)?;
-        let inspector_session_id = self.target_renderer_runtime_inspector_session_id_for_route(
-            owner.session_id(),
-            owner.session_owner_route(),
-        );
+        let inspector_session_id =
+            self.target_renderer_runtime_inspector_session_id_for_owner(owner);
         let page = match inspector_route {
             RendererInspectorCommandRoute::MainThread => {
                 self.runtime_session_owner_page_mut_for_owner(owner)?
@@ -5303,10 +5131,8 @@ impl CdpConnection {
                 command_id,
                 Some(route.renderer_agent_attachment_id),
             )?;
-        let inspector_session_id = self.target_renderer_runtime_inspector_session_id_for_route(
-            owner.session_id(),
-            owner.session_owner_route(),
-        );
+        let inspector_session_id =
+            self.target_renderer_runtime_inspector_session_id_for_owner(owner);
         let page_result = match inspector_route {
             RendererInspectorCommandRoute::MainThread => {
                 self.runtime_session_owner_page_mut_for_owner(owner)
@@ -5353,10 +5179,8 @@ impl CdpConnection {
     ) -> Result<PendingRuntimeProtocolMessageDispatch, String> {
         let route = self.runtime_protocol_message_page_route_for_owner(owner)?;
         let raw_json = self.rewrite_runtime_inspector_command_for_owner(owner, &raw_json, None)?;
-        let inspector_session_id = self.target_renderer_runtime_inspector_session_id_for_route(
-            owner.session_id(),
-            owner.session_owner_route(),
-        );
+        let inspector_session_id =
+            self.target_renderer_runtime_inspector_session_id_for_owner(owner);
         let page = self.runtime_session_owner_page_mut_for_owner(owner)?;
         let pending = page
             .start_runtime_protocol_message_for_inspector_session_with_context_resolution(
@@ -5388,10 +5212,8 @@ impl CdpConnection {
                 command_id,
                 Some(route.renderer_agent_attachment_id),
             )?;
-        let inspector_session_id = self.target_renderer_runtime_inspector_session_id_for_route(
-            owner.session_id(),
-            owner.session_owner_route(),
-        );
+        let inspector_session_id =
+            self.target_renderer_runtime_inspector_session_id_for_owner(owner);
         let page = match self.runtime_session_owner_page_mut_for_owner(owner) {
             Ok(page) => page,
             Err(error) => {
@@ -6260,7 +6082,7 @@ impl CdpConnection {
         owner: &CommandOwnerScope,
     ) -> Result<Vec<RuntimeExecutionContextEvent>, String> {
         let target_id = self
-            .target_owner_identity_for_route(owner.session_id(), owner.session_owner_route())
+            .target_owner_identity_for_owner(owner)
             .and_then(|(_, target_id)| target_id);
         let page = self.runtime_session_owner_page_mut_for_owner(owner)?;
         let target_id = target_id.as_deref();
@@ -6303,10 +6125,7 @@ impl CdpConnection {
         owner: &CommandOwnerScope,
     ) -> Result<Option<i64>, String> {
         let page = self
-            .runtime_session_owner_slot_mut_for_route(
-                owner.session_id(),
-                owner.session_owner_route(),
-            )?
+            .runtime_session_owner_slot_mut_for_owner(owner)?
             .loaded_page_mut()
             .ok_or_else(|| "NoDocumentLoaded".to_owned())?;
         page.default_or_initial_execution_context_id_async()
@@ -6321,7 +6140,7 @@ impl CdpConnection {
         world_name: &str,
     ) -> Result<i64, String> {
         let owner_target_id = self
-            .target_owner_identity_for_route(owner.session_id(), owner.session_owner_route())
+            .target_owner_identity_for_owner(owner)
             .and_then(|(_, target_id)| target_id);
         let page = self.runtime_session_owner_page_mut_for_owner(owner)?;
         let result = if let Some(frame_id) = frame_id
@@ -6570,18 +6389,11 @@ impl CdpConnection {
         &mut self,
         owner: &CommandOwnerScope,
     ) -> Result<PendingRuntimeBindingPageCommandDispatch, String> {
-        let stored_runtime_bindings = self.target_runtime_bindings_for_renderer_route(
-            owner.session_id(),
-            owner.session_owner_route(),
-        );
-        let session_runtime_bindings = self.target_runtime_bindings_for_current_inspector_route(
-            owner.session_id(),
-            owner.session_owner_route(),
-        );
-        let inspector_session_id = self.target_renderer_runtime_inspector_session_id_for_route(
-            owner.session_id(),
-            owner.session_owner_route(),
-        );
+        let stored_runtime_bindings = self.target_runtime_bindings_for_renderer_owner(owner);
+        let session_runtime_bindings =
+            self.target_runtime_bindings_for_current_inspector_owner(owner);
+        let inspector_session_id =
+            self.target_renderer_runtime_inspector_session_id_for_owner(owner);
         let page = self.runtime_session_owner_page_mut_for_owner(owner)?;
         let pending = page
             .start_set_runtime_binding_state(
@@ -6610,18 +6422,11 @@ impl CdpConnection {
         &mut self,
         owner: &CommandOwnerScope,
     ) -> Result<(), String> {
-        let stored_runtime_bindings = self.target_runtime_bindings_for_renderer_route(
-            owner.session_id(),
-            owner.session_owner_route(),
-        );
-        let session_runtime_bindings = self.target_runtime_bindings_for_current_inspector_route(
-            owner.session_id(),
-            owner.session_owner_route(),
-        );
-        let inspector_session_id = self.target_renderer_runtime_inspector_session_id_for_route(
-            owner.session_id(),
-            owner.session_owner_route(),
-        );
+        let stored_runtime_bindings = self.target_runtime_bindings_for_renderer_owner(owner);
+        let session_runtime_bindings =
+            self.target_runtime_bindings_for_current_inspector_owner(owner);
+        let inspector_session_id =
+            self.target_renderer_runtime_inspector_session_id_for_owner(owner);
         let page = self.runtime_session_owner_page_mut_for_owner(owner)?;
         page.set_runtime_binding_state_async(
             inspector_session_id,

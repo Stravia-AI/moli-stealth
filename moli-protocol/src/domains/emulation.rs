@@ -940,20 +940,16 @@ fn start_devtools_set_viewport_command(
     command: DevToolsSetViewportCommand,
     owner_scope: CommandOwnerScope,
 ) -> Result<Option<PendingEmulationCommandDispatch>, DevToolsError> {
-    let session_id = owner_scope.session_id();
-    let owner_route = owner_scope.session_owner_route();
     if conn.browser_context.is_none()
-        && conn
-            .target_owner_identity_for_route(session_id, owner_route)
-            .is_none()
+        && conn.target_owner_identity_for_owner(&owner_scope).is_none()
     {
         return Ok(None);
     }
     let metrics = set_viewport_metrics_from_command(conn, &owner_scope, &command)?;
     let had_existing_device_metrics = conn
-        .target_session_owner_emulated_device_metrics_for_route(session_id, owner_route)
+        .target_session_owner_emulated_device_metrics_for_owner(&owner_scope)
         .is_some();
-    if !conn.mutate_emulation_session_state_for_route(session_id, owner_route, |state| {
+    if !conn.mutate_emulation_session_state_for_owner(&owner_scope, |state| {
         if let Some(state) = state {
             *state.emulated_device_metrics = Some(metrics.clone());
         }
@@ -965,12 +961,12 @@ fn start_devtools_set_viewport_command(
     }
     let runtime_call_id = conn.next_internal_runtime_command_id();
     let Some(page) = conn
-        .loaded_page_mut_for_target_configuration_for_route(session_id, owner_route)
+        .loaded_page_mut_for_target_configuration_for_owner(&owner_scope)
         .ok()
     else {
         return Ok(None);
     };
-    let session_id = session_id.map(str::to_owned);
+    let session_id = owner_scope.session_id().map(str::to_owned);
     let viewport_surface = Some(metrics.viewport_surface().to_page_viewport_surface());
     let pending_viewport = page
         .start_set_viewport_surface(viewport_surface)
@@ -1007,10 +1003,7 @@ fn set_viewport_metrics_from_command(
     owner: &CommandOwnerScope,
     command: &DevToolsSetViewportCommand,
 ) -> Result<EmulatedDeviceMetrics, DevToolsError> {
-    let current_metrics = conn.target_session_owner_emulated_device_metrics_for_route(
-        owner.session_id(),
-        owner.session_owner_route(),
-    );
+    let current_metrics = conn.target_session_owner_emulated_device_metrics_for_owner(owner);
     set_viewport_metrics_from_current(current_metrics.as_ref(), command)
 }
 
@@ -1260,7 +1253,8 @@ fn start_geolocation_override_for_current_route(
     route: &CdpSessionRoute,
     override_state: Option<EmulatedGeolocationOverrideState>,
 ) -> Result<Vec<PendingEmulationPageCommand>, DevToolsError> {
-    if !conn.mutate_emulation_session_state_for_route(None, Some(route), |state| {
+    let owner = CommandOwnerScope::for_route(route.clone());
+    if !conn.mutate_emulation_session_state_for_owner(&owner, |state| {
         if let Some(state) = state {
             *state.geolocation_override = override_state;
         }
@@ -1346,7 +1340,8 @@ fn start_network_conditions_for_current_route(
     route: &CdpSessionRoute,
     network_conditions: Option<DevToolsNetworkConditions>,
 ) -> Result<Vec<PendingEmulationPageCommand>, DevToolsError> {
-    if !conn.mutate_emulation_session_state_for_route(None, Some(route), |state| {
+    let owner = CommandOwnerScope::for_route(route.clone());
+    if !conn.mutate_emulation_session_state_for_owner(&owner, |state| {
         if let Some(state) = state {
             *state.network_conditions = network_conditions.map(emulated_network_conditions);
         }
@@ -1374,10 +1369,10 @@ fn start_network_conditions_update_for_current_route(
             }),
         PendingEmulationPageTarget::SessionOwner { .. } => false,
     };
+    let owner = CommandOwnerScope::for_route(route.clone());
     let network_update = conn
-        .start_set_emulated_network_conditions_for_route(
-            None,
-            Some(route),
+        .start_set_emulated_network_conditions_for_owner(
+            &owner,
             effective_offline,
             0.0,
             -1.0,
@@ -1407,8 +1402,9 @@ fn start_extra_headers_for_current_route(
     headers: Vec<(String, String)>,
 ) -> Result<Vec<PendingEmulationPageCommand>, DevToolsError> {
     let target = pending_emulation_target_for_route(conn, route)?;
+    let owner = CommandOwnerScope::for_route(route.clone());
     let pending = conn
-        .start_set_target_extra_http_headers_for_route(None, Some(route), headers)
+        .start_set_target_extra_http_headers_for_owner(&owner, headers)
         .map_err(devtools_emulation_owner_error)?;
     Ok(pending
         .map(|pending| {
@@ -1479,10 +1475,7 @@ fn loaded_page_mut_for_pending_emulation_target<'a>(
             .and_then(|target| target.loaded_page_mut())
             .map(|page| &*page),
         PendingEmulationPageTarget::SessionOwner { owner_scope } => conn
-            .loaded_page_mut_for_target_configuration_for_route(
-                owner_scope.session_id(),
-                owner_scope.session_owner_route(),
-            )
+            .loaded_page_mut_for_target_configuration_for_owner(owner_scope)
             .ok()
             .map(|page| &*page),
     }
@@ -1645,8 +1638,9 @@ fn start_user_agent_override_for_current_route(
     user_agent: Option<String>,
 ) -> Result<Option<PendingEmulationPageCommand>, DevToolsError> {
     let target = pending_emulation_target_for_route(conn, route)?;
+    let owner = CommandOwnerScope::for_route(route.clone());
     let pending = conn
-        .start_set_base_user_agent_override_for_route(None, Some(route), user_agent)
+        .start_set_base_user_agent_override_for_owner(&owner, user_agent)
         .map_err(devtools_emulation_owner_error)?;
     if let Some(pending) = pending {
         return Ok(Some(PendingEmulationPageCommand {
@@ -1664,12 +1658,13 @@ fn start_user_agent_loader_update_for_current_route(
     route: &CdpSessionRoute,
 ) -> Result<Option<PendingEmulationPageCommand>, DevToolsError> {
     let target = pending_emulation_target_for_route(conn, route)?;
-    let load_inputs = conn.navigation_load_inputs_for_route(None, Some(route));
+    let owner = CommandOwnerScope::for_route(route.clone());
+    let load_inputs = conn.navigation_load_inputs_for_owner(&owner);
     let resource_runtime = conn
         .build_registered_browser_resource_runtime_for_navigation_load_inputs(&load_inputs)
         .map_err(|error| DevToolsError::new(DevToolsErrorKind::Internal, error))?;
     let Some(page) = conn
-        .loaded_page_mut_for_target_configuration_for_route(None, Some(route))
+        .loaded_page_mut_for_target_configuration_for_owner(&owner)
         .ok()
     else {
         return Ok(None);
@@ -1754,7 +1749,8 @@ fn start_locale_override_for_current_route(
     route: &CdpSessionRoute,
     locale: Option<String>,
 ) -> Result<Vec<PendingEmulationPageCommand>, DevToolsError> {
-    if !conn.set_base_locale_override_for_route(None, Some(route), locale) {
+    let owner = CommandOwnerScope::for_route(route.clone());
+    if !conn.set_base_locale_override_for_owner(&owner, locale) {
         return Err(devtools_emulation_owner_error(
             "BrowserContextNotLoaded".to_owned(),
         ));
@@ -1771,11 +1767,12 @@ fn start_locale_update_for_current_route(
         pending.push(identity_update);
     }
     let target = pending_emulation_target_for_route(conn, route)?;
-    let Some(locale_override) = locale_override_for_route(conn, None, Some(route)) else {
+    let owner = CommandOwnerScope::for_route(route.clone());
+    let Some(locale_override) = locale_override_for_owner(conn, &owner) else {
         return Ok(pending);
     };
     let Some(page) = conn
-        .loaded_page_mut_for_target_configuration_for_route(None, Some(route))
+        .loaded_page_mut_for_target_configuration_for_owner(&owner)
         .ok()
     else {
         return Ok(pending);
@@ -1860,7 +1857,8 @@ fn start_timezone_override_for_current_route(
     route: &CdpSessionRoute,
     timezone: Option<String>,
 ) -> Result<Option<PendingEmulationPageCommand>, DevToolsError> {
-    if !conn.set_base_timezone_override_for_route(None, Some(route), timezone) {
+    let owner = CommandOwnerScope::for_route(route.clone());
+    if !conn.set_base_timezone_override_for_owner(&owner, timezone) {
         return Err(devtools_emulation_owner_error(
             "BrowserContextNotLoaded".to_owned(),
         ));
@@ -1873,9 +1871,10 @@ fn start_timezone_update_for_current_route(
     route: &CdpSessionRoute,
 ) -> Result<Option<PendingEmulationPageCommand>, DevToolsError> {
     let target = pending_emulation_target_for_route(conn, route)?;
-    let load_inputs = conn.navigation_load_inputs_for_route(None, Some(route));
+    let owner = CommandOwnerScope::for_route(route.clone());
+    let load_inputs = conn.navigation_load_inputs_for_owner(&owner);
     let Some(page) = conn
-        .loaded_page_mut_for_target_configuration_for_route(None, Some(route))
+        .loaded_page_mut_for_target_configuration_for_owner(&owner)
         .ok()
     else {
         return Ok(None);
@@ -2091,13 +2090,9 @@ async fn execute_devtools_set_window_state_for_owner(
 ) -> Result<DevToolsCommandResult, DevToolsError> {
     let state = target_window_surface_state_from_devtools(command.state);
     if conn
-        .with_target_owner_state_for_route_mut(
-            owner.session_id(),
-            owner.session_owner_route(),
-            |owner_state| {
-                owner_state.set_window_surface_state(state);
-            },
-        )
+        .with_target_owner_state_for_owner_mut(&owner, |owner_state| {
+            owner_state.set_window_surface_state(state);
+        })
         .is_none()
     {
         return Err(DevToolsError::new(
@@ -2133,7 +2128,8 @@ async fn execute_devtools_set_client_window_state_command_async(
 
     match result {
         Ok(_) => {
-            let _ = conn.with_target_owner_state_for_route_mut(None, Some(&route), |owner_state| {
+            let owner = CommandOwnerScope::for_route(route);
+            let _ = conn.with_target_owner_state_for_owner_mut(&owner, |owner_state| {
                 owner_state.set_window_surface_geometry(
                     command.width,
                     command.height,
@@ -2534,10 +2530,9 @@ fn pending_emulation_page_configuration_will_be_replayed(
     };
     let current_attachment_id = match target {
         PendingEmulationPageTarget::SessionOwner { owner_scope } => {
-            let Some((browser_context_id, target_id)) = conn.target_owner_identity_for_route(
-                owner_scope.session_id(),
-                owner_scope.session_owner_route(),
-            ) else {
+            let Some((browser_context_id, target_id)) =
+                conn.target_owner_identity_for_owner(owner_scope)
+            else {
                 return false;
             };
             let Some(browser_context) = conn.browser_context_by_id(&browser_context_id) else {
@@ -2773,11 +2768,9 @@ fn start_session_surface_override_page_command_for_owner(
     conn: &mut CdpConnection,
     owner_scope: &CommandOwnerScope,
 ) -> Result<Vec<PendingEmulationPageCommand>, String> {
-    let session_id = owner_scope.session_id();
-    let owner_route = owner_scope.session_owner_route();
     let script = {
         let Some((browser_context_id, target_id)) =
-            conn.target_owner_identity_for_route(session_id, owner_route)
+            conn.target_owner_identity_for_owner(owner_scope)
         else {
             return Err("BrowserContextNotLoaded".to_owned());
         };
@@ -2797,7 +2790,7 @@ fn start_session_surface_override_page_command_for_owner(
     };
     let runtime_call_id = conn.next_internal_runtime_command_id();
     let Some(page) = conn
-        .loaded_page_mut_for_target_configuration_for_route(session_id, owner_route)
+        .loaded_page_mut_for_target_configuration_for_owner(owner_scope)
         .ok()
     else {
         return Ok(Vec::new());
@@ -2840,8 +2833,9 @@ fn start_surface_override_for_route(
         return Ok(Vec::new());
     };
     let runtime_call_id = conn.next_internal_runtime_command_id();
+    let owner = CommandOwnerScope::for_route(route.clone());
     let Some(page) = conn
-        .loaded_page_mut_for_target_configuration_for_route(None, Some(route))
+        .loaded_page_mut_for_target_configuration_for_owner(&owner)
         .ok()
     else {
         return Ok(Vec::new());
@@ -2886,16 +2880,15 @@ fn locale_override_for_session(
     conn: &CdpConnection,
     session_id: Option<&str>,
 ) -> Option<Option<String>> {
-    locale_override_for_route(conn, session_id, None)
+    let owner = CommandOwnerScope::capture(conn, session_id);
+    locale_override_for_owner(conn, &owner)
 }
 
-fn locale_override_for_route(
+fn locale_override_for_owner(
     conn: &CdpConnection,
-    session_id: Option<&str>,
-    owner_route: Option<&CdpSessionRoute>,
+    owner: &CommandOwnerScope,
 ) -> Option<Option<String>> {
-    let (browser_context_id, target_id) =
-        conn.target_owner_identity_for_route(session_id, owner_route)?;
+    let (browser_context_id, target_id) = conn.target_owner_identity_for_owner(owner)?;
     let browser_context = conn.browser_context_by_id(&browser_context_id)?;
     if let Some(target_id) = target_id {
         return Some(browser_context.effective_locale_override_for_target_owned(&target_id));
@@ -2912,17 +2905,10 @@ fn finish_pending_emulation_page_command(
     match target {
         PendingEmulationPageTarget::SessionOwner { owner_scope } => {
             if matches!(operation, PendingEmulationPageOperation::SetUserAgentLoader) {
-                return conn.finish_rebuild_resource_runtime_for_route(
-                    owner_scope.session_id(),
-                    owner_scope.session_owner_route(),
-                    completion,
-                );
+                return conn.finish_rebuild_resource_runtime_for_owner(&owner_scope, completion);
             }
             let page = conn
-                .loaded_page_mut_for_target_configuration_for_route(
-                    owner_scope.session_id(),
-                    owner_scope.session_owner_route(),
-                )
+                .loaded_page_mut_for_target_configuration_for_owner(&owner_scope)
                 .ok();
             finish_emulation_page_operation_on_current_attachment(page, operation, completion)
         }

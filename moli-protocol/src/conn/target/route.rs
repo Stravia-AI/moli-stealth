@@ -40,6 +40,24 @@ pub(crate) enum CdpSessionRoute {
 }
 
 impl CdpSessionRoute {
+    pub(crate) fn addresses_same_target_as(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::PageTarget {
+                    browser_context_id: left_context,
+                    target_id: left_target,
+                    ..
+                },
+                Self::PageTarget {
+                    browser_context_id: right_context,
+                    target_id: right_target,
+                    ..
+                },
+            ) => left_context == right_context && left_target == right_target,
+            _ => self == other,
+        }
+    }
+
     pub(crate) fn browser_context_id(&self) -> Option<&str> {
         match self {
             Self::Browser => None,
