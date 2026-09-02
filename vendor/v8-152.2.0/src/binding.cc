@@ -1487,8 +1487,8 @@ void v8__Template__SetIntrinsicDataProperty(const v8::Template& self,
 }
 
 const v8::ObjectTemplate* v8__ObjectTemplate__New(
-    v8::Isolate* isolate, const v8::FunctionTemplate& templ) {
-  return local_to_ptr(v8::ObjectTemplate::New(isolate, ptr_to_local(&templ)));
+    v8::Isolate* isolate, const v8::FunctionTemplate* templ) {
+  return local_to_ptr(v8::ObjectTemplate::New(isolate, ptr_to_local(templ)));
 }
 
 const v8::Object* v8__ObjectTemplate__NewInstance(
@@ -1545,11 +1545,11 @@ void v8__ObjectTemplate__SetIndexedPropertyHandler(
 
 void v8__ObjectTemplate__SetAccessorProperty(const v8::ObjectTemplate& self,
                                              const v8::Name& key,
-                                             v8::FunctionTemplate& getter,
-                                             v8::FunctionTemplate& setter,
+                                             const v8::FunctionTemplate* getter,
+                                             const v8::FunctionTemplate* setter,
                                              v8::PropertyAttribute attr) {
   ptr_to_local(&self)->SetAccessorProperty(
-      ptr_to_local(&key), ptr_to_local(&getter), ptr_to_local(&setter), attr);
+      ptr_to_local(&key), ptr_to_local(getter), ptr_to_local(setter), attr);
 }
 
 void v8__ObjectTemplate__SetImmutableProto(const v8::ObjectTemplate& self) {
@@ -2544,11 +2544,11 @@ void v8__FunctionTemplate__SetClassName(const v8::FunctionTemplate& self,
 
 void v8__FunctionTemplate__SetAccessorProperty(const v8::FunctionTemplate& self,
                                                const v8::Name& key,
-                                               v8::FunctionTemplate& getter,
-                                               v8::FunctionTemplate& setter,
+                                               const v8::FunctionTemplate* getter,
+                                               const v8::FunctionTemplate* setter,
                                                v8::PropertyAttribute attr) {
   ptr_to_local(&self)->SetAccessorProperty(
-      ptr_to_local(&key), ptr_to_local(&getter), ptr_to_local(&setter), attr);
+      ptr_to_local(&key), ptr_to_local(getter), ptr_to_local(setter), attr);
 }
 
 void v8__FunctionTemplate__Inherit(const v8::FunctionTemplate& self,
