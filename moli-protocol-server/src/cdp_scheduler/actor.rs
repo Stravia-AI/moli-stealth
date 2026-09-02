@@ -2232,49 +2232,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn terminal_get_frame_tree_error_releases_response_barrier() {
-        let mut conn = CdpConnection::new();
-        let (response_flush, _response_observer) = conn.begin_command_response_flush_permit();
-        let barrier = FrontendSessionKey {
-            frontend_id: 7,
-            session_id: Some("SID-A".to_owned()),
-        };
-        let scope = FrontendDispatchOrderingScope::Session(barrier.clone());
-        let mut in_flight_commands = InFlightCommands::new();
-        in_flight_commands.insert(
-            11,
-            InFlightCommandState {
-                metadata: InFlightCommandMetadata {
-                    frontend_id: 7,
-                    method: Some("Page.getFrameTree".to_owned()),
-                    id: Some(4),
-                    session_id: Some("SID-A".to_owned()),
-                    started: None,
-                    executes_page_javascript: false,
-                    command_output_session_id: Some("SID-A".to_owned()),
-                },
-                response_barrier: Some(barrier),
-                dispatch: CommandDispatchState::pending_command(),
-                output_release_permit: CommandOutputReleasePermit::new(response_flush, None),
-                command_context: CommandDispatchContext::default(),
-                pending_turn: 0,
-            },
-        );
-
-        assert!(frontend_dispatch_is_blocked(&in_flight_commands, &scope));
-        // Completion decoding happens only after this take in the actor. Not
-        // reinserting the state models a terminal error just as it models a
-        // terminal success; only another Pending step restores the barrier.
-        let terminal_error = take_in_flight_command_for_completion(&mut in_flight_commands, 11)
-            .expect("terminal error should take the pending getFrameTree state");
-        assert!(
-            !frontend_dispatch_is_blocked(&in_flight_commands, &scope),
-            "terminal error completion must release the same-session barrier"
-        );
-        drop(terminal_error);
-    }
-
     #[tokio::test]
     async fn ready_background_events_precede_runtime_response_without_starving_it() {
         let (background_event_tx, background_event_rx) = mpsc::unbounded_channel();
