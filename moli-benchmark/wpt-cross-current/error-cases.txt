@@ -1,8 +1,8 @@
-cookiestore/serviceworker_cookieStore_cross_origin.https.sub.html
 css/selectors/invalidation/has-complexity.html
 dom/ranges/Range-insertNode.html
 dom/ranges/Range-mutations-dataChange.html
 dom/ranges/Range-surroundContents.html
+html/select/options-length-too-large.html
 html/semantics/embedded-content/the-iframe-element/iframe_sandbox_block_modals-1.html
 html/semantics/embedded-content/the-iframe-element/iframe_sandbox_block_modals-2.html
 html/semantics/embedded-content/the-iframe-element/iframe_sandbox_block_modals-3.html
