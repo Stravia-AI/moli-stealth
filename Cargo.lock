@@ -2830,6 +2830,7 @@ dependencies = [
  "data-url",
  "encoding_rs",
  "euclid",
+ "fastrand",
  "futures-util",
  "html-escape",
  "html5ever",
