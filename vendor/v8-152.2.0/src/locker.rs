@@ -199,6 +199,7 @@ impl Drop for SharedIsolateInner {
       let (annex_ptr, _create_param_allocations) =
         isolate.prepare_annex_for_dispose();
       Isolate::run_remaining_guaranteed_finalizers(annex_ptr);
+      Isolate::mark_annex_isolate_disposed(annex_ptr);
       crate::Platform::notify_isolate_shutdown(
         &crate::V8::get_current_platform(),
         &isolate,

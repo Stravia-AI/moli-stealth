@@ -856,6 +856,7 @@ impl<T> Weak<T> {
     let weak_data = Box::new(WeakData {
       pointer: Default::default(),
       finalizer_id,
+      second_pass_called: Cell::new(false),
       weak_dropped: Cell::new(false),
     });
     let data = data.cast().as_ptr();
@@ -976,21 +977,10 @@ impl<T> Weak<T> {
   /// GC'd.
   pub fn into_raw(mut self) -> Option<NonNull<WeakData<T>>> {
     if let Some(data) = self.data.take() {
-      let has_finalizer = if let Some(finalizer_id) = data.finalizer_id {
-        // SAFETY: We're in the isolate's thread because Weak isn't Send or Sync
-        let isolate_ptr = unsafe { self.isolate_handle.get_isolate_ptr() };
-        if isolate_ptr.is_null() {
-          // Disposed isolates have no finalizers.
-          false
-        } else {
-          let isolate = unsafe { Isolate::from_raw_ptr(isolate_ptr) };
-          isolate.get_finalizer_map().map.contains_key(&finalizer_id)
-        }
-      } else {
-        false
-      };
+      let second_pass_pending =
+        data.finalizer_id.is_some() && !data.second_pass_called.get();
 
-      if data.pointer.get().is_none() && !has_finalizer {
+      if data.pointer.get().is_none() && !second_pass_pending {
         // If the pointer is None and we're not waiting for the second pass,
         // drop the box and release its count. A `Some(raw)` return keeps the
         // count until `from_raw` re-adopts the box and the resulting `Weak`
@@ -1100,6 +1090,7 @@ impl<T> Weak<T> {
       let ptr = v8__WeakCallbackInfo__GetParameter(wci);
       &*(ptr as *mut WeakData<T>)
     };
+    weak_data.second_pass_called.set(true);
 
     let mut isolate = unsafe { Isolate::from_raw_ptr(isolate) };
     let finalizer: Option<FinalizerCallback> = {
@@ -1163,10 +1154,14 @@ impl<T> Drop for Weak<T> {
       unsafe { v8__Global__Reset(data.cast().as_ptr()) };
       remove_finalizer(self.data.as_ref().unwrap().finalizer_id);
     } else if let Some(weak_data) = self.data.take() {
-      // The second pass callback removes the finalizer, so if there is one,
-      // the second pass hasn't yet run, and WeakData will have to be alive.
-      // In that case we leak the WeakData but remove the finalizer.
-      if remove_finalizer(weak_data.finalizer_id) {
+      // A guaranteed finalizer is removed from the isolate map before its
+      // callback runs. Track second-pass completion on WeakData itself so a
+      // Weak dropped by that callback cannot free the parameter V8 still owns.
+      let second_pass_pending = weak_data.pointer.get().is_none()
+        && weak_data.finalizer_id.is_some()
+        && !weak_data.second_pass_called.get();
+      remove_finalizer(weak_data.finalizer_id);
+      if second_pass_pending {
         weak_data.weak_dropped.set(true);
         Box::leak(weak_data);
       }
@@ -1225,6 +1220,7 @@ where
 pub struct WeakData<T> {
   pointer: Cell<Option<NonNull<T>>>,
   finalizer_id: Option<FinalizerId>,
+  second_pass_called: Cell<bool>,
   weak_dropped: Cell<bool>,
 }
 

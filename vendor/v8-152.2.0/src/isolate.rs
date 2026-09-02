@@ -1123,14 +1123,12 @@ impl Isolate {
     self.set_data_internal(Self::ANNEX_SLOT, annex_ptr as *mut _);
   }
 
-  /// Prepare annex teardown while keeping `ANNEX_SLOT` pointing at the annex.
+  /// Prepare annex teardown while keeping both the annex and isolate live.
   ///
-  /// Nulls the `IsolateHandle`'s inner pointer, reclaims
-  /// `create_param_allocations`, and drops the slot storage. The annex
-  /// allocation itself stays alive and `ANNEX_SLOT` keeps pointing at it,
-  /// so code that runs during the subsequent V8 teardown GC (weak
-  /// callbacks, guaranteed finalizers, embedder slot drops) can still
-  /// resolve the annex through `get_annex()` / `get_annex_mut()`.
+  /// Reclaims `create_param_allocations` and drops the slot storage. The
+  /// isolate remains reachable through its liveness handles until
+  /// [`Self::mark_annex_isolate_disposed`] is called, because slot destructors
+  /// and guaranteed finalizers may need to reset V8 handles.
   ///
   /// The returned pointer must be passed exactly once to
   /// [`Self::finish_annex_dispose`] (or, on the snapshot path, dropped by
@@ -1155,20 +1153,6 @@ impl Isolate {
     // `get_annex()`. An outer `&mut IsolateAnnex` held across that
     // re-entry would alias the shared borrow they obtain.
 
-    // SAFETY: `annex_ptr` is non-null and points at a live `IsolateAnnex`
-    // (ANNEX_SLOT is only cleared by code further down this teardown
-    // path).
-    unsafe {
-      // Release Globals dropped by threads that could not touch the
-      // isolate, then null the `IsolateHandle` so handles outliving the
-      // isolate see a disposed state.
-      (*annex_ptr)
-        .global_liveness()
-        .close_deferred_global_resets();
-      (*annex_ptr).global_liveness().dispose();
-      (*annex_ptr).isolate_handle.dispose();
-    }
-
     // Reclaim `create_param_allocations` so the caller can keep it alive
     // for as long as V8 needs (during snapshot blob creation, V8 reads
     // external references out of it).
@@ -1182,6 +1166,29 @@ impl Isolate {
     drop(slots);
 
     (annex_ptr, create_param_allocations)
+  }
+
+  /// Close deferred resets and make all liveness handles observe disposal.
+  ///
+  /// This phase must run only after Rust-owned slots and guaranteed
+  /// finalizers have dropped their V8 handles, and before C++ starts the final
+  /// isolate teardown.
+  ///
+  /// # Safety
+  ///
+  /// `annex_ptr` must point at this isolate's live annex. The caller must be
+  /// allowed to reset globals, or must already have closed the deferred reset
+  /// queue while holding the shared isolate's lock.
+  pub(crate) unsafe fn mark_annex_isolate_disposed(
+    annex_ptr: *mut IsolateAnnex,
+  ) {
+    unsafe {
+      (*annex_ptr)
+        .global_liveness()
+        .close_deferred_global_resets();
+      (*annex_ptr).global_liveness().dispose();
+      (*annex_ptr).isolate_handle.dispose();
+    }
   }
 
   /// Drain `finalizer_map` and invoke any guaranteed finalizers.
@@ -1251,13 +1258,7 @@ impl Isolate {
     // what lets `Weak::drop` reset the corresponding V8 global handle.
     unsafe { Self::run_remaining_guaranteed_finalizers(annex_ptr) };
 
-    unsafe {
-      (*annex_ptr)
-        .global_liveness()
-        .close_deferred_global_resets();
-      (*annex_ptr).global_liveness().dispose();
-      (*annex_ptr).isolate_handle.dispose();
-    }
+    unsafe { Self::mark_annex_isolate_disposed(annex_ptr) };
 
     let create_param_allocations =
       unsafe { (*annex_ptr).create_param_allocations.take().unwrap() };
@@ -1304,10 +1305,6 @@ impl Isolate {
       .maybe_snapshot_creator
       .replace(snapshot_creator);
     assert!(prev.is_none());
-  }
-
-  pub(crate) fn get_finalizer_map(&self) -> &FinalizerMap {
-    &self.get_annex().finalizer_map
   }
 
   pub(crate) fn get_finalizer_map_mut(&mut self) -> &mut FinalizerMap {
@@ -2939,6 +2936,7 @@ impl Drop for OwnedIsolate {
       // teardown GC has a chance to fire weak callbacks that need the
       // annex.
       Isolate::run_remaining_guaranteed_finalizers(annex_ptr);
+      Isolate::mark_annex_isolate_disposed(annex_ptr);
       Platform::notify_isolate_shutdown(&get_current_platform(), self);
       // V8's final teardown runs here. `ANNEX_SLOT` still references the
       // (drained) annex, so any re-entrant access from weak callbacks or

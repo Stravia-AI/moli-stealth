@@ -43,6 +43,9 @@ Version-specific corrections:
   context-annex finalizers before disposing the isolate handle. This lets their
   `Weak` globals reset while V8 is live and prevents unserialized native-context
   handles from reaching `SnapshotCreator::CreateBlob()`.
+- ordinary isolate teardown uses the same ordering before V8's final teardown
+  GC. Weak handles also retain their callback data until V8's second pass has
+  run, even when the guaranteed-finalizer map is being drained.
 - ordinary isolate teardown and snapshot-creator teardown are covered by
   `context_annex_weak_handles_are_safe_during_isolate_teardown` and
   `snapshot_creator_cleans_up_context_annex_before_creating_blob` in

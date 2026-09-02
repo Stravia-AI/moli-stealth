@@ -740,6 +740,22 @@ mod tests {
         }
     }
 
+    struct ContextSlotDropProbe {
+        dropped: Rc<Cell<usize>>,
+        isolate_handle_was_live: Rc<Cell<usize>>,
+        isolate_handle: v8::IsolateHandle,
+    }
+
+    impl Drop for ContextSlotDropProbe {
+        fn drop(&mut self) {
+            self.dropped.set(self.dropped.get().saturating_add(1));
+            if self.isolate_handle.cancel_terminate_execution() {
+                self.isolate_handle_was_live
+                    .set(self.isolate_handle_was_live.get().saturating_add(1));
+            }
+        }
+    }
+
     #[test]
     fn context_annex_weak_handles_are_safe_during_isolate_teardown() {
         crate::ensure_v8_for_test();
@@ -747,17 +763,22 @@ mod tests {
         const ISOLATE_COUNT: usize = 4;
         const CONTEXTS_PER_ISOLATE: usize = 32;
         let dropped_slots = Rc::new(Cell::new(0));
+        let slots_dropped_with_live_isolate = Rc::new(Cell::new(0));
 
         for _ in 0..ISOLATE_COUNT {
             let mut isolate = v8::Isolate::new(Default::default());
+            let isolate_handle = isolate.thread_safe_handle();
             let mut contexts = Vec::with_capacity(CONTEXTS_PER_ISOLATE);
             {
                 let scope = std::pin::pin!(v8::HandleScope::new(&mut isolate));
                 let scope = &mut scope.init();
                 for _ in 0..CONTEXTS_PER_ISOLATE {
                     let context = v8::Context::new(scope, Default::default());
-                    let replaced = context
-                        .set_slot(Rc::new(ContextSlotDropCounter(Rc::clone(&dropped_slots))));
+                    let replaced = context.set_slot(Rc::new(ContextSlotDropProbe {
+                        dropped: Rc::clone(&dropped_slots),
+                        isolate_handle_was_live: Rc::clone(&slots_dropped_with_live_isolate),
+                        isolate_handle: isolate_handle.clone(),
+                    }));
                     assert!(replaced.is_none());
                     contexts.push(v8::Global::new(scope, context));
                 }
@@ -769,6 +790,11 @@ mod tests {
         }
 
         assert_eq!(dropped_slots.get(), ISOLATE_COUNT * CONTEXTS_PER_ISOLATE);
+        assert_eq!(
+            slots_dropped_with_live_isolate.get(),
+            ISOLATE_COUNT * CONTEXTS_PER_ISOLATE,
+            "context annex slots must drop while their weak V8 handles can still be reset"
+        );
     }
 
     #[test]
