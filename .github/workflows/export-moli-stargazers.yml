@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      STARGAZER_TOKEN: ${{ github.token }}
+      STARGAZER_TOKEN: ${{ secrets.GH_TOKEN }}
 
     steps:
       - name: Cancel superseded export run
@@ -38,7 +38,7 @@ jobs:
         shell: bash
         run: |
           if [ -z "$STARGAZER_TOKEN" ]; then
-            echo "::error::GitHub Actions token is unavailable."
+            echo "::error::Repository secret GH_TOKEN is not configured or unavailable."
             exit 1
           fi
 
