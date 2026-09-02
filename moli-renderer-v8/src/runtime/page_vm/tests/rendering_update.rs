@@ -2962,7 +2962,7 @@ document.body.innerHTML = `
   <table id=inner><tr id=row>
     <td valign=top><span>1.</span></td>
     <td valign=top><center><a><div id=arrow class=arrow></div></a></center></td>
-    <td valign=middle><span id=middle-content>Title</span></td>
+    <td valign=middle><div id=middle-content class=box></div></td>
     <td valign=bottom><div id=bottom-content class=box></div></td>
   </tr></table>
 </td></tr></table>`;
@@ -2983,7 +2983,7 @@ const offset = id => document.getElementById(id).getBoundingClientRect().y - row
 return [row.height, offset('arrow'), offset('middle-content'), offset('bottom-content')].join('|');
 })()"#,
             )?,
-            "19|3|2|9",
+            "19|3|4.5|9",
             "nested table measurement must retain collapsed child margins and align cell content",
         );
         Ok::<_, anyhow::Error>(())
