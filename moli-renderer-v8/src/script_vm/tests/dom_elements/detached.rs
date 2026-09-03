@@ -7894,6 +7894,7 @@ fn detached_resource_template_accessors_use_owner_prototypes() {
   for (const name of ["integrity", "rev", "type"]) {
     accessor(HTMLLinkElement.prototype, name);
   }
+  accessor(HTMLIFrameElement.prototype, "csp");
   accessor(HTMLIFrameElement.prototype, "sandbox");
   accessor(HTMLIFrameElement.prototype, "allowFullscreen");
   for (const name of ["default", "kind", "src", "srclang", "label"]) {
@@ -7903,7 +7904,7 @@ fn detached_resource_template_accessors_use_owner_prototypes() {
   accessor(HTMLTrackElement.prototype, "track", false);
 
   const div = document.createElement("div");
-  for (const name of ["blocking", "sandbox", "allowFullscreen", "default", "srclang", "readyState", "track"]) {
+  for (const name of ["blocking", "csp", "sandbox", "allowFullscreen", "default", "srclang", "readyState", "track"]) {
     assert(!own(HTMLElement.prototype, name), `${name} should not be on HTMLElement.prototype`);
     assert(!(name in div), `${name} should not be on div`);
   }
@@ -7966,22 +7967,27 @@ fn detached_resource_template_accessors_use_owner_prototypes() {
   }
 
   for (const iframe of iframeElements) {
-    for (const name of ["sandbox", "allowFullscreen"]) {
+    for (const name of ["csp", "sandbox", "allowFullscreen"]) {
       assert(!own(iframe, name), `iframe.${name} should not be own before set`);
     }
+    assert(iframe.csp === "", "iframe csp default");
     const sandbox = iframe.sandbox;
     assert(Object.prototype.toString.call(sandbox) === "[object DOMTokenList]", "iframe sandbox type");
     assert(sandbox === iframe.sandbox, "iframe sandbox SameObject");
+    iframe.csp = 123456;
     iframe.sandbox = "allow-scripts";
     iframe.allowFullscreen = true;
+    assert(iframe.csp === "123456" && iframe.getAttribute("csp") === "123456", "iframe csp");
     assert(sandbox.value === "allow-scripts" && iframe.getAttribute("sandbox") === "allow-scripts", "iframe sandbox");
     assert(sandbox.supports("ALLOW-SCRIPTS"), "iframe sandbox supported token");
     assert(iframe.allowFullscreen === true && iframe.getAttribute("allowfullscreen") === "", "iframe allowFullscreen");
-    for (const name of ["sandbox", "allowFullscreen"]) {
+    for (const name of ["csp", "sandbox", "allowFullscreen"]) {
       assert(!own(iframe, name), `iframe.${name} should stay inherited after set`);
       assert(delete iframe[name], `iframe.${name} delete`);
       assert(!own(iframe, name), `iframe.${name} should stay inherited after delete`);
     }
+    iframe.setAttribute("csp", "default-src 'self'");
+    assert(iframe.csp === "default-src 'self'", "iframe csp after delete");
     assert(iframe.sandbox === sandbox && sandbox.value === "allow-scripts", "iframe sandbox after delete");
     assert(iframe.allowFullscreen === true, "iframe allowFullscreen after delete");
   }
