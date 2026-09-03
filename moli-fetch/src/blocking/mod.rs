@@ -194,6 +194,7 @@ pub(crate) fn outgoing_request_headers_for_url(
     append_browser_navigation_headers(&mut outgoing, config, request, request_url, redirect_chain);
     append_browser_subresource_headers(&mut outgoing, config, request, request_url, redirect_chain);
     append_browser_storage_access_header(&mut outgoing, request, request_url);
+    reorder_browser_client_hints(&mut outgoing);
 
     if !header_present(&outgoing, "referer")
         && let Some(referer) = referrer_header_value_for_request(request, request_url)
@@ -244,6 +245,41 @@ pub(crate) fn outgoing_request_headers_for_url(
     outgoing
 }
 
+fn reorder_browser_client_hints(headers: &mut Vec<(String, String)>) {
+    const ORDER: &[&str] = &[
+        "sec-ch-ua",
+        "sec-ch-ua-mobile",
+        "sec-ch-ua-platform",
+        "downlink",
+        "rtt",
+        "sec-ch-prefers-color-scheme",
+        "sec-ch-ua-arch",
+        "sec-ch-ua-bitness",
+        "sec-ch-ua-form-factors",
+        "sec-ch-ua-full-version",
+        "sec-ch-ua-full-version-list",
+        "sec-ch-ua-model",
+        "sec-ch-ua-platform-version",
+        "sec-ch-ua-wow64",
+    ];
+    let mut hints = Vec::new();
+    headers.retain(|(name, value)| {
+        let Some(order) = ORDER
+            .iter()
+            .position(|candidate| name.eq_ignore_ascii_case(candidate))
+        else {
+            return true;
+        };
+        hints.push((order, name.clone(), value.clone()));
+        false
+    });
+    hints.sort_by_key(|(order, _, _)| *order);
+    headers.splice(
+        0..0,
+        hints.into_iter().map(|(_, name, value)| (name, value)),
+    );
+}
+
 pub(crate) fn network_request_extra_info_from_headers(
     config: &FetchConfig,
     outgoing_headers: &[(String, String)],
@@ -280,6 +316,18 @@ fn append_browser_navigation_headers(
         return;
     }
 
+    append_browser_client_hints(outgoing, config);
+    append_header_if_missing(outgoing, "Upgrade-Insecure-Requests", "1".to_owned());
+    append_header_if_missing(
+        outgoing,
+        "User-Agent",
+        config.browser_identity().user_agent().to_owned(),
+    );
+    append_header_if_missing(
+        outgoing,
+        "Accept-Language",
+        config.browser_identity().accept_language().to_owned(),
+    );
     append_header_if_missing(
         outgoing,
         "Accept",
@@ -287,11 +335,14 @@ fn append_browser_navigation_headers(
     );
     append_header_if_missing(
         outgoing,
-        "Accept-Language",
-        config.browser_identity().accept_language().to_owned(),
+        "Sec-Fetch-Site",
+        request_sec_fetch_site(request, request_url),
     );
-    append_header_if_missing(outgoing, "Upgrade-Insecure-Requests", "1".to_owned());
     append_header_if_missing(outgoing, "Sec-Fetch-Mode", "navigate".to_owned());
+
+    if request.is_top_level_navigation_request() && request.cookie_context.initiator_url.is_none() {
+        append_header_if_missing(outgoing, "Sec-Fetch-User", "?1".to_owned());
+    }
     append_header_if_missing(
         outgoing,
         "Sec-Fetch-Dest",
@@ -302,15 +353,7 @@ fn append_browser_navigation_headers(
         }
         .to_owned(),
     );
-    append_header_if_missing(
-        outgoing,
-        "Sec-Fetch-Site",
-        request_sec_fetch_site(request, request_url),
-    );
-
-    if request.is_top_level_navigation_request() && request.cookie_context.initiator_url.is_none() {
-        append_header_if_missing(outgoing, "Sec-Fetch-User", "?1".to_owned());
-    }
+    append_header_if_missing(outgoing, "Priority", "u=0, i".to_owned());
 
     if request.browser_navigation_kind() == crate::BrowserNavigationRequestKind::Reload {
         append_header_if_missing(outgoing, "Cache-Control", "max-age=0".to_owned());
@@ -319,8 +362,6 @@ fn append_browser_navigation_headers(
     if let Some(origin) = request_origin_header_value(request, request_url, redirect_chain) {
         append_header_if_missing(outgoing, "Origin", origin);
     }
-
-    append_browser_client_hints(outgoing, config);
 }
 
 fn append_browser_subresource_headers(
@@ -824,6 +865,32 @@ fn enforce_request_target_policy(config: &FetchConfig, request_url: &Url) -> Res
     }
 
     Ok(())
+}
+
+pub(crate) fn resolve_allowed_target_ips(
+    config: &FetchConfig,
+    request_url: &Url,
+) -> Result<Vec<IpAddr>> {
+    if crate::should_request_be_blocked_due_to_bad_port(request_url) {
+        bail!("blocked bad port for `{request_url}`");
+    }
+    let host = request_url
+        .host_str()
+        .ok_or_else(|| anyhow!("request URL has no host: `{request_url}`"))?;
+    let port = request_url
+        .port_or_known_default()
+        .ok_or_else(|| anyhow!("could not determine port for request url `{request_url}`"))?;
+    let resolved_ips = resolve_target_ips(config, host, port)
+        .with_context(|| anyhow!("failed to resolve request host `{host}` for `{request_url}`"))?;
+    for ip in &resolved_ips {
+        if config.block_private_networks() && is_private_or_internal_ip(*ip) {
+            bail!("blocked private network address `{ip}` for `{request_url}`");
+        }
+        if let Some(cidr) = config.block_cidrs().iter().find(|cidr| cidr.contains(ip)) {
+            bail!("blocked address `{ip}` for `{request_url}` because it matches `{cidr}`");
+        }
+    }
+    Ok(resolved_ips)
 }
 
 fn resolve_target_ips(config: &FetchConfig, host: &str, port: u16) -> Result<Vec<IpAddr>> {

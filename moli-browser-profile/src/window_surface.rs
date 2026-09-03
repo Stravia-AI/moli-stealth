@@ -7,6 +7,8 @@ pub struct WindowSurfaceProfile {
     pub max_touch_points: f64,
     pub inner_width: f64,
     pub inner_height: f64,
+    pub outer_width: f64,
+    pub outer_height: f64,
     pub device_pixel_ratio: f64,
     pub screen_width: f64,
     pub screen_height: f64,
@@ -24,11 +26,12 @@ pub struct WindowSurfaceProfile {
 /// Keep this token in the default user agent as well. CDP clients commonly use
 /// `product` for Chromium feature detection, while Moli's own product
 /// identity remains available through its binary/package metadata.
-pub const DEFAULT_CDP_PRODUCT: &str = "Chrome/145.0.0.0";
-pub const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36";
+pub const DEFAULT_CHROME_FULL_VERSION: &str = "152.0.7977.75";
+pub const DEFAULT_CDP_PRODUCT: &str = "Chrome/152.0.7977.75";
+pub const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36";
 pub const DEFAULT_ACCEPT_LANGUAGE: &str = "en-US,en;q=0.9";
 pub const DEFAULT_SEC_CH_UA_PLATFORM: &str = "\"Windows\"";
-pub const DEFAULT_SEC_CH_UA_PLATFORM_VERSION: &str = "\"19.0.0\"";
+pub const DEFAULT_SEC_CH_UA_PLATFORM_VERSION: &str = "\"10.0\"";
 pub const DEFAULT_SEC_CH_UA_ARCH: &str = "\"x86\"";
 pub const DEFAULT_SEC_CH_UA_BITNESS: &str = "\"64\"";
 pub const DEFAULT_SEC_CH_UA_MODEL: &str = "\"\"";
@@ -56,10 +59,12 @@ pub const DEFAULT_WINDOW_SURFACE_PROFILE: WindowSurfaceProfile = WindowSurfacePr
     user_agent: DEFAULT_USER_AGENT,
     platform: DEFAULT_NAVIGATOR_PLATFORM,
     language: "en-US",
-    hardware_concurrency: 4.0,
+    hardware_concurrency: 8.0,
     max_touch_points: 0.0,
     inner_width: 1920.0,
-    inner_height: 1080.0,
+    inner_height: 969.0,
+    outer_width: 1920.0,
+    outer_height: 1080.0,
     device_pixel_ratio: 1.0,
     // Keep the stable desktop profile internally consistent: inner viewport
     // should not exceed the reported screen bounds. This stays close to the
@@ -68,7 +73,7 @@ pub const DEFAULT_WINDOW_SURFACE_PROFILE: WindowSurfaceProfile = WindowSurfacePr
     screen_width: 1920.0,
     screen_height: 1080.0,
     screen_avail_width: 1920.0,
-    screen_avail_height: 1080.0,
+    screen_avail_height: 1040.0,
     color_depth: 24.0,
     pixel_depth: 24.0,
     orientation_angle: 0.0,
@@ -236,14 +241,16 @@ mod tests {
             DEFAULT_NAVIGATOR_PLATFORM
         );
         assert_eq!(DEFAULT_WINDOW_SURFACE_PROFILE.language, "en-US");
-        assert_eq!(DEFAULT_WINDOW_SURFACE_PROFILE.hardware_concurrency, 4.0);
+        assert_eq!(DEFAULT_WINDOW_SURFACE_PROFILE.hardware_concurrency, 8.0);
         assert_eq!(DEFAULT_WINDOW_SURFACE_PROFILE.max_touch_points, 0.0);
         assert_eq!(DEFAULT_WINDOW_SURFACE_PROFILE.inner_width, 1920.0);
-        assert_eq!(DEFAULT_WINDOW_SURFACE_PROFILE.inner_height, 1080.0);
+        assert_eq!(DEFAULT_WINDOW_SURFACE_PROFILE.inner_height, 969.0);
+        assert_eq!(DEFAULT_WINDOW_SURFACE_PROFILE.outer_width, 1920.0);
+        assert_eq!(DEFAULT_WINDOW_SURFACE_PROFILE.outer_height, 1080.0);
         assert_eq!(DEFAULT_WINDOW_SURFACE_PROFILE.screen_width, 1920.0);
         assert_eq!(DEFAULT_WINDOW_SURFACE_PROFILE.screen_height, 1080.0);
         assert_eq!(DEFAULT_WINDOW_SURFACE_PROFILE.screen_avail_width, 1920.0);
-        assert_eq!(DEFAULT_WINDOW_SURFACE_PROFILE.screen_avail_height, 1080.0);
+        assert_eq!(DEFAULT_WINDOW_SURFACE_PROFILE.screen_avail_height, 1040.0);
         assert_eq!(DEFAULT_WINDOW_SURFACE_PROFILE.color_depth, 24.0);
         assert_eq!(DEFAULT_WINDOW_SURFACE_PROFILE.pixel_depth, 24.0);
         assert_eq!(
@@ -265,7 +272,7 @@ mod tests {
     fn sec_ch_ua_value_matches_chromium_seeded_order_for_chrome() {
         assert_eq!(
             chromium_sec_ch_ua_value(DEFAULT_USER_AGENT).as_deref(),
-            Some("\"Not:A-Brand\";v=\"99\", \"Google Chrome\";v=\"145\", \"Chromium\";v=\"145\"")
+            Some("\"Chromium\";v=\"152\", \"Not?A_Brand\";v=\"24\", \"Google Chrome\";v=\"152\"")
         );
     }
 
@@ -274,10 +281,10 @@ mod tests {
         assert_eq!(
             chromium_sec_ch_ua_full_version_list_value(DEFAULT_USER_AGENT).as_deref(),
             Some(
-                "\"Not:A-Brand\";v=\"99.0.0.0\", \"Google Chrome\";v=\"145.0.0.0\", \"Chromium\";v=\"145.0.0.0\""
+                "\"Chromium\";v=\"152.0.0.0\", \"Not?A_Brand\";v=\"24.0.0.0\", \"Google Chrome\";v=\"152.0.0.0\""
             )
         );
-        assert_eq!(chromium_full_version(DEFAULT_USER_AGENT), Some("145.0.0.0"));
+        assert_eq!(chromium_full_version(DEFAULT_USER_AGENT), Some("152.0.0.0"));
     }
 
     #[test]
@@ -297,10 +304,11 @@ mod tests {
             ),
             Some("145")
         );
-        assert_eq!(chromium_major_version(DEFAULT_USER_AGENT), Some("145"));
-        assert!(
-            DEFAULT_USER_AGENT.contains(DEFAULT_CDP_PRODUCT),
-            "CDP product and default user agent must advertise the same Chromium compatibility version"
+        assert_eq!(chromium_major_version(DEFAULT_USER_AGENT), Some("152"));
+        assert_eq!(
+            chromium_major_version(DEFAULT_CDP_PRODUCT),
+            chromium_major_version(DEFAULT_USER_AGENT),
+            "CDP product and reduced user agent must advertise the same Chromium major version"
         );
         assert_eq!(chromium_major_version("Mozilla/5.0 Safari/537.36"), None);
     }

@@ -2647,11 +2647,11 @@ fn critical_client_hints_restart_navigation_before_exposing_the_first_response()
     let later = requests[2].to_ascii_lowercase();
     assert!(!first.contains("sec-ch-ua-arch:"));
     for expected in [
-        "sec-ch-ua-full-version: \"145.0.0.0\"",
+        "sec-ch-ua-full-version: \"152.0.7977.75\"",
         "sec-ch-ua-full-version-list:",
         "sec-ch-ua-arch: \"x86\"",
         "sec-ch-ua-bitness: \"64\"",
-        "sec-ch-ua-platform-version: \"19.0.0\"",
+        "sec-ch-ua-platform-version: \"10.0\"",
         "sec-ch-ua-model: \"\"",
         "sec-ch-ua-wow64: ?0",
     ] {

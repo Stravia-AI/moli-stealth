@@ -271,11 +271,10 @@ struct AudioBufferObjectDeclaration<'scope> {
     channel_data: v8::Local<'scope, v8::Object>,
 }
 
-// Captured from the Chromium-on-Linux baseline we use for Zhihu probe parity.
-// If that browser profile changes, update this together with the audio probe
-// assertions in `script_vm/tests.rs`.
-const TARGET_AUDIO_FINGERPRINT_SUM: f64 = 124.04347527516074;
-const SYNTHETIC_COMPRESSOR_REDUCTION: f64 = -82.26815795898438;
+// Captured from Chrome 152 on the Windows profile represented by
+// `DEFAULT_WINDOW_SURFACE_PROFILE`.
+const TARGET_AUDIO_FINGERPRINT_SUM: f64 = 124.04347776696522;
+const SYNTHETIC_COMPRESSOR_REDUCTION: f64 = -20.538288116455078;
 const SYNTHETIC_ANALYSER_FREQUENCY_BINS: &[f64] = &[
     -90.25955200195312,
     -90.22233581542969,

@@ -27,6 +27,7 @@ use moli_cookie_jar::{
 use moli_curl::{
     CurlMultiCompletion, CurlMultiJob, CurlMultiRuntime, CurlMultiRuntimeConfig, CurlOriginKey,
 };
+use moli_stealth_net::ChromeTransport;
 use moli_url_policy::ensure_http_network_transport_url;
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, oneshot};
@@ -57,6 +58,8 @@ use crate::{
     network_fetch_result::NetworkObservationRecorder,
     proxy_connect::{ProxyConnectResponse, ProxyConnectResponseRecorder},
 };
+
+mod stealth;
 
 const DEFAULT_RUNTIME_TRANSFERS: usize = 256;
 const RUNTIME_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -388,10 +391,12 @@ impl FetchRuntimeOwner {
         let owner_started = Arc::new(AtomicBool::new(false));
         let (curl_runtime, curl_completion_rx) = CurlMultiRuntime::new(curl_runtime_config(config))
             .expect("failed to start fetch curl multi runtime");
+        let stealth_transport = stealth::new_transport(config);
         let owner = RuntimeOwner {
             config: config.clone(),
             cookie_store,
             client_hint_preferences,
+            stealth_transport,
             request_rx,
             curl_runtime,
             curl_completion_rx,
@@ -546,11 +551,19 @@ impl FetchRuntimeHandle {
             request.auth_requires_buffered_transport(),
             "buffered raw fetch is reserved for auth credential replay"
         );
+        self.submit_buffered_raw(request, FetchCancelHandle::new())
+    }
+
+    pub(crate) fn submit_buffered_raw(
+        &self,
+        request: Request,
+        cancel_handle: FetchCancelHandle,
+    ) -> Result<oneshot::Receiver<Result<RawResponse>>> {
         let (response_tx, response_rx) = oneshot::channel();
         self.enqueue(RuntimeJob::new(
             request,
             RuntimeResponseTx::Raw(response_tx),
-            FetchCancelHandle::new(),
+            cancel_handle,
         ))?;
         Ok(response_rx)
     }
@@ -695,6 +708,7 @@ struct RuntimeOwner {
     config: FetchConfig,
     cookie_store: SharedBrowserCookieStore,
     client_hint_preferences: SharedClientHintPreferences,
+    stealth_transport: ChromeTransport,
     request_rx: Receiver<RuntimeCommand>,
     curl_runtime: CurlMultiRuntime<FetchTransferHandler, ActiveTransferContext>,
     curl_completion_rx: Receiver<RuntimeCurlCompletion>,
@@ -917,6 +931,15 @@ impl RuntimeOwner {
             request_cookie_report.clone(),
             request_extra_info.as_ref(),
         );
+        if stealth::should_use(&self.config, &job.request, &job.current_url) {
+            return self.complete_stealth_buffered_attempt(
+                job,
+                &outgoing_headers,
+                request_cookie_report,
+                request_extra_info,
+                prepared_request.response_policy,
+            );
+        }
 
         let label = job.current_url.to_string();
         let dns_resolution = curl_dns_resolution(&self.config, &job.current_url);
@@ -1087,6 +1110,19 @@ impl RuntimeOwner {
             request_cookie_report.clone(),
             request_extra_info.as_ref(),
         );
+        if stealth::should_use(&self.config, &job.request, &job.current_url) {
+            return match self.complete_stealth_streaming_attempt(
+                state,
+                job,
+                &outgoing_headers,
+                request_cookie_report,
+                request_extra_info,
+                prepared_request.response_policy,
+            ) {
+                Ok(outcome) => Ok(outcome),
+                Err((job, error)) => Err((job, Some(easy), error)),
+            };
+        }
         let collector = easy
             .get_mut()
             .streaming_mut()

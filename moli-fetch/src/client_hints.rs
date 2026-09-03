@@ -21,6 +21,9 @@ pub(crate) enum ClientHintResponseAction {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum ClientHint {
+    Downlink,
+    Rtt,
+    PrefersColorScheme,
     Ua,
     UaArch,
     UaBitness,
@@ -37,6 +40,9 @@ enum ClientHint {
 impl ClientHint {
     fn from_header_name(name: &str) -> Option<Self> {
         match name.trim().to_ascii_lowercase().as_str() {
+            "downlink" => Some(Self::Downlink),
+            "rtt" => Some(Self::Rtt),
+            "sec-ch-prefers-color-scheme" => Some(Self::PrefersColorScheme),
             "sec-ch-ua" => Some(Self::Ua),
             "sec-ch-ua-arch" => Some(Self::UaArch),
             "sec-ch-ua-bitness" => Some(Self::UaBitness),
@@ -54,6 +60,9 @@ impl ClientHint {
 
     fn header_name(self) -> &'static str {
         match self {
+            Self::Downlink => "Downlink",
+            Self::Rtt => "RTT",
+            Self::PrefersColorScheme => "Sec-CH-Prefers-Color-Scheme",
             Self::Ua => "Sec-CH-UA",
             Self::UaArch => "Sec-CH-UA-Arch",
             Self::UaBitness => "Sec-CH-UA-Bitness",
@@ -73,6 +82,9 @@ impl ClientHint {
             return None;
         }
         match self {
+            Self::Downlink => Some("1.7".to_owned()),
+            Self::Rtt => Some("150".to_owned()),
+            Self::PrefersColorScheme => Some("light".to_owned()),
             Self::Ua => identity.sec_ch_ua_value(),
             Self::UaArch => Some(quoted_header_value(identity.architecture())),
             Self::UaBitness => Some(quoted_header_value(identity.bitness())),
@@ -318,11 +330,11 @@ mod tests {
         let headers = vec![
             (
                 "Accept-CH".to_owned(),
-                "Sec-CH-UA-Arch, Sec-CH-UA-Full-Version-List".to_owned(),
+                "Sec-CH-UA-Arch, Sec-CH-UA-Full-Version-List, Downlink, RTT, Sec-CH-Prefers-Color-Scheme".to_owned(),
             ),
             (
                 "Critical-CH".to_owned(),
-                "Sec-CH-UA-Arch, Sec-CH-UA-Full-Version-List".to_owned(),
+                "Sec-CH-UA-Arch, Sec-CH-UA-Full-Version-List, Downlink, RTT, Sec-CH-Prefers-Color-Scheme".to_owned(),
             ),
         ];
 
@@ -338,8 +350,18 @@ mod tests {
             name.eq_ignore_ascii_case("sec-ch-ua-arch") && value == "\"x86\""
         }));
         assert!(second.request.request_headers.iter().any(|(name, value)| {
-            name.eq_ignore_ascii_case("sec-ch-ua-full-version-list") && value.contains("145.0.0.0")
+            name.eq_ignore_ascii_case("sec-ch-ua-full-version-list")
+                && value.contains("152.0.7977.75")
         }));
+        for (expected_name, expected_value) in [
+            ("downlink", "1.7"),
+            ("rtt", "150"),
+            ("sec-ch-prefers-color-scheme", "light"),
+        ] {
+            assert!(second.request.request_headers.iter().any(|(name, value)| {
+                name.eq_ignore_ascii_case(expected_name) && value == expected_value
+            }));
+        }
         assert_eq!(
             second
                 .response_policy

@@ -20,7 +20,9 @@ use super::{
     web_storage::{
         install_storage_runtime_state, window_local_storage_getter, window_session_storage_getter,
     },
-    window_runtime::{build_legacy_storage_info_object, window_noop_callback},
+    window_runtime::{
+        build_legacy_storage_info_object, install_chrome_runtime_state, window_noop_callback,
+    },
     window_template::install_window_named_properties_object,
 };
 use crate::{
@@ -596,7 +598,7 @@ fn window_outer_height_replaceable_getter<'s>(
     rv.set(
         v8::Number::new(
             scope,
-            moli_browser_profile::DEFAULT_WINDOW_SURFACE_PROFILE.inner_height,
+            moli_browser_profile::DEFAULT_WINDOW_SURFACE_PROFILE.outer_height,
         )
         .into(),
     );
@@ -2035,6 +2037,7 @@ fn install_window_runtime_state<'s>(
     install_html_script_element_static_methods(scope, global)?;
     install_trusted_types_runtime_state(scope, global)?;
     install_window_crypto_runtime_state(scope, global, secure_context_available)?;
+    install_chrome_runtime_state(scope, global)?;
     install_css_runtime_state(scope, global)?;
     install_default_window_performance_seed(scope, global)?;
     install_storage_runtime_state(scope, global)?;

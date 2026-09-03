@@ -231,9 +231,38 @@ pub(crate) const WEBGL2_CONSTANTS: &[(&str, u32)] = &[
 ];
 
 const WEBGL2_SUPPORTED_EXTENSIONS: &[&str] = &[
+    "EXT_clip_control",
     "EXT_color_buffer_float",
     "EXT_color_buffer_half_float",
+    "EXT_conservative_depth",
+    "EXT_depth_clamp",
+    "EXT_disjoint_timer_query_webgl2",
+    "EXT_float_blend",
+    "EXT_polygon_offset_clamp",
+    "EXT_render_snorm",
+    "EXT_texture_compression_bptc",
+    "EXT_texture_compression_rgtc",
+    "EXT_texture_filter_anisotropic",
+    "EXT_texture_mirror_clamp_to_edge",
+    "EXT_texture_norm16",
+    "KHR_parallel_shader_compile",
+    "NV_shader_noperspective_interpolation",
+    "OES_draw_buffers_indexed",
+    "OES_sample_variables",
+    "OES_shader_multisample_interpolation",
+    "OES_texture_float_linear",
+    "OVR_multiview2",
+    "WEBGL_blend_func_extended",
+    "WEBGL_clip_cull_distance",
+    "WEBGL_compressed_texture_s3tc",
+    "WEBGL_compressed_texture_s3tc_srgb",
+    "WEBGL_debug_renderer_info",
+    "WEBGL_debug_shaders",
     "WEBGL_lose_context",
+    "WEBGL_multi_draw",
+    "WEBGL_polygon_mode",
+    "WEBGL_provoking_vertex",
+    "WEBGL_stencil_texturing",
 ];
 
 fn webgl_array_value<'s, T>(
@@ -286,6 +315,9 @@ pub(crate) fn webgl_get_extension_callback<'s>(
     let value = match parsed.name.parse::<WebGlExtension>() {
         Ok(WebGlExtension::DebugRendererInfo) => build_webgl_debug_renderer_info_object(scope),
         Ok(WebGlExtension::LoseContext) => build_webgl_lose_context_object(scope),
+        Err(_) if WEBGL_SUPPORTED_EXTENSIONS.contains(&parsed.name.as_str()) => {
+            build_webgl_extension_object(scope, &parsed.name)
+        }
         Err(_) => None,
     }
     .map(Into::into)
@@ -304,7 +336,7 @@ pub(crate) fn webgl2_get_extension_callback<'s>(
     };
     let value = match parsed.name.as_str() {
         "WEBGL_lose_context" => build_webgl_lose_context_object(scope),
-        "EXT_color_buffer_float" | "EXT_color_buffer_half_float" => {
+        name if WEBGL2_SUPPORTED_EXTENSIONS.contains(&name) => {
             build_webgl_extension_object(scope, &parsed.name)
         }
         _ => None,
@@ -345,25 +377,40 @@ pub(crate) fn webgl_get_parameter_callback<'s>(
         return;
     };
     match parsed.pname {
-        0x846D | 0x846E => rv.set(
-            webgl_array_value(scope, &[1, 1]).unwrap_or_else(|| v8::Array::new(scope, 0).into()),
+        0x846D => rv.set(
+            webgl_array_value(scope, &[1, 1024])
+                .unwrap_or_else(|| v8::Array::new(scope, 0).into()),
+        ),
+        0x846E => rv.set(
+            webgl_array_value(scope, &[1, 1])
+                .unwrap_or_else(|| v8::Array::new(scope, 0).into()),
         ),
         0x0D3A => rv.set(
-            webgl_array_value(scope, &[300, 150])
+            webgl_array_value(scope, &[32_767, 32_767])
                 .unwrap_or_else(|| v8::Array::new(scope, 0).into()),
         ),
         0x0D52..=0x0D55 => rv.set(v8::Integer::new(scope, 8).into()),
         0x0D56 => rv.set(v8::Integer::new(scope, 24).into()),
         0x0D57 => rv.set(v8::Integer::new(scope, 0).into()),
-        0x0D33 | 0x84E8 | 0x851C => rv.set(v8::Integer::new(scope, 4096).into()),
+        0x0D33 | 0x84E8 | 0x851C => rv.set(v8::Integer::new(scope, 16_384).into()),
         0x8869 => rv.set(v8::Integer::new(scope, 16).into()),
-        0x8872 | 0x8B4C => rv.set(v8::Integer::new(scope, 8).into()),
-        0x8B4D => rv.set(v8::Integer::new(scope, 16).into()),
-        0x8DFB..=0x8DFD => rv.set(v8::Integer::new(scope, 128).into()),
-        0x1F00 | 0x9245 => rv.set(v8::String::empty(scope).into()),
-        0x1F01 | 0x9246 => rv.set(v8::String::empty(scope).into()),
-        0x1F02 => rv.set(v8::String::new(scope, "WebGL 1.0").unwrap().into()),
-        0x8B8C => rv.set(v8::String::new(scope, "WebGL GLSL ES 1.0").unwrap().into()),
+        0x8872 | 0x8B4C => rv.set(v8::Integer::new(scope, 16).into()),
+        0x8B4D => rv.set(v8::Integer::new(scope, 32).into()),
+        0x8DFB => rv.set(v8::Integer::new(scope, 4095).into()),
+        0x8DFC => rv.set(v8::Integer::new(scope, 30).into()),
+        0x8DFD => rv.set(v8::Integer::new(scope, 1024).into()),
+        0x1F00 => rv.set(v8str(scope, "WebKit").into()),
+        0x1F01 => rv.set(v8str(scope, "WebKit WebGL").into()),
+        0x9245 => rv.set(v8str(scope, "Google Inc. (NVIDIA)").into()),
+        0x9246 => rv.set(v8str(
+            scope,
+            "ANGLE (NVIDIA, NVIDIA GeForce RTX 5060 Laptop GPU (0x00002D19) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+        ).into()),
+        0x1F02 => rv.set(v8str(scope, "WebGL 1.0 (OpenGL ES 2.0 Chromium)").into()),
+        0x8B8C => rv.set(v8str(
+            scope,
+            "WebGL GLSL ES 1.0 (OpenGL ES GLSL ES 1.0 Chromium)",
+        ).into()),
         _ => rv.set(v8::null(scope).into()),
     }
 }
@@ -402,21 +449,29 @@ pub(crate) fn webgl2_get_parameter_callback<'s>(
         0x8A34 => rv.set(v8::Integer::new(scope, 256).into()),
         0x1F00 => rv.set(v8str(scope, "WebKit").into()),
         0x1F01 => rv.set(v8str(scope, "WebKit WebGL").into()),
-        0x9245 | 0x9246 => rv.set(v8::String::empty(scope).into()),
+        0x9245 => rv.set(v8str(scope, "Google Inc. (NVIDIA)").into()),
+        0x9246 => rv.set(v8str(
+            scope,
+            "ANGLE (NVIDIA, NVIDIA GeForce RTX 5060 Laptop GPU (0x00002D19) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+        ).into()),
         0x1F02 => rv.set(v8str(scope, "WebGL 2.0 (OpenGL ES 3.0 Chromium)").into()),
         0x8B8C => {
             rv.set(v8str(scope, "WebGL GLSL ES 3.00 (OpenGL ES GLSL ES 3.0 Chromium)").into())
         }
         0x86A3 => rv.set(webgl_uint32_array(scope, &[])),
-        0x0D33 | 0x84E8 | 0x851C => rv.set(v8::Integer::new(scope, 8192).into()),
-        0x0D3A => rv.set(webgl_int32_array(scope, &[8192, 8192])),
-        0x846D | 0x846E => rv.set(webgl_int32_array(scope, &[1, 1])),
+        0x0D33 | 0x84E8 | 0x851C => rv.set(v8::Integer::new(scope, 16_384).into()),
+        0x0D3A => rv.set(webgl_int32_array(scope, &[32_767, 32_767])),
+        0x846D => rv.set(webgl_int32_array(scope, &[1, 1024])),
+        0x846E => rv.set(webgl_int32_array(scope, &[1, 1])),
         0x0D52..=0x0D55 => rv.set(v8::Integer::new(scope, 8).into()),
         0x0D56 => rv.set(v8::Integer::new(scope, 24).into()),
         0x0D57 => rv.set(v8::Integer::new(scope, 0).into()),
         0x8869 => rv.set(v8::Integer::new(scope, 16).into()),
         0x8872 | 0x8B4C => rv.set(v8::Integer::new(scope, 16).into()),
-        0x8B4D => rv.set(v8::Integer::new(scope, 64).into()),
+        0x8B4D => rv.set(v8::Integer::new(scope, 32).into()),
+        0x8DFB => rv.set(v8::Integer::new(scope, 4095).into()),
+        0x8DFC => rv.set(v8::Integer::new(scope, 30).into()),
+        0x8DFD => rv.set(v8::Integer::new(scope, 1024).into()),
         _ => rv.set(v8::null(scope).into()),
     }
 }
@@ -650,10 +705,24 @@ pub(crate) fn webgl_is_context_lost_callback(
 
 pub(crate) fn webgl_get_shader_precision_format_callback(
     scope: &mut v8::PinScope<'_, '_>,
-    _args: v8::FunctionCallbackArguments<'_>,
+    args: v8::FunctionCallbackArguments<'_>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    let value = WebGlShaderPrecisionFormat::default()
+    let precision_type = args.get(1).uint32_value(scope).unwrap_or_default();
+    let precision = match precision_type {
+        0x8DF3 => WebGlShaderPrecisionFormat {
+            precision: 0,
+            range_min: 15,
+            range_max: 14,
+        },
+        0x8DF4 | 0x8DF5 => WebGlShaderPrecisionFormat {
+            precision: 0,
+            range_min: 31,
+            range_max: 30,
+        },
+        _ => WebGlShaderPrecisionFormat::default(),
+    };
+    let value = precision
         .bind(scope)
         .expect("WebGL shader precision format declaration should bind");
     rv.set(value.into());

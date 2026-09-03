@@ -476,8 +476,8 @@ fn default_viewport_surface() -> crate::protocol_types::ViewportSurface {
     crate::protocol_types::ViewportSurface {
         inner_width: dimension(DEFAULT_WINDOW_SURFACE_PROFILE.inner_width),
         inner_height: dimension(DEFAULT_WINDOW_SURFACE_PROFILE.inner_height),
-        outer_width: dimension(DEFAULT_WINDOW_SURFACE_PROFILE.inner_width),
-        outer_height: dimension(DEFAULT_WINDOW_SURFACE_PROFILE.inner_height),
+        outer_width: dimension(DEFAULT_WINDOW_SURFACE_PROFILE.outer_width),
+        outer_height: dimension(DEFAULT_WINDOW_SURFACE_PROFILE.outer_height),
         device_pixel_ratio: DEFAULT_WINDOW_SURFACE_PROFILE.device_pixel_ratio,
         screen_width: dimension(DEFAULT_WINDOW_SURFACE_PROFILE.screen_width),
         screen_height: dimension(DEFAULT_WINDOW_SURFACE_PROFILE.screen_height),

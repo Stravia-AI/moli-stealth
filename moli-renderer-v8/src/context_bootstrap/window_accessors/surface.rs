@@ -139,7 +139,7 @@ pub(in crate::context_bootstrap) fn window_outer_width_getter<'s>(
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
     if window_receiver(scope, &args).is_some() {
-        rv.set(v8::Number::new(scope, DEFAULT_WINDOW_SURFACE_PROFILE.inner_width).into());
+        rv.set(v8::Number::new(scope, DEFAULT_WINDOW_SURFACE_PROFILE.outer_width).into());
     }
 }
 
@@ -149,7 +149,7 @@ pub(in crate::context_bootstrap) fn window_outer_height_getter<'s>(
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
     if window_receiver(scope, &args).is_some() {
-        rv.set(v8::Number::new(scope, DEFAULT_WINDOW_SURFACE_PROFILE.inner_height).into());
+        rv.set(v8::Number::new(scope, DEFAULT_WINDOW_SURFACE_PROFILE.outer_height).into());
     }
 }
 

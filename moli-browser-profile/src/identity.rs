@@ -1,8 +1,9 @@
 use crate::window_surface::{
-    DEFAULT_ACCEPT_LANGUAGE, DEFAULT_NAVIGATOR_PLATFORM, DEFAULT_SEC_CH_UA_ARCH,
-    DEFAULT_SEC_CH_UA_BITNESS, DEFAULT_SEC_CH_UA_FORM_FACTORS, DEFAULT_SEC_CH_UA_MODEL,
-    DEFAULT_SEC_CH_UA_PLATFORM, DEFAULT_SEC_CH_UA_PLATFORM_VERSION, DEFAULT_SEC_CH_UA_WOW64,
-    DEFAULT_USER_AGENT, chromium_full_version, chromium_major_version, chromium_ua_brand_versions,
+    DEFAULT_ACCEPT_LANGUAGE, DEFAULT_CHROME_FULL_VERSION, DEFAULT_NAVIGATOR_PLATFORM,
+    DEFAULT_SEC_CH_UA_ARCH, DEFAULT_SEC_CH_UA_BITNESS, DEFAULT_SEC_CH_UA_FORM_FACTORS,
+    DEFAULT_SEC_CH_UA_MODEL, DEFAULT_SEC_CH_UA_PLATFORM, DEFAULT_SEC_CH_UA_PLATFORM_VERSION,
+    DEFAULT_SEC_CH_UA_WOW64, DEFAULT_USER_AGENT, chromium_full_version, chromium_major_version,
+    chromium_ua_brand_versions,
 };
 use serde::{Deserialize, Serialize};
 
@@ -331,7 +332,38 @@ impl BrowserIdentityProfile {
 
 impl Default for BrowserIdentityProfile {
     fn default() -> Self {
-        Self::new(DEFAULT_USER_AGENT, DEFAULT_ACCEPT_LANGUAGE)
+        let mut identity = Self::new(DEFAULT_USER_AGENT, DEFAULT_ACCEPT_LANGUAGE);
+        identity.major_version = "152".to_owned();
+        identity.full_version = DEFAULT_CHROME_FULL_VERSION.to_owned();
+        identity.brands = vec![
+            BrowserBrandVersion {
+                brand: "Chromium".to_owned(),
+                version: "152".to_owned(),
+            },
+            BrowserBrandVersion {
+                brand: " Not A;Brand".to_owned(),
+                version: "99".to_owned(),
+            },
+            BrowserBrandVersion {
+                brand: "Google Chrome".to_owned(),
+                version: "152".to_owned(),
+            },
+        ];
+        identity.full_version_list = vec![
+            BrowserBrandVersion {
+                brand: "Chromium".to_owned(),
+                version: DEFAULT_CHROME_FULL_VERSION.to_owned(),
+            },
+            BrowserBrandVersion {
+                brand: " Not A;Brand".to_owned(),
+                version: "99.0.0.0".to_owned(),
+            },
+            BrowserBrandVersion {
+                brand: "Google Chrome".to_owned(),
+                version: DEFAULT_CHROME_FULL_VERSION.to_owned(),
+            },
+        ];
+        identity
     }
 }
 
@@ -389,14 +421,14 @@ mod tests {
     fn default_identity_keeps_network_and_js_brand_order_together() {
         let identity = BrowserIdentityProfile::default();
 
-        assert_eq!(identity.major_version(), "145");
-        assert_eq!(identity.full_version(), "145.0.0.0");
+        assert_eq!(identity.major_version(), "152");
+        assert_eq!(identity.full_version(), DEFAULT_CHROME_FULL_VERSION);
         assert_eq!(identity.platform(), "Windows");
         assert_eq!(identity.navigator_platform(), "Win32");
         assert_eq!(identity.languages(), ["en-US", "en"]);
         assert_eq!(
             identity.sec_ch_ua_value().as_deref(),
-            Some("\"Not:A-Brand\";v=\"99\", \"Google Chrome\";v=\"145\", \"Chromium\";v=\"145\"")
+            Some("\"Chromium\";v=\"152\", \" Not A;Brand\";v=\"99\", \"Google Chrome\";v=\"152\"")
         );
         assert_eq!(
             identity
@@ -404,7 +436,7 @@ mod tests {
                 .iter()
                 .map(|entry| entry.brand.as_str())
                 .collect::<Vec<_>>(),
-            ["Not:A-Brand", "Google Chrome", "Chromium"]
+            ["Chromium", " Not A;Brand", "Google Chrome"]
         );
     }
 

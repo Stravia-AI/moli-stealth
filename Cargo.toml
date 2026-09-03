@@ -47,6 +47,7 @@ members = [
     "moli-shared-worker",
     "moli-storage-service",
     "moli-storage-key",
+    "moli-stealth-net",
     "moli-streams",
     "moli-structured-clone",
     "moli-stylesheet-blocking",

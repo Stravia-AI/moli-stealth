@@ -362,6 +362,14 @@ impl RequestAuth {
 }
 
 impl Request {
+    pub(crate) fn method(&self) -> &str {
+        &self.method
+    }
+
+    pub(crate) fn body_bytes(&self) -> Option<&[u8]> {
+        self.body.as_deref()
+    }
+
     pub fn get(raw_url: &str) -> Result<Self> {
         let url = Url::parse(raw_url)
             .with_context(|| anyhow!("failed to parse request url `{raw_url}`"))?;

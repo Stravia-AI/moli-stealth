@@ -1,0 +1,61 @@
+[package]
+license.workspace = true
+name = "moli-stealth-net"
+version = "0.1.0"
+edition = "2024"
+
+[package.metadata.browseroxide-sync]
+repository = "https://github.com/yfedoseev/browser_oxide.git"
+base-revision = "9cd4af36b744bc8f9047bcceeb341610a6f32109"
+source-root = "crates/browser_oxide/src"
+imported-paths = ["net", "stealth"]
+
+[lib]
+# BrowserOxide's source-level tests stay with its upstream crate. This port
+# owns only interface tests so dependency/API drift is caught at the seam.
+doctest = false
+test = false
+
+[features]
+default = []
+blocker = ["dep:adblock"]
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml_ng = "0.10"
+url = "2"
+percent-encoding = "2"
+httparse = "1"
+boring2 = { package = "btls", git = "https://github.com/0x676e67/btls.git", rev = "de7ab84fdb58641a2bdfdf9d8ebd7db1dcf4b29b" }
+boring-sys2 = { package = "btls-sys", git = "https://github.com/0x676e67/btls.git", rev = "de7ab84fdb58641a2bdfdf9d8ebd7db1dcf4b29b" }
+tokio-boring2 = { package = "tokio-btls", git = "https://github.com/0x676e67/btls.git", rev = "de7ab84fdb58641a2bdfdf9d8ebd7db1dcf4b29b" }
+webpki-root-certs = "1.0"
+webpki-roots = "1"
+http = "1"
+http2 = { version = "0.5", features = ["unstable"] }
+bytes = "1"
+foreign-types = "0.5"
+quinn = { version = "0.11", default-features = false, features = ["bloom", "platform-verifier", "runtime-tokio", "rustls-aws-lc-rs"] }
+h3 = "0.0.8"
+h3-quinn = "0.0.10"
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
+adblock = { version = "0.13", optional = true }
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+brotli = "8"
+zstd = "0.13"
+sha1 = "0.11"
+sha2 = "0.11"
+rand = "0.10"
+rand_chacha = "0.10"
+rand_distr = "0.6"
+chrono = "0.4"
+thiserror = "2"
+base64 = "0.23"
+lazy_static = "1"
+tracing = "0.1"
+
+[lints]
+workspace = true
