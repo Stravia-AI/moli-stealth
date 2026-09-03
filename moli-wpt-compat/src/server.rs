@@ -43,7 +43,7 @@ use tokio_stream::wrappers::ReceiverStream;
 const COMPILED_WPT_FIXTURE_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/wpt");
 const WPT_STATIC_FIXTURE_TOP_LEVEL_DIRS: &[&str] = &["assets", "ported", "resources", "upstream"];
 const WPT_BROWSER_HOST: &str = "localhost";
-const WPT_INSECURE_HOST: &str = "0.0.0.0";
+const WPT_INSECURE_HOST: &str = "moli-wpt-insecure.test";
 const WPT_REMOTE_HOST: &str = "127.0.0.1";
 const WPT_WINDOW_WRAPPER_QUERY: &str = "moli-wpt-window-wrapper";
 const WPT_WORKER_ENTRY_QUERY: &str = "moli-wpt-worker-entry";
@@ -3334,7 +3334,7 @@ mod tests {
                 "",
                 WptManifestOrigin::Insecure
             ),
-            "http://0.0.0.0:12345/wpt/upstream/WebCryptoAPI/historical.any.js?moli-wpt-worker-wrapper=1"
+            "http://moli-wpt-insecure.test:12345/wpt/upstream/WebCryptoAPI/historical.any.js?moli-wpt-worker-wrapper=1"
         );
     }
 

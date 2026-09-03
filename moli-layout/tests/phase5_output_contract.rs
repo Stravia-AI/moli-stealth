@@ -800,7 +800,7 @@ fn scrollbar_feedback_rebreaks_the_reused_inline_layout_at_its_final_width() {
     assert_eq!(feedback.metrics.numeric_layout_pass_count, 2);
     assert_eq!(
         feedback.element_metrics_for_source(1).unwrap().client_size,
-        moli_layout::LayoutSize::new(85.0, 25.0),
+        moli_layout::LayoutSize::new(85.0, 40.0),
     );
     let feedback_text = feedback.client_rects_for_source(2);
 

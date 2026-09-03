@@ -188,14 +188,13 @@ pub fn set_shared_cookie_sync(url: &Url, raw: &str) -> bool {
         return false;
     }
     let cookies = shared_session().cookies;
-    let wrote = match cookies.try_lock() {
+    match cookies.try_lock() {
         Ok(mut jar) => {
             jar.set_cookies(url, &[raw.to_string()]);
             true
         }
         Err(_) => false,
-    };
-    wrote
+    }
 }
 
 #[derive(Clone)]
@@ -509,10 +508,10 @@ impl HttpClient {
             h3_request::h3_request(conn, &parsed, method, &self.profile, extra_headers).await?;
 
         // Update cache from response
-        if let Some(alt_svc_header) = &alt_svc {
-            if let Some((port, max_age)) = alt_svc::parse_alt_svc(alt_svc_header) {
-                self.alt_svc_cache.insert(host, port, max_age).await;
-            }
+        if let Some(alt_svc_header) = &alt_svc
+            && let Some((port, max_age)) = alt_svc::parse_alt_svc(alt_svc_header)
+        {
+            self.alt_svc_cache.insert(host, port, max_age).await;
         }
 
         Ok(resp)
@@ -532,14 +531,12 @@ impl HttpClient {
         if !self.profile.allow_http3 {
             return;
         }
-        if let Some(alt_svc_header) = resp_headers.get("alt-svc") {
-            if let Some((port, max_age)) = alt_svc::parse_alt_svc(alt_svc_header) {
-                if let Ok(parsed) = Url::parse(url) {
-                    if let Some(host) = parsed.host_str() {
-                        self.alt_svc_cache.insert(host, port, max_age).await;
-                    }
-                }
-            }
+        if let Some(alt_svc_header) = resp_headers.get("alt-svc")
+            && let Some((port, max_age)) = alt_svc::parse_alt_svc(alt_svc_header)
+            && let Ok(parsed) = Url::parse(url)
+            && let Some(host) = parsed.host_str()
+        {
+            self.alt_svc_cache.insert(host, port, max_age).await;
         }
     }
 
@@ -741,11 +738,11 @@ impl HttpClient {
         let mut current_url = url.to_string();
         for _ in 0..max_redirects {
             let resp = self.get_with_exact_headers(&current_url, headers).await?;
-            if matches!(resp.status, 301 | 302 | 303 | 307 | 308) {
-                if let Some(loc) = resp.headers.get("location") {
-                    current_url = resolve_redirect(&current_url, loc)?;
-                    continue;
-                }
+            if matches!(resp.status, 301 | 302 | 303 | 307 | 308)
+                && let Some(loc) = resp.headers.get("location")
+            {
+                current_url = resolve_redirect(&current_url, loc)?;
+                continue;
             }
             return Ok(resp);
         }
@@ -909,14 +906,14 @@ impl HttpClient {
                 );
             }
 
-            if matches!(resp.status, 301 | 302 | 303 | 307 | 308) {
-                if let Some(loc) = resp.headers.get("location") {
-                    let next_url = resolve_redirect(&current_url, loc)?;
-                    // For 301, 302, 303 redirects from a GET, we just continue with another GET.
-                    // For 307, 308, we MUST preserve the method (GET), which self.get() does.
-                    current_url = next_url;
-                    continue;
-                }
+            if matches!(resp.status, 301 | 302 | 303 | 307 | 308)
+                && let Some(loc) = resp.headers.get("location")
+            {
+                let next_url = resolve_redirect(&current_url, loc)?;
+                // For 301, 302, 303 redirects from a GET, we just continue with another GET.
+                // For 307, 308, we MUST preserve the method (GET), which self.get() does.
+                current_url = next_url;
+                continue;
             }
             return Ok(resp);
         }
@@ -941,11 +938,11 @@ impl HttpClient {
             // Re-apply headers to each hop
             let resp = self.get_with_headers(&current_url, extra_headers).await?;
 
-            if matches!(resp.status, 301 | 302 | 303 | 307 | 308) {
-                if let Some(loc) = resp.headers.get("location") {
-                    current_url = resolve_redirect(&current_url, loc)?;
-                    continue;
-                }
+            if matches!(resp.status, 301 | 302 | 303 | 307 | 308)
+                && let Some(loc) = resp.headers.get("location")
+            {
+                current_url = resolve_redirect(&current_url, loc)?;
+                continue;
             }
             return Ok(resp);
         }
@@ -979,17 +976,17 @@ impl HttpClient {
                 .post_bytes_with_headers(&current_url, body, extra_headers)
                 .await?;
 
-            if matches!(resp.status, 301 | 302 | 303 | 307 | 308) {
-                if let Some(loc) = resp.headers.get("location") {
-                    let next_url = resolve_redirect(&current_url, loc)?;
-                    if matches!(resp.status, 307 | 308) {
-                        // 307/308: MUST re-POST the same body to the new location.
-                        current_url = next_url;
-                        continue;
-                    } else {
-                        // 301/302/303: Standard behavior is to switch to GET.
-                        return self.get_follow(&next_url, max_redirects - 1).await;
-                    }
+            if matches!(resp.status, 301 | 302 | 303 | 307 | 308)
+                && let Some(loc) = resp.headers.get("location")
+            {
+                let next_url = resolve_redirect(&current_url, loc)?;
+                if matches!(resp.status, 307 | 308) {
+                    // 307/308: MUST re-POST the same body to the new location.
+                    current_url = next_url;
+                    continue;
+                } else {
+                    // 301/302/303: Standard behavior is to switch to GET.
+                    return self.get_follow(&next_url, max_redirects - 1).await;
                 }
             }
             return Ok(resp);
@@ -1042,10 +1039,10 @@ impl HttpClient {
 
         // Add cookies
         let jar = self.cookies.lock().await;
-        if let Some(cookie_str) = jar.cookies_for(&parsed) {
-            if !has_header(&hdrs, "cookie") {
-                hdrs.push(("cookie".to_string(), cookie_str));
-            }
+        if let Some(cookie_str) = jar.cookies_for(&parsed)
+            && !has_header(&hdrs, "cookie")
+        {
+            hdrs.push(("cookie".to_string(), cookie_str));
         }
         drop(jar);
 
@@ -1473,12 +1470,12 @@ impl HttpClient {
 
 fn insert_response_header(headers: &mut HashMap<String, String>, name: &str, value: &str) {
     let name = name.to_ascii_lowercase();
-    if matches!(name.as_str(), "accept-ch" | "critical-ch") {
-        if let Some(existing) = headers.get_mut(&name) {
-            existing.push_str(", ");
-            existing.push_str(value);
-            return;
-        }
+    if matches!(name.as_str(), "accept-ch" | "critical-ch")
+        && let Some(existing) = headers.get_mut(&name)
+    {
+        existing.push_str(", ");
+        existing.push_str(value);
+        return;
     }
     headers.insert(name, value.to_owned());
 }

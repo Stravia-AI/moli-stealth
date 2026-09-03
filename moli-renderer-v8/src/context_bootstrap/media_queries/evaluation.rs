@@ -381,7 +381,7 @@ mod tests {
         assert!(evaluate_match_media_query_list("(min-width: 768px)", None));
         assert!(evaluate_match_media_query_list("(width: 1920px)", None));
         assert!(evaluate_match_media_query_list("(min-height: 720px)", None));
-        assert!(evaluate_match_media_query_list("(height: 1080px)", None));
+        assert!(evaluate_match_media_query_list("(height: 969px)", None));
         assert!(!evaluate_match_media_query_list("(max-width: 768px)", None));
         assert!(evaluate_match_media_query_list(
             "(min-device-width: 1px)",

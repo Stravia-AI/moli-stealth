@@ -330,10 +330,10 @@ impl Source {
         }
         // Nonce: 'nonce-XXXX'  — preserve original case for the nonce
         // value (server-issued tokens are case-sensitive).
-        if let Some(rest) = token.strip_prefix("'nonce-") {
-            if let Some(value) = rest.strip_suffix('\'') {
-                return Some(Source::Nonce(value.to_string()));
-            }
+        if let Some(rest) = token.strip_prefix("'nonce-")
+            && let Some(value) = rest.strip_suffix('\'')
+        {
+            return Some(Source::Nonce(value.to_string()));
         }
         // Hash: 'sha256-...' / 'sha384-...' / 'sha512-...'
         for (algo, prefix) in [
@@ -341,21 +341,20 @@ impl Source {
             (HashAlgo::Sha384, "'sha384-"),
             (HashAlgo::Sha512, "'sha512-"),
         ] {
-            if let Some(rest) = token.strip_prefix(prefix) {
-                if let Some(value) = rest.strip_suffix('\'') {
-                    return Some(Source::Hash(algo, value.to_string()));
-                }
+            if let Some(rest) = token.strip_prefix(prefix)
+                && let Some(value) = rest.strip_suffix('\'')
+            {
+                return Some(Source::Hash(algo, value.to_string()));
             }
         }
         // Scheme-only: ends with ':' and contains no '/'.
-        if let Some(scheme) = token.strip_suffix(':') {
-            if !scheme.contains('/')
-                && scheme
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.')
-            {
-                return Some(Source::Scheme(scheme.to_ascii_lowercase()));
-            }
+        if let Some(scheme) = token.strip_suffix(':')
+            && !scheme.contains('/')
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.')
+        {
+            return Some(Source::Scheme(scheme.to_ascii_lowercase()));
         }
         // Host source: must NOT be wrapped in single quotes. Format:
         //   [scheme://]host[:port][/path]
@@ -584,10 +583,10 @@ fn match_sources(sources: &[Source], ctx: &CheckCtx<'_>) -> bool {
                 // a nonce on a parser-inserted script IS still trusted
                 // (this is how Walmart loads its own scripts: nonce
                 // attribute on every <script> in the head).
-                if let Some(supplied) = ctx.nonce {
-                    if supplied == token {
-                        return true;
-                    }
+                if let Some(supplied) = ctx.nonce
+                    && supplied == token
+                {
+                    return true;
                 }
             }
 

@@ -55,14 +55,14 @@ impl DnsCache {
         // Check cache
         {
             let cache = self.inner.lock().await;
-            if let Some(entry) = cache.get(host) {
-                if entry.resolved_at.elapsed() < DNS_TTL {
-                    return Ok(entry
-                        .addrs
-                        .iter()
-                        .map(|a| SocketAddr::new(a.ip(), port))
-                        .collect());
-                }
+            if let Some(entry) = cache.get(host)
+                && entry.resolved_at.elapsed() < DNS_TTL
+            {
+                return Ok(entry
+                    .addrs
+                    .iter()
+                    .map(|a| SocketAddr::new(a.ip(), port))
+                    .collect());
             }
         }
 

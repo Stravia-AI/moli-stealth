@@ -321,6 +321,14 @@ pub(crate) fn cleanup_staging_directory(bucket_dir: &Path) -> OpfsResult<()> {
 }
 
 pub(crate) fn sync_directory(path: &Path) -> OpfsResult<()> {
+    #[cfg(windows)]
+    {
+        // Windows does not support FlushFileBuffers on directory handles.
+        // Callers flush file contents before publishing directory entries.
+        let _ = path;
+        Ok(())
+    }
+    #[cfg(not(windows))]
     File::open(path)
         .and_then(|directory| directory.sync_all())
         .map_err(|source| OpfsError::io("sync backend directory", path, source))

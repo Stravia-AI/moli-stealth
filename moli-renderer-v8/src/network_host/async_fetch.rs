@@ -842,9 +842,22 @@ mod tests {
             }
             request.push(byte[0]);
             if request.ends_with(b"\r\n\r\n") {
-                return Ok(String::from_utf8(request)?);
+                break;
             }
         }
+        let head = String::from_utf8(request)?;
+        let content_length = head
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or(0);
+        let mut body = vec![0_u8; content_length];
+        stream.read_exact(&mut body).await?;
+        Ok(format!("{head}{}", String::from_utf8(body)?))
     }
 
     #[test]

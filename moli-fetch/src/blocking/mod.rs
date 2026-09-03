@@ -664,9 +664,8 @@ pub(crate) fn configure_easy<H: Handler>(
         RequestHttpVersion::PreferHttp2 => HttpVersion::V2TLS,
         RequestHttpVersion::Http1Only => HttpVersion::V11,
     };
-    if let Err(error) = easy.http_version(curl_http_version) {
-        debug!(url = %request_url, ?http_version, "failed to configure HTTP version for request: {error}");
-    }
+    easy.http_version(curl_http_version)
+        .with_context(|| format!("failed to configure HTTP version for {request_url}"))?;
     // Do not enable CURLOPT_PIPEWAIT here. Moli often discovers a burst
     // of same-origin script/modulepreload requests during parsing, and DCL can
     // depend on one of those scripts. Waiting for a pending HTTPS connection to

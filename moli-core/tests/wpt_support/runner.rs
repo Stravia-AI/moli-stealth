@@ -87,9 +87,9 @@ async fn run_case_plans(
 async fn run_case(plan: WptCasePlan, request: WptCaseRequest) -> Result<WptCaseRun> {
     let mut config = AppConfig::default();
     config.fetch_mut().set_tls_verify_host(false);
-    // Some WPT fixtures intentionally use a non-trustworthy local origin
-    // (`0.0.0.0`) to test secure-context gating. Keep all fixture traffic local
-    // even when the developer shell has HTTP(S)_PROXY configured.
+    // Some WPT fixtures intentionally use a non-trustworthy `.test` origin to
+    // test secure-context gating. Keep all fixture traffic local even when the
+    // developer shell has HTTP(S)_PROXY configured.
     config.fetch_mut().set_http_no_proxy(Some("*".to_owned()));
     config
         .fetch_mut()
@@ -135,6 +135,7 @@ fn wpt_fixture_host_resolve_entries(url: &str) -> Result<Vec<String>> {
     Ok(vec![
         format!("localhost:{port}:127.0.0.1"),
         format!("127.0.0.1:{port}:127.0.0.1"),
+        format!("moli-wpt-insecure.test:{port}:127.0.0.1"),
     ])
 }
 

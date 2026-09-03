@@ -1914,6 +1914,14 @@ fn remove_storage_bucket_cache_path_if_exists(path: &Path, label: &str) -> Resul
 }
 
 fn sync_storage_bucket_cache_directory(path: &Path) -> Result<()> {
+    #[cfg(windows)]
+    {
+        // Windows does not support FlushFileBuffers on directory handles.
+        // Files in the replacement tree are flushed before it is promoted.
+        let _ = path;
+        Ok(())
+    }
+    #[cfg(not(windows))]
     fs::File::open(path)
         .and_then(|directory| directory.sync_all())
         .with_context(|| {
@@ -1957,14 +1965,16 @@ fn sync_storage_bucket_cache_tree(path: &Path) -> Result<()> {
         if file_type.is_dir() {
             sync_storage_bucket_cache_tree(&entry_path)?;
         } else if file_type.is_file() {
-            fs::File::open(&entry_path)
-                .and_then(|file| file.sync_all())
-                .with_context(|| {
-                    format!(
-                        "failed to sync StorageBucket CacheStorage replacement file `{}`",
-                        entry_path.display()
-                    )
-                })?;
+            #[cfg(windows)]
+            let file = fs::OpenOptions::new().write(true).open(&entry_path);
+            #[cfg(not(windows))]
+            let file = fs::File::open(&entry_path);
+            file.and_then(|file| file.sync_all()).with_context(|| {
+                format!(
+                    "failed to sync StorageBucket CacheStorage replacement file `{}`",
+                    entry_path.display()
+                )
+            })?;
         } else {
             bail!(
                 "unsupported entry in StorageBucket CacheStorage replacement `{}`",

@@ -2,17 +2,20 @@ use std::{
     collections::VecDeque,
     io::{Read, Write},
     net::TcpListener,
+    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
         mpsc as std_mpsc,
     },
+    task::{Context, Poll},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use crate::FetchClientHandle;
 use parking_lot::Mutex;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 pub(super) struct ScriptedH2Server {
     addr: std::net::SocketAddr,
@@ -46,6 +49,115 @@ pub(super) struct ScriptedHttps11Server {
     request_heads: Arc<Mutex<Vec<String>>>,
     shutdown_tx: std_mpsc::Sender<()>,
     join_handle: Option<thread::JoinHandle<()>>,
+}
+
+struct GracefulH2TlsStream {
+    stream: Option<tokio_rustls::server::TlsStream<tokio::net::TcpStream>>,
+    return_tx: Option<
+        tokio::sync::oneshot::Sender<tokio_rustls::server::TlsStream<tokio::net::TcpStream>>,
+    >,
+}
+
+impl GracefulH2TlsStream {
+    fn new(
+        stream: tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+    ) -> (
+        Self,
+        tokio::sync::oneshot::Receiver<tokio_rustls::server::TlsStream<tokio::net::TcpStream>>,
+    ) {
+        let (return_tx, return_rx) = tokio::sync::oneshot::channel();
+        (
+            Self {
+                stream: Some(stream),
+                return_tx: Some(return_tx),
+            },
+            return_rx,
+        )
+    }
+}
+
+impl AsyncRead for GracefulH2TlsStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(
+            self.stream
+                .as_mut()
+                .expect("h2 TLS stream must exist while it is polled"),
+        )
+        .poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for GracefulH2TlsStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, std::io::Error>> {
+        Pin::new(
+            self.stream
+                .as_mut()
+                .expect("h2 TLS stream must exist while it is polled"),
+        )
+        .poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        Pin::new(
+            self.stream
+                .as_mut()
+                .expect("h2 TLS stream must exist while it is polled"),
+        )
+        .poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        Pin::new(
+            self.stream
+                .as_mut()
+                .expect("h2 TLS stream must exist while it is polled"),
+        )
+        .poll_shutdown(cx)
+    }
+}
+
+impl Drop for GracefulH2TlsStream {
+    fn drop(&mut self) {
+        let (Some(stream), Some(return_tx)) = (self.stream.take(), self.return_tx.take()) else {
+            return;
+        };
+        let _ = return_tx.send(stream);
+    }
+}
+
+async fn finish_h2_tls_shutdown(
+    return_rx: tokio::sync::oneshot::Receiver<
+        tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+    >,
+) {
+    let Ok(mut stream) = return_rx.await else {
+        return;
+    };
+    let _ = tokio::io::AsyncWriteExt::shutdown(&mut stream).await;
+    let mut peer_tail = [0; 64];
+    let _ = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            match tokio::io::AsyncReadExt::read(&mut stream, &mut peer_tail).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+    })
+    .await;
 }
 
 impl ScriptedHttps11Server {
@@ -323,14 +435,24 @@ fn run_h2_server(
                 if stream.get_ref().1.alpn_protocol() != Some(b"h2") {
                     return;
                 }
-                let Ok(mut connection) = h2::server::handshake(stream).await else {
-                    return;
+                // `h2::server::Connection` drops its transport without calling
+                // AsyncWrite::shutdown. The wrapper retains the TLS stream for
+                // an explicit close_notify handshake instead of exposing an
+                // abrupt EOF to Schannel.
+                let (stream, return_rx) = GracefulH2TlsStream::new(stream);
+                let mut connection = match h2::server::handshake(stream).await {
+                    Ok(connection) => connection,
+                    Err(_) => {
+                        finish_h2_tls_shutdown(return_rx).await;
+                        return;
+                    }
                 };
                 let connection_index = {
                     let mut counts = connection_stream_counts.lock();
                     counts.push(0);
                     counts.len() - 1
                 };
+                let mut close_after_response = false;
                 while let Some(result) = connection.accept().await {
                     let Ok((request, mut respond)) = result else {
                         break;
@@ -341,28 +463,51 @@ fn run_h2_server(
                     }
                     requests.lock().push(request.uri().path().to_owned());
                     let _ = hits.fetch_add(1, Ordering::SeqCst) + 1;
-                    let response_spec = {
+                    let (response_spec, last_response) = {
                         let mut responses = responses.lock();
-                        responses
+                        let response = responses
                             .pop_front()
                             .or_else(|| responses.back().cloned())
-                            .expect("scripted h2 responses should not be empty")
+                            .expect("scripted h2 responses should not be empty");
+                        (response, responses.is_empty())
                     };
-                    tokio::spawn(async move {
-                        if response_spec.delay_ms > 0 {
-                            tokio::time::sleep(Duration::from_millis(response_spec.delay_ms)).await;
-                        }
+                    if response_spec.delay_ms == 0 {
                         let response = http::Response::builder()
                             .status(response_spec.status)
                             .header("content-type", "text/plain")
+                            .header("content-length", response_spec.body.len())
                             .body(())
                             .expect("h2 test response should build");
                         let Ok(mut send) = respond.send_response(response, false) else {
-                            return;
+                            continue;
                         };
                         let _ = send.send_data(response_spec.body.into(), true);
-                    });
+                    } else {
+                        tokio::spawn(async move {
+                            tokio::time::sleep(Duration::from_millis(response_spec.delay_ms)).await;
+                            let response = http::Response::builder()
+                                .status(response_spec.status)
+                                .header("content-type", "text/plain")
+                                .header("content-length", response_spec.body.len())
+                                .body(())
+                                .expect("h2 test response should build");
+                            let Ok(mut send) = respond.send_response(response, false) else {
+                                return;
+                            };
+                            let _ = send.send_data(response_spec.body.into(), true);
+                        });
+                    }
+                    if last_response {
+                        connection.graceful_shutdown();
+                        close_after_response = true;
+                        break;
+                    }
                 }
+                if close_after_response {
+                    let _ = std::future::poll_fn(|cx| connection.poll_closed(cx)).await;
+                }
+                drop(connection);
+                finish_h2_tls_shutdown(return_rx).await;
             });
         }
     });
@@ -787,6 +932,17 @@ fn run_https11_server(
                 if response_spec.hold_open_ms > 0 {
                     tokio::time::sleep(Duration::from_millis(response_spec.hold_open_ms)).await;
                 }
+                let _ = tokio::io::AsyncWriteExt::shutdown(&mut stream).await;
+                let mut peer_tail = [0; 64];
+                let _ = tokio::time::timeout(Duration::from_secs(1), async {
+                    loop {
+                        match tokio::io::AsyncReadExt::read(&mut stream, &mut peer_tail).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(_) => {}
+                        }
+                    }
+                })
+                .await;
             });
         }
     });
@@ -887,9 +1043,24 @@ fn handle_scripted_connection(
     requests: Arc<Mutex<Vec<String>>>,
     responses: Arc<Mutex<VecDeque<ScriptedResponse>>>,
 ) {
-    let mut request = [0; 1024];
-    let bytes_read = stream.read(&mut request).unwrap_or(0);
-    let request_text = String::from_utf8_lossy(&request[..bytes_read]).into_owned();
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+    let mut request = Vec::new();
+    let mut chunk = [0; 4096];
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(bytes_read) => {
+                request.extend_from_slice(&chunk[..bytes_read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+        }
+    }
+    if !request.windows(4).any(|window| window == b"\r\n\r\n") {
+        return;
+    }
+    let request_text = String::from_utf8_lossy(&request).into_owned();
     requests.lock().push(request_text);
     let _ = hits.fetch_add(1, Ordering::SeqCst) + 1;
     let response_spec = {
@@ -907,6 +1078,11 @@ fn handle_scripted_connection(
     let _ = stream.flush();
     if response_spec.hold_open_ms > 0 {
         thread::sleep(Duration::from_millis(response_spec.hold_open_ms));
+    }
+    if response_spec.close_connection {
+        let _ = stream.shutdown(std::net::Shutdown::Write);
+        let mut peer_tail = [0; 64];
+        while stream.read(&mut peer_tail).is_ok_and(|read| read > 0) {}
     }
 }
 

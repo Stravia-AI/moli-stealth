@@ -142,7 +142,7 @@ async fn capture_screenshot_uses_pending_renderer_page_command_residence() {
 
     let mut out = Vec::new();
     plan.emit_into(&mut out, cmd.id, cmd.session_id);
-    assert_png_dimensions(&screenshot_png_bytes(&out[0]), 1920, 1080);
+    assert_png_dimensions(&screenshot_png_bytes(&out[0]), 1920, 969);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -530,7 +530,7 @@ async fn capture_screenshot_targets_loaded_background_owner_without_promotion() 
     }))
     .await;
     let response = take_response_by_id(&mut ctx, 114);
-    assert_png_dimensions(&screenshot_png_bytes(&response), 1920, 1080);
+    assert_png_dimensions(&screenshot_png_bytes(&response), 1920, 969);
     assert_eq!(
         ctx.conn
             .browser_context
@@ -577,7 +577,7 @@ async fn capture_screenshot_targets_inactive_loaded_owner_without_activation() {
     }))
     .await;
     let response = take_response_by_id(&mut ctx, 115);
-    assert_png_dimensions(&screenshot_png_bytes(&response), 1920, 1080);
+    assert_png_dimensions(&screenshot_png_bytes(&response), 1920, 969);
     assert_eq!(
         ctx.conn
             .browser_context
@@ -846,9 +846,9 @@ async fn get_layout_metrics() {
     let msg = ctx.take_one();
     let r = &msg["result"];
     assert_eq!(r["layoutViewport"]["clientWidth"], 1920);
-    assert_eq!(r["layoutViewport"]["clientHeight"], 1080);
+    assert_eq!(r["layoutViewport"]["clientHeight"], 969);
     assert_eq!(r["contentSize"]["width"], 1920.0);
-    assert_eq!(r["contentSize"]["height"], 1080.0);
+    assert_eq!(r["contentSize"]["height"], 969.0);
 }
 #[tokio::test(flavor = "multi_thread")]
 async fn get_layout_metrics_uses_viewport_fallback_without_live_page() {

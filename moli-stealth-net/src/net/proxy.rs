@@ -437,22 +437,6 @@ mod tests {
         assert_eq!(auth, ProxyAuth::UserPass("u".into(), "a:b".into()));
     }
 
-    #[test]
-    fn resolve_env_overrides_profile() {
-        // Save and restore env to avoid affecting other tests.
-        let saved = std::env::var("BROWSER_OXIDE_PROXY").ok();
-        std::env::set_var("BROWSER_OXIDE_PROXY", "socks5://env.example:1080");
-        let r = ProxyConfig::resolve(Some("http://profile.example:8080")).unwrap();
-        match r {
-            Some(ProxyConfig::Socks5 { host, .. }) => assert_eq!(host, "env.example"),
-            other => panic!("expected env override Socks5, got {other:?}"),
-        }
-        match saved {
-            Some(v) => std::env::set_var("BROWSER_OXIDE_PROXY", v),
-            None => std::env::remove_var("BROWSER_OXIDE_PROXY"),
-        }
-    }
-
     /// Integration test: spin up a fake SOCKS5 proxy server in-process,
     /// drive a connect through it, and verify the bytes that arrive at
     /// the proxy match RFC 1928. Catches handshake drift end-to-end
@@ -511,17 +495,12 @@ mod tests {
     }
 
     #[test]
-    fn resolve_profile_when_no_env() {
-        let saved = std::env::var("BROWSER_OXIDE_PROXY").ok();
-        std::env::remove_var("BROWSER_OXIDE_PROXY");
+    fn resolve_uses_profile_or_none() {
         let r = ProxyConfig::resolve(Some("http://profile.example:8080")).unwrap();
         assert!(matches!(r, Some(ProxyConfig::Http { .. })));
         let r = ProxyConfig::resolve(None).unwrap();
         assert!(r.is_none());
         let r = ProxyConfig::resolve(Some("")).unwrap();
         assert!(r.is_none());
-        if let Some(v) = saved {
-            std::env::set_var("BROWSER_OXIDE_PROXY", v);
-        }
     }
 }

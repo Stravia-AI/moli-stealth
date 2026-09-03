@@ -121,6 +121,8 @@ pub(crate) fn log_request_completion(
 pub(crate) struct ResponseCollector {
     body: Vec<u8>,
     headers: Vec<(String, String)>,
+    status: u16,
+    declared_identity_body_length: Option<usize>,
     max_response_size: Option<usize>,
     response_too_large: bool,
     cancel_handle: Option<FetchCancelHandle>,
@@ -135,8 +137,13 @@ impl ResponseCollector {
     }
 
     pub(crate) fn begin_request(&mut self, max_response_size: Option<usize>) {
+        if let Some(cancel_handle) = self.cancel_handle.as_ref() {
+            cancel_handle.reset_response_progress();
+        }
         self.body.clear();
         self.headers.clear();
+        self.status = 0;
+        self.declared_identity_body_length = None;
         self.max_response_size = max_response_size;
         self.response_too_large = false;
     }
@@ -926,6 +933,9 @@ impl RawStreamingResponseCollector {
 
 impl Handler for ResponseCollector {
     fn write(&mut self, data: &[u8]) -> std::result::Result<usize, WriteError> {
+        if response_body_ends_at_headers(self.status) {
+            return Ok(data.len());
+        }
         if let Some(limit) = self.max_response_size
             && self.body.len() + data.len() > limit
         {
@@ -934,6 +944,11 @@ impl Handler for ResponseCollector {
         }
 
         self.body.extend_from_slice(data);
+        if self.declared_identity_body_length == Some(self.body.len())
+            && let Some(cancel_handle) = self.cancel_handle.as_ref()
+        {
+            cancel_handle.mark_declared_response_body_complete();
+        }
         Ok(data.len())
     }
 
@@ -949,12 +964,25 @@ impl Handler for ResponseCollector {
         let line = line.trim_end_matches(['\r', '\n']);
 
         if line.is_empty() {
+            self.declared_identity_body_length = identity_encoded_content_length(&self.headers);
+            if (self.declared_identity_body_length == Some(0)
+                || response_body_ends_at_headers(self.status))
+                && let Some(cancel_handle) = self.cancel_handle.as_ref()
+            {
+                cancel_handle.mark_declared_response_body_complete();
+            }
             return !self.response_too_large;
         }
 
-        if line.starts_with("HTTP/") {
+        if let Some(status) = line
+            .strip_prefix("HTTP/")
+            .and_then(|rest| rest.split_whitespace().nth(1))
+            .and_then(|status| status.parse::<u16>().ok())
+        {
             self.headers.clear();
             self.body.clear();
+            self.status = status;
+            self.declared_identity_body_length = None;
             return true;
         }
 
@@ -984,6 +1012,9 @@ impl Handler for StreamingResponseCollector {
     fn write(&mut self, data: &[u8]) -> std::result::Result<usize, WriteError> {
         if self.cancel_handle.is_cancelled() {
             return Ok(0);
+        }
+        if response_body_ends_at_headers(self.status) {
+            return Ok(data.len());
         }
 
         if let Some(limit) = self.max_response_size
@@ -1054,6 +1085,9 @@ impl Handler for RawStreamingResponseCollector {
     fn write(&mut self, data: &[u8]) -> std::result::Result<usize, WriteError> {
         if self.cancel_handle.is_cancelled() {
             return Ok(0);
+        }
+        if response_body_ends_at_headers(self.status) {
+            return Ok(data.len());
         }
 
         if let Some(limit) = self.max_response_size

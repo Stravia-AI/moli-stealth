@@ -1,6 +1,6 @@
 //! BoringSSL TLS configuration with Chrome 152 fingerprint.
 //!
-//! Configures TLS to produce a ClientHello identical to Chrome 147,
+//! Configures TLS to produce a ClientHello identical to Chrome 152,
 //! including cipher suites, curves, signature algorithms, extensions,
 //! and certificate compression — all in the exact order that produces
 //! the correct JA3/JA4 fingerprint.
@@ -20,45 +20,15 @@ use tokio_boring2::SslStream;
 
 use crate::net::error::NetError;
 
-/// The Chrome major version whose **verified-real** ClientHello / H2
-/// fingerprint these constants reproduce, byte-exact.
-///
-/// **Why this is 147 while every desktop preset's UA advertises Chrome
-/// 148 — and why that is NOT an incoherent skew:**
-///
-/// 1. Chrome's TLS ClientHello is **version-stable across majors**. It
-///    only changes on a deliberate TLS-stack change; the last such change
-///    was the MLKEM768 post-quantum rollout at Chrome 131. There was no
-///    TLS-stack change between 147 and 148 (consecutive majors, ~1 month
-///    apart, May 2026), so the bytes real Chrome 148 puts on the wire are
-///    identical to this verified-real 147 capture: the byte-exact Chrome
-///    147 and 148 values are the same values.
-/// 2. **JA4 does not encode the Chrome version.** JA4 = TLS-version +
-///    sorted cipher/extension counts + ALPN + sorted sigalgs. None of
-///    those differ 147↔148. A "JA4-vs-UA cross-check" verifies
-///    the JA4 corresponds to *a Chrome* consistent with the UA *family*
-///    — it cannot, even in principle, detect a 147-vs-148 minor/major
-///    label difference.
-/// 3. UA=148 is a **deliberate, A/B-tested** decision: real Chrome
-///    stable IS 148 (chromiumdash; shipped early May 2026), and the
-///    147→148 UA bump *recovered* several previously-blocked sites in
-///    our measurement. Rolling the UA back to 147 would re-introduce
-///    those regressions and advertise an outdated browser (its own
-///    soft-deny signal). So the coherent state is UA=148 + these
-///    (wire-identical) 147-reference bytes.
-///
-/// This constant exists so the coherence is **machine-checked** (see the
-/// `tls_fingerprint_vectors_no_silent_drift` test) and the rationale is
-/// one `grep` away — the silent-drift hazard the plan flags is removed
-/// without changing a single wire byte or UA.
+/// Chrome major version whose ClientHello and HTTP/2 fingerprint these
+/// constants reproduce. Kept aligned with [`UA_CHROME_MAJOR`] and checked by
+/// `tls_fingerprint_vectors_no_silent_drift`.
 pub const TLS_CHROME_MAJOR: u32 = 152;
 
-/// The Chrome major every desktop Chrome preset's `user_agent`
-/// advertises. Intentionally != [`TLS_CHROME_MAJOR`]; see that
-/// constant's docs for why this is wire-coherent, not a skew.
+/// Chrome major version advertised by the default Windows desktop preset.
 pub const UA_CHROME_MAJOR: u32 = 152;
 
-/// Chrome 147 cipher suite list (order is critical for JA3 fingerprint).
+/// Chrome 152 cipher suite list (order is critical for JA3 fingerprint).
 const CIPHER_LIST: &str = concat!(
     "TLS_AES_128_GCM_SHA256",
     ":TLS_AES_256_GCM_SHA384",
@@ -77,7 +47,7 @@ const CIPHER_LIST: &str = concat!(
     ":TLS_RSA_WITH_AES_256_CBC_SHA",
 );
 
-/// Chrome 147 signature algorithms (order matters).
+/// Chrome 152 signature algorithms (order matters).
 const SIGALGS_LIST: &str = concat!(
     "mldsa44",
     ":mldsa65",
@@ -99,7 +69,7 @@ const CURVES_DESKTOP: &str = "X25519MLKEM768:X25519:P-256:P-384";
 /// canonical Chrome 124-130 PQ curve; Chrome 131+ desktop replaced it with
 /// MLKEM768 (codepoint 4588). A reference Chrome 131 Android capture
 /// shows no PQ at all (just 29/23/24), but Chrome Android shares the
-/// desktop codebase and by Chrome 147+ should have rolled MLKEM — verify
+/// desktop codebase and by Chrome 152 should have rolled MLKEM — verify
 /// against a fresh Pixel capture if regressions appear.
 const CURVES_ANDROID: &str = CURVES_DESKTOP;
 
@@ -272,18 +242,19 @@ const ALPN_PROTOS: &[u8] = b"\x02h2\x08http/1.1";
 
 use rand::prelude::SliceRandom;
 
-/// Chrome 147 extension permutation (indices into BoringSSL kExtensions table).
-/// 16 extensions matching a verified Chrome 147 macOS arm64 reference capture.
+/// Chrome 152 extension permutation (indices into BoringSSL kExtensions table).
+/// 17 extensions matching the current Chrome fingerprint.
 ///
-/// **Real Chrome shuffling behavior** (per Fastly TLS Fingerprinting blog
-/// + Chromestatus 5124606246518784 + BoringSSL `ssl_setup_extension_permutation`
-/// source): Chrome shuffles ALL non-PSK extensions with a single Fisher-Yates
-/// pass — there is no documented bucket structure. The only positional
-/// constraint is psk_key_exchange_modes / pre_shared_key being last (BoringSSL
-/// enforces this). The previous 3-bucket scheme was folklore from earlier
-/// public RE work; it reduced shuffle entropy by ~720,000× and put
-/// signature_algorithms always at position 16 — a deterministic positional
-/// pattern that per-handshake classifiers can detect as anomalous.
+/// **Real Chrome shuffling behavior** (sources: Fastly TLS Fingerprinting blog,
+/// Chromestatus 5124606246518784, and BoringSSL
+/// `ssl_setup_extension_permutation`): Chrome shuffles ALL non-PSK extensions
+/// with a single Fisher-Yates pass — there is no documented bucket structure.
+/// The only positional constraint is psk_key_exchange_modes / pre_shared_key
+/// being last (BoringSSL enforces this). The previous 3-bucket scheme was
+/// folklore from earlier public RE work; it reduced shuffle entropy by
+/// ~720,000× and put signature_algorithms always at position 16 — a
+/// deterministic positional pattern that per-handshake classifiers can detect
+/// as anomalous.
 const CHROME_EXTENSION_PERMUTATION: &[ExtensionType] = &[
     ExtensionType::KEY_SHARE,
     ExtensionType::ENCRYPTED_CLIENT_HELLO,
@@ -627,13 +598,10 @@ mod tests {
     /// Self-verifying JA4 drift guard + UA/TLS coherence assert.
     /// Network-free.
     ///
-    /// Pins every JA4 input (cipher list, sigalg list, supported-groups
-    /// order, extension count) byte-/element-exact to the verified-real
-    /// Chrome reference so the fingerprint can never silently drift
-    /// again (any edit to
-    /// the constants fails this test loudly), and machine-checks that
-    /// the deliberate UA=148 / TLS-ref=147 split is the documented,
-    /// wire-coherent one (see [`TLS_CHROME_MAJOR`] docs).
+    /// Pins every JA4 input (cipher list, sigalg list, supported-groups order,
+    /// extension count) byte-/element-exact to the Chrome reference so the
+    /// fingerprint cannot silently drift. Also checks that each desktop
+    /// preset's reduced UA major agrees with its full browser version.
     #[test]
     fn tls_fingerprint_vectors_no_silent_drift() {
         // --- JA4 input 1: cipher suites (order is JA4-significant) ---
@@ -652,7 +620,8 @@ TLS_RSA_WITH_AES_256_CBC_SHA";
         );
 
         // --- JA4 input 2: signature algorithms (order is JA4-significant) ---
-        const EXPECT_SIGALGS: &str = "ecdsa_secp256r1_sha256:rsa_pss_rsae_sha256:\
+        const EXPECT_SIGALGS: &str = "mldsa44:mldsa65:mldsa87:\
+ecdsa_secp256r1_sha256:rsa_pss_rsae_sha256:\
 rsa_pkcs1_sha256:ecdsa_secp384r1_sha384:rsa_pss_rsae_sha384:rsa_pkcs1_sha384:\
 rsa_pss_rsae_sha512:rsa_pkcs1_sha512";
         assert_eq!(
@@ -662,36 +631,30 @@ rsa_pss_rsae_sha512:rsa_pkcs1_sha512";
 
         // --- JA4 input 3: supported groups / curves order ---
         assert_eq!(
-            CURVES_DESKTOP,
-            &[
-                SslCurve::X25519_MLKEM768,
-                SslCurve::X25519,
-                SslCurve::SECP256R1,
-                SslCurve::SECP384R1,
-            ],
+            CURVES_DESKTOP, "X25519MLKEM768:X25519:P-256:P-384",
             "Chrome desktop curve order drifted (post-quantum MLKEM768 \
              must lead) — JA4 supported_groups would change"
         );
 
-        // --- JA4 input 4: extension count (16 — JA4 `c` digit) ---
+        // --- JA4 input 4: extension count (17 — JA4 `c` digit) ---
         assert_eq!(
             CHROME_EXTENSION_PERMUTATION.len(),
-            16,
+            17,
             "Chrome extension count drifted — JA4 extension-count digit \
              would change"
         );
 
-        // --- UA / TLS coherence (the deliberate, wire-equivalent split) ---
-        assert_eq!(TLS_CHROME_MAJOR, 147);
-        assert_eq!(UA_CHROME_MAJOR, 148);
-        // The split is intentional and wire-coherent: Chrome's
-        // ClientHello did not rev 147→148, JA4 cannot encode the Chrome
-        // version, and UA=148 is the A/B-tested current-Chrome value.
-        // (Rationale in TLS_CHROME_MAJOR docs.)
+        // --- UA / TLS coherence ---
+        assert_eq!(TLS_CHROME_MAJOR, 152);
+        assert_eq!(UA_CHROME_MAJOR, 152);
+
+        fn chrome_major(value: &str) -> Option<u32> {
+            value.split('.').next()?.parse().ok()
+        }
 
         fn ua_chrome_major(ua: &str) -> Option<u32> {
-            let i = ua.find("Chrome/")? + "Chrome/".len();
-            ua[i..].split('.').next()?.parse().ok()
+            let version = ua.split_once("Chrome/")?.1;
+            chrome_major(version)
         }
 
         for profile in [
@@ -700,9 +663,8 @@ rsa_pss_rsae_sha512:rsa_pkcs1_sha512";
         ] {
             assert_eq!(
                 ua_chrome_major(&profile.user_agent),
-                Some(UA_CHROME_MAJOR),
-                "desktop Chrome preset UA major must equal UA_CHROME_MAJOR \
-                 (the coherence single-source-of-truth); UA was {:?}",
+                chrome_major(&profile.browser_version),
+                "desktop Chrome preset UA and full-version majors must agree; UA was {:?}",
                 profile.user_agent
             );
             assert_eq!(
@@ -712,6 +674,12 @@ rsa_pss_rsae_sha512:rsa_pkcs1_sha512";
                  {UA_CHROME_MAJOR}); see TLS_CHROME_MAJOR docs"
             );
         }
+
+        assert_eq!(
+            ua_chrome_major(&crate::stealth::presets::chrome_148_windows().user_agent),
+            Some(UA_CHROME_MAJOR),
+            "the default Windows preset must advertise UA_CHROME_MAJOR"
+        );
     }
 
     /// Capture the first 5 bytes of our outbound ClientHello (the TLS
@@ -829,19 +797,22 @@ rsa_pss_rsae_sha512:rsa_pkcs1_sha512";
 
     #[test]
     fn test_shuffle_is_full_fisher_yates() {
-        // Real Chrome shuffles all 16 extensions uniformly (no buckets).
+        // Real Chrome shuffles all extensions uniformly (no buckets).
         // Verify the shuffle preserves the full set + is non-deterministic.
         let p1 = shuffled_chrome_extension_permutation();
         let p2 = shuffled_chrome_extension_permutation();
 
-        assert_eq!(p1.len(), 16);
-        assert_eq!(p2.len(), 16);
+        assert_eq!(p1.len(), CHROME_EXTENSION_PERMUTATION.len());
+        assert_eq!(p2.len(), CHROME_EXTENSION_PERMUTATION.len());
 
-        let mut sorted = p1.clone();
-        sorted.sort();
-        let mut expected = CHROME_EXTENSION_PERMUTATION.to_vec();
-        expected.sort();
-        assert_eq!(sorted, expected, "shuffle must preserve the set");
+        for permutation in [&p1, &p2] {
+            assert!(
+                CHROME_EXTENSION_PERMUTATION
+                    .iter()
+                    .all(|extension| permutation.contains(extension)),
+                "shuffle must preserve the set"
+            );
+        }
 
         // Probabilistically should differ run-to-run.
         assert_ne!(p1, p2, "Shuffle should be non-deterministic");

@@ -5827,7 +5827,7 @@ async fn root_client_metrics_track_window_surface_profile() -> Result<()> {
     assert_eq!(
         snapshot,
         Some(
-            r#"{"innerWidth":1920,"innerHeight":1080,"documentElementClientWidth":1920,"documentElementClientHeight":1080,"bodyClientWidth":1904,"bodyClientHeight":19,"documentElementRectWidth":1920,"documentElementRectHeight":35}"#
+            r#"{"innerWidth":1920,"innerHeight":969,"documentElementClientWidth":1920,"documentElementClientHeight":969,"bodyClientWidth":1904,"bodyClientHeight":18,"documentElementRectWidth":1920,"documentElementRectHeight":34}"#
         )
     );
 
@@ -6210,7 +6210,7 @@ async fn window_host_globals_expose_aliases_performance_and_visual_viewport() ->
         page.serialize_html_async()
             .await
             .unwrap()
-            .contains("data-visual-viewport-height=\"1080\"")
+            .contains("data-visual-viewport-height=\"969\"")
     );
     assert!(
         page.serialize_html_async()
@@ -6246,7 +6246,7 @@ async fn window_host_globals_expose_aliases_performance_and_visual_viewport() ->
         page.serialize_html_async()
             .await
             .unwrap()
-            .contains("data-navigator-hardware-concurrency=\"4\"")
+            .contains("data-navigator-hardware-concurrency=\"8\"")
     );
     assert!(
         page.serialize_html_async()
@@ -6264,7 +6264,7 @@ async fn window_host_globals_expose_aliases_performance_and_visual_viewport() ->
         page.serialize_html_async()
             .await
             .unwrap()
-            .contains("data-window-inner-height=\"1080\"")
+            .contains("data-window-inner-height=\"969\"")
     );
     assert!(
         page.serialize_html_async()
@@ -6294,7 +6294,7 @@ async fn window_host_globals_expose_aliases_performance_and_visual_viewport() ->
         page.serialize_html_async()
             .await
             .unwrap()
-            .contains("data-screen-avail-height=\"1080\"")
+            .contains("data-screen-avail-height=\"1040\"")
     );
     assert!(
         page.serialize_html_async()

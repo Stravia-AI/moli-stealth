@@ -10,6 +10,9 @@ mod structured_clone;
 mod window_features;
 
 use moli_webapi_declare::WebApiObject;
+use moli_webidl_callback::PreparedWebIdlCallbackFunction;
+
+use crate::callback_invocation::invoke_synchronous_webidl_callback_function;
 
 pub(super) use base64::{window_atob_callback, window_btoa_callback};
 pub(super) use date_locale::{
@@ -208,10 +211,10 @@ fn chrome_app_running_state_callback(
     }
 }
 
-fn chrome_app_install_state_callback(
-    scope: &mut v8::PinScope<'_, '_>,
-    args: v8::FunctionCallbackArguments<'_>,
-    _rv: v8::ReturnValue<'_, v8::Value>,
+fn chrome_app_install_state_callback<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    _rv: v8::ReturnValue<'s, v8::Value>,
 ) {
     let callback = args.get(0);
     let Ok(callback) = v8::Local::<v8::Function>::try_from(callback) else {
@@ -220,8 +223,22 @@ fn chrome_app_install_state_callback(
     let Some(value) = v8_string(scope, "not_installed") else {
         return;
     };
+    let callback_object: v8::Local<'_, v8::Object> = callback.into();
+    let Some(relevant_context) = callback_object.get_creation_context(scope) else {
+        return;
+    };
+    let incumbent_context = scope.get_current_context();
+    let Some(callback) = PreparedWebIdlCallbackFunction::try_new(
+        scope,
+        callback_object,
+        relevant_context,
+        incumbent_context,
+    ) else {
+        return;
+    };
     let receiver = v8::undefined(scope).into();
-    let _ = callback.call(scope, receiver, &[value.into()]);
+    let _ =
+        invoke_synchronous_webidl_callback_function(scope, &callback, receiver, &[value.into()]);
 }
 
 pub(super) fn install_chrome_runtime_state<'s>(

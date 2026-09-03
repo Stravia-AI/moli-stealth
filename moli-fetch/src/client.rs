@@ -2,7 +2,6 @@ use std::{fmt, marker::PhantomData, ops::Deref, rc::Rc, sync::Arc};
 
 use anyhow::{Context, Result};
 use moli_cookie_jar::SharedBrowserCookieStore;
-use tokio::sync::{mpsc, oneshot};
 
 use crate::{
     FetchCancelHandle, FetchConfig, NetworkFetchResult, RawResponse, Request, Response,
@@ -85,35 +84,6 @@ impl FetchClientHandle {
         request: Request,
         cancel_handle: FetchCancelHandle,
     ) -> Result<StreamingRawResponse> {
-        if request.url.scheme() == "https"
-            && matches!(request.method(), "GET" | "get")
-            && request.auth().is_none()
-            && self.config.proxy_bearer_token().is_none()
-        {
-            let response = self
-                .runtime
-                .submit_buffered_raw(request, cancel_handle.clone())?
-                .await
-                .context("fetch runtime task dropped buffered browser response channel")??;
-            let (head, body) = response.into_parts();
-            let bytes = body.try_into_materialized_bytes().map_err(|_| {
-                anyhow::anyhow!("buffered browser response returned a streaming body")
-            })?;
-            let (body_tx, body_rx) = mpsc::unbounded_channel();
-            let (completion_tx, completion_rx) = oneshot::channel();
-            if !bytes.is_empty() {
-                let _ = body_tx.send(bytes);
-            }
-            drop(body_tx);
-            cancel_handle.mark_response_terminal();
-            let _ = completion_tx.send(Ok(()));
-            return Ok(StreamingRawResponse::new_with_head(
-                head,
-                body_rx,
-                cancel_handle,
-                completion_rx,
-            ));
-        }
         self.runtime
             .submit_raw_stream(request, cancel_handle)?
             .into_response()

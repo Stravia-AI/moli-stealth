@@ -9,6 +9,7 @@ use moli_webapi_declare::WebApiObject;
 
 const ORIGINAL_INTL_DATETIME_FORMAT_RESOLVED_OPTIONS_SLOT: &str =
     "__moliOriginalIntlDateTimeFormatResolvedOptions";
+const ORIGINAL_DATE_NOW_SLOT: &str = "__moliOriginalDateNow";
 
 #[derive(Default, WebApiObject)]
 #[webapi(interface = "Date")]
@@ -42,6 +43,11 @@ pub(super) fn install_date_locale_runtime_state<'s>(
     let Ok(date_ctor) = v8::Local::<v8::Object>::try_from(date_ctor_value) else {
         return Ok(());
     };
+    if get_private_value(scope, date_ctor, ORIGINAL_DATE_NOW_SLOT).is_none()
+        && let Some(original) = date_ctor.get(scope, v8str(scope, "now").into())
+    {
+        set_private_value(scope, date_ctor, ORIGINAL_DATE_NOW_SLOT, original);
+    }
     let Some(date_proto_value) = date_ctor.get(scope, v8str(scope, "prototype").into()) else {
         return Ok(());
     };
@@ -53,6 +59,22 @@ pub(super) fn install_date_locale_runtime_state<'s>(
         .initialize(scope, date_proto)
         .map_err(|err| anyhow!("failed to initialize Date locale methods: {err}"))?;
     install_intl_date_time_format_resolved_options(scope, global)
+}
+
+pub(super) fn javascript_current_time_millis(scope: &mut v8::PinScope<'_, '_>) -> f64 {
+    let global = scope.get_current_context().global(scope);
+    let current = global
+        .get(scope, v8str(scope, "Date").into())
+        .and_then(|date| v8::Local::<v8::Object>::try_from(date).ok())
+        .and_then(|date| {
+            get_private_value(scope, date, ORIGINAL_DATE_NOW_SLOT)
+                .and_then(|now| v8::Local::<v8::Function>::try_from(now).ok())
+                .and_then(|now| {
+                    call_script_visible_function(scope, now, date.into(), &[], "Date.now")
+                })
+        })
+        .and_then(|value| value.number_value(scope));
+    current.unwrap_or_else(unix_epoch_millis)
 }
 
 fn install_intl_date_time_format_resolved_options<'s>(

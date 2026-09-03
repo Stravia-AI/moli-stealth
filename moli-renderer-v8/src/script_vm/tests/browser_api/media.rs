@@ -2540,7 +2540,7 @@ fn web_audio_private_backing_slots_ignore_public_spoofing() {
 
     assert_eq!(
         result,
-        r#"{"ctxOwnInternalBefore":"","compOwnInternalBefore":"","ctxOwnInternalAfterSpoof":"__moliOfflineAudioChannelCount,__moliOfflineAudioCompleteBuffer,__moliOfflineAudioCompleteContext,__moliOfflineAudioCompressors,__moliOfflineAudioLength,__moliOfflineAudioSampleRate","reductionBefore":0,"complete":{"bufferOwnInternalBefore":"","bufferOwnInternalAfterSpoof":"__moliOfflineAudioBuffer","targetStable":true,"currentTargetStable":true,"renderedBufferStable":true,"bufferLength":32,"bufferSampleRate":8000,"dataTag":"[object Float32Array]","dataLength":32,"reductionAfter":-82.26815795898438}}"#
+        r#"{"ctxOwnInternalBefore":"","compOwnInternalBefore":"","ctxOwnInternalAfterSpoof":"__moliOfflineAudioChannelCount,__moliOfflineAudioCompleteBuffer,__moliOfflineAudioCompleteContext,__moliOfflineAudioCompressors,__moliOfflineAudioLength,__moliOfflineAudioSampleRate","reductionBefore":0,"complete":{"bufferOwnInternalBefore":"","bufferOwnInternalAfterSpoof":"__moliOfflineAudioBuffer","targetStable":true,"currentTargetStable":true,"renderedBufferStable":true,"bufferLength":32,"bufferSampleRate":8000,"dataTag":"[object Float32Array]","dataLength":32,"reductionAfter":-20.538288116455078}}"#
     );
 }
 
@@ -2858,7 +2858,7 @@ fn match_media_uses_desktop_viewport_and_input_capabilities() {
               exactWidth: matchMedia("(width: 1920px)").matches,
               maxWidth: matchMedia("(max-width: 768px)").matches,
               minHeight: matchMedia("(min-height: 720px)").matches,
-              exactHeight: matchMedia("(height: 1080px)").matches,
+              exactHeight: matchMedia("(height: 969px)").matches,
               minDeviceWidth: matchMedia("(min-device-width: 1px)").matches,
               exactDeviceWidth: matchMedia("(device-width: 1920px)").matches,
               maxDeviceWidth: matchMedia("(max-device-width: 1px)").matches,

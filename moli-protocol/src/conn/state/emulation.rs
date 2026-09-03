@@ -25,7 +25,7 @@ impl EmulatedNetworkConditions {
 }
 
 const DEFAULT_VIEWPORT_WIDTH: u32 = 1920;
-const DEFAULT_VIEWPORT_HEIGHT: u32 = 1080;
+const DEFAULT_VIEWPORT_HEIGHT: u32 = 969;
 const DEFAULT_SCREEN_WIDTH: u32 = 1920;
 const DEFAULT_SCREEN_HEIGHT: u32 = 1080;
 const DEFAULT_SCREEN_AVAIL_HEIGHT: u32 = 1040;
@@ -52,8 +52,8 @@ impl Default for EmulatedViewportSurface {
         Self {
             inner_width: DEFAULT_VIEWPORT_WIDTH,
             inner_height: DEFAULT_VIEWPORT_HEIGHT,
-            outer_width: DEFAULT_VIEWPORT_WIDTH,
-            outer_height: DEFAULT_VIEWPORT_HEIGHT,
+            outer_width: DEFAULT_SCREEN_WIDTH,
+            outer_height: DEFAULT_SCREEN_HEIGHT,
             device_pixel_ratio: 1.0,
             screen_width: DEFAULT_SCREEN_WIDTH,
             screen_height: DEFAULT_SCREEN_HEIGHT,

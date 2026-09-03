@@ -1,3 +1,11 @@
+[test-groups]
+windows-v8-worker-intensive = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'test(webdriver_classic_) | test(webcryptoapi_derive_bits_keys_pbkdf2_https_worker)'
+platform = 'cfg(windows)'
+test-group = 'windows-v8-worker-intensive'
+
 [profile.ci]
 fail-fast = false
 retries = 2

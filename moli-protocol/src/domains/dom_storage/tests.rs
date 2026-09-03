@@ -611,11 +611,21 @@ async fn dom_storage_mutations_fan_out_to_enabled_primary_and_auxiliary_sessions
     let _ = server.await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn local_storage_mutations_fan_out_across_targets_without_leaking_session_storage() {
-    let (mut ctx, page_url, _origin, server) = loaded_dom_storage_context().await;
+#[test]
+fn local_storage_mutations_fan_out_across_targets_without_leaking_session_storage() {
+    std::thread::Builder::new()
+        .name("dom-storage-cross-target-fanout".to_owned())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("DOM storage cross-target runtime should build")
+                .block_on(async {
+                    let (mut ctx, page_url, _origin, server) =
+                        loaded_dom_storage_context().await;
 
-    ctx.process_async(json!({
+                    ctx.process_async(json!({
         "id": 40,
         "method": "Target.createTarget",
         "params": {
@@ -702,6 +712,11 @@ async fn local_storage_mutations_fan_out_across_targets_without_leaking_session_
         "sessionStorage notifications must stay in the top-level target namespace"
     );
 
-    server.abort();
-    let _ = server.await;
+                    server.abort();
+                    let _ = server.await;
+                });
+        })
+        .expect("DOM storage cross-target test thread should spawn")
+        .join()
+        .expect("DOM storage cross-target test thread should finish");
 }

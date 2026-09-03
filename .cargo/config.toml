@@ -4,6 +4,11 @@
 # [target.'cfg(all(target_os = "linux", target_env = "gnu"))']
 # rustflags = ["-C", "link-arg=-Wl,-z,pack-relative-relocs"]
 
+# Official rusty_v8 Windows archives use the static MSVC runtime. Keep Rust
+# and every native dependency on the same CRT to avoid mixed /MT and /MD links.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
 # Most local tests spin up direct in-process HTTP servers and assert on
 # exact request/response behavior. In this environment, inheriting the
 # shell proxy settings would route those test requests through the host

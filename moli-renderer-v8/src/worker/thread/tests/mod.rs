@@ -939,7 +939,7 @@ async fn spawn_path_response_http_server(
                 .accept()
                 .await
                 .expect("accept worker fetch request");
-            let request = read_http_request_head(&mut stream)
+            let request = read_http_request_with_body(&mut stream)
                 .await
                 .expect("read worker fetch request");
             let path = request

@@ -224,7 +224,6 @@ mod tests {
     #[test]
     #[ignore]
     fn blocks_known_tracker_when_enabled() {
-        std::env::set_var("BROWSER_OXIDE_BLOCKER", "1");
         assert!(should_block(
             "https://www.google-analytics.com/analytics.js",
             "https://www.example.com/",
@@ -236,7 +235,6 @@ mod tests {
     #[test]
     #[ignore]
     fn allows_legitimate_request_when_enabled() {
-        std::env::set_var("BROWSER_OXIDE_BLOCKER", "1");
         // First-party CDN-fetched JS should NOT match (no rule covers it).
         assert!(!should_block(
             "https://www.example.com/static/main.js",

@@ -146,7 +146,7 @@ impl NoProxy {
         Self(
             value
                 .into_iter()
-                .flat_map(|value| value.split(|character| matches!(character, ',' | ';' | ' ')))
+                .flat_map(|value| value.split([',', ';', ' ']))
                 .map(str::trim)
                 .filter(|entry| !entry.is_empty())
                 .map(|entry| {

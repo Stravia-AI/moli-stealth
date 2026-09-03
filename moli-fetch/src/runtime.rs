@@ -1420,7 +1420,9 @@ impl RuntimeOwner {
                 anyhow!("fetch runtime request cancelled during shutdown"),
             ));
         }
-        if let Err(error) = result {
+        if let Err(error) = result
+            && !job.cancel_handle.response_completion_is_committed()
+        {
             if job.cancel_handle.is_cancelled() {
                 return Err((job.response_tx, anyhow!("fetch runtime request cancelled")));
             }
@@ -1770,7 +1772,7 @@ impl RuntimeOwner {
                 .get_ref()
                 .streaming()
                 .is_some_and(StreamingResponseCollector::header_terminated);
-            if !header_terminated {
+            if !header_terminated && !job.cancel_handle.response_completion_is_committed() {
                 let error = easy
                     .get_mut()
                     .streaming_mut()
@@ -2079,7 +2081,7 @@ impl RuntimeOwner {
                 .get_ref()
                 .raw_streaming()
                 .is_some_and(RawStreamingResponseCollector::header_terminated);
-            if !header_terminated {
+            if !header_terminated && !job.cancel_handle.response_completion_is_committed() {
                 let error = easy
                     .get_mut()
                     .raw_streaming_mut()

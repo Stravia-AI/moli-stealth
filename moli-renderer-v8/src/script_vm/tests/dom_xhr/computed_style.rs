@@ -5721,7 +5721,7 @@ fn direct_child_realm_window_surface_uses_iframe_viewport() {
     let top_result = vm
         .eval("[innerWidth, innerHeight].join('|')")
         .expect("top Window viewport should remain top-level after direct child evaluation");
-    assert_eq!(top_result, "1920|1080");
+    assert_eq!(top_result, "1920|969");
 }
 
 #[test]
@@ -5829,7 +5829,7 @@ fn inspector_runtime_evaluate_uses_child_context_window_surface() {
     let top_result = vm
         .eval("[innerWidth, innerHeight].join('|')")
         .expect("top Window viewport should remain top-level after Inspector child evaluation");
-    assert_eq!(top_result, "1920|1080");
+    assert_eq!(top_result, "1920|969");
 }
 
 #[test]
@@ -5886,7 +5886,7 @@ fn inspector_default_runtime_evaluate_masks_ambient_child_owner_scope() {
         .expect("default Runtime.evaluate should return a response");
     assert_eq!(
         response["result"]["result"]["value"],
-        serde_json::json!("1920|1080"),
+        serde_json::json!("1920|969"),
         "the default Inspector realm must mask an unrelated ambient child owner"
     );
 
@@ -8479,7 +8479,7 @@ fn popup_css_register_property_uses_popup_document_world() {
 
     assert_eq!(
         initial,
-        "rgb(0, 0, 0)|rgb(0, 0, 0)|rgb(7, 8, 9)|480px|540px|color: rgb(7, 8, 9); width: 25%; height: 50%;|true"
+        "rgb(0, 0, 0)|rgb(0, 0, 0)|rgb(7, 8, 9)|480px|484.5px|color: rgb(7, 8, 9); width: 25%; height: 50%;|true"
     );
     let popup_document = owner_document_handle_for_element_id(&vm, "popup-register-target");
     assert_ne!(popup_document, document);

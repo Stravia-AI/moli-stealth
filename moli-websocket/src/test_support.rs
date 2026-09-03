@@ -714,7 +714,6 @@ pub async fn spawn_close_after_goodbye_websocket_server() -> (String, tokio::tas
                             reason: "goodbye".into(),
                         })))
                         .await;
-                    break;
                 }
                 Ok(Message::Ping(payload)) => {
                     let _ = socket.send(Message::Pong(payload)).await;

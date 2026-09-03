@@ -127,7 +127,9 @@ pub(super) fn normalize_form_data_value<'s>(
             name: filename.unwrap_or_else(|| "blob".to_owned()),
             last_modified: file_api::selected_file_from_object(scope, object)
                 .map(|file| file.last_modified)
-                .unwrap_or_else(unix_epoch_millis),
+                .unwrap_or_else(|| {
+                    super::super::date_locale_runtime::javascript_current_time_millis(scope)
+                }),
         };
         if let Some(file) = file_api::build_file_object(scope, &selected) {
             return Ok(file.into());

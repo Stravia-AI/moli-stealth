@@ -53,6 +53,14 @@ fn sync_parent_directory(path: &Path, label: &str) -> Result<()> {
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
+    #[cfg(windows)]
+    {
+        // Windows does not support FlushFileBuffers on directory handles.
+        // The temporary file itself was flushed before the atomic rename.
+        let _ = (parent, label);
+        Ok(())
+    }
+    #[cfg(not(windows))]
     fs::File::open(parent)
         .and_then(|directory| directory.sync_all())
         .with_context(|| {

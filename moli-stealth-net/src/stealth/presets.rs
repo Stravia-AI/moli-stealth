@@ -830,12 +830,14 @@ pub fn chrome_148_macos_sampled_with_rng(rng: &mut impl rand::RngExt) -> Stealth
 ///   - elliptic curves: X25519_KYBER768_DRAFT00 instead of MLKEM768
 ///     (Android Chrome lags desktop on PQ rollout; verify against fresh
 ///     M147 Pixel capture if a recent rollout is suspected)
+///
 /// Header / UA-CH deltas:
 ///   - UA: Pixel-flavored mobile string with "Mobile" token
 ///   - Sec-CH-UA-Mobile: ?1
 ///   - Sec-CH-UA-Platform: "Android"
 ///   - Sec-CH-UA-Model: "Pixel 9 Pro" (display name, not codename `tokay`)
 ///   - Sec-CH-UA-Form-Factors: "Mobile"
+///
 /// Hardware / JS-surface deltas (Pixel 9 Pro specs):
 ///   - 412×870 viewport, devicePixelRatio = 2.625 (fractional!)
 ///   - maxTouchPoints: 5

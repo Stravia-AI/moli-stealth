@@ -210,7 +210,7 @@ async fn document_start_viewport_override_preserves_child_inner_viewport() {
     let restored_top_result = take_response_by_id(&mut ctx, 4077);
     assert_eq!(
         restored_top_result["result"]["result"]["value"],
-        json!("1920|1080")
+        json!("1920|969")
     );
 }
 

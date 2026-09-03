@@ -1883,7 +1883,6 @@ fn fetch_client_preserves_libcurl_env_proxy_fallback() {
         .arg("--nocapture")
         .env(ENV_PROXY_CHILD_TEST, "1")
         .env(ENV_PROXY_URL, &proxy_origin)
-        .env("http_proxy", &proxy_origin)
         .env_remove("HTTP_PROXY")
         .env_remove("HTTPS_PROXY")
         .env_remove("https_proxy")
@@ -1891,6 +1890,9 @@ fn fetch_client_preserves_libcurl_env_proxy_fallback() {
         .env_remove("all_proxy")
         .env_remove("NO_PROXY")
         .env_remove("no_proxy")
+        // Windows environment variable names are case-insensitive, so clear
+        // inherited aliases before installing the lowercase libcurl override.
+        .env("http_proxy", &proxy_origin)
         .output()
         .expect("child proxy fallback test should run");
 
@@ -5745,7 +5747,9 @@ fn fetch_runtime_owner_panic_returns_payload_and_identity_and_other_owners_still
         .location()
         .expect("semantic owner panic must retain its panic-site location");
     assert!(
-        location.contains("moli-fetch/src/runtime.rs"),
+        location
+            .replace('\\', "/")
+            .contains("moli-fetch/src/runtime.rs"),
         "unexpected panic location: {location}"
     );
     let backtrace = panic

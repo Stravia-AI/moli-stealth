@@ -3989,7 +3989,7 @@ fn window_viewport_surface_exposes_outer_dimensions() {
 
     assert_eq!(
         result,
-        r#"{"innerWidth":1920,"innerHeight":1080,"outerWidth":1920,"outerHeight":1080,"screenX":0,"screenY":0,"hasOuterWidth":true,"hasOuterHeight":true,"outerWidthType":"number","outerHeightType":"number"}"#
+        r#"{"innerWidth":1920,"innerHeight":969,"outerWidth":1920,"outerHeight":1080,"screenX":0,"screenY":0,"hasOuterWidth":true,"hasOuterHeight":true,"outerWidthType":"number","outerHeightType":"number"}"#
     );
 }
 
@@ -4067,7 +4067,7 @@ fn window_and_visual_viewport_follow_renderer_viewport_surface_changes() {
         .expect("restored viewport dimensions should evaluate");
     assert_eq!(
         restored,
-        r#"{"innerWidth":1920,"innerHeight":1080,"sameVisualViewport":true,"visualWidth":1920,"visualHeight":1080}"#
+        r#"{"innerWidth":1920,"innerHeight":969,"sameVisualViewport":true,"visualWidth":1920,"visualHeight":969}"#
     );
 }
 
@@ -4157,7 +4157,7 @@ fn visual_viewport_private_slots_ignore_reflection_and_spoofing() {
 
     assert_eq!(
         result,
-        "|0,0,0,0,1920,1080,1|offsetLeft:function:get offsetLeft:0:undefined:true:true:false,offsetTop:function:get offsetTop:0:undefined:true:true:false,pageLeft:function:get pageLeft:0:undefined:true:true:false,pageTop:function:get pageTop:0:undefined:true:true:false,width:function:get width:0:undefined:true:true:false,height:function:get height:0:undefined:true:true:false,scale:function:get scale:0:undefined:true:true:false|throw:TypeError|__moliVisualViewportBrand|true|[object VisualViewport]"
+        "|0,0,0,0,1920,969,1|offsetLeft:function:get offsetLeft:0:undefined:true:true:false,offsetTop:function:get offsetTop:0:undefined:true:true:false,pageLeft:function:get pageLeft:0:undefined:true:true:false,pageTop:function:get pageTop:0:undefined:true:true:false,width:function:get width:0:undefined:true:true:false,height:function:get height:0:undefined:true:true:false,scale:function:get scale:0:undefined:true:true:false|throw:TypeError|__moliVisualViewportBrand|true|[object VisualViewport]"
     );
 }
 
@@ -6192,7 +6192,7 @@ fn zhihu_capability_probe_fixture_matches_stable_moli_baseline() {
     );
     assert_eq!(
         navigator.get("hardwareConcurrency"),
-        Some(&serde_json::Value::from(4))
+        Some(&serde_json::Value::from(8))
     );
     assert_eq!(
         navigator.get("maxTouchPoints"),
@@ -6264,7 +6264,7 @@ fn zhihu_capability_probe_fixture_matches_stable_moli_baseline() {
     assert_eq!(value["globalType"], "undefined");
 
     assert_eq!(value["screenInfo"]["availWidth"], 1920);
-    assert_eq!(value["screenInfo"]["availHeight"], 1080);
+    assert_eq!(value["screenInfo"]["availHeight"], 1040);
     assert_eq!(value["screenInfo"]["colorDepth"], 24);
     assert_eq!(value["screenInfo"]["pixelDepth"], 24);
     assert_eq!(value["screenInfo"]["devicePixelRatio"], 1);
@@ -6476,7 +6476,7 @@ fn zhihu_bot_detection_harness_fixture_matches_stable_moli_baseline() {
         serde_json::json!(["en-US", "en"])
     );
     assert_eq!(value["navigatorProfile"]["webdriver"], false);
-    assert_eq!(value["navigatorProfile"]["hardwareConcurrency"], 4);
+    assert_eq!(value["navigatorProfile"]["hardwareConcurrency"], 8);
     assert_eq!(value["navigatorProfile"]["maxTouchPoints"], 0);
     assert_eq!(value["navigatorProfile"]["deviceMemory"], 8);
     assert_eq!(value["navigatorProfile"]["pdfViewerEnabled"], true);
@@ -6492,7 +6492,7 @@ fn zhihu_bot_detection_harness_fixture_matches_stable_moli_baseline() {
     assert_eq!(value["screenTouch"]["width"], 1920);
     assert_eq!(value["screenTouch"]["height"], 1080);
     assert_eq!(value["screenTouch"]["availWidth"], 1920);
-    assert_eq!(value["screenTouch"]["availHeight"], 1080);
+    assert_eq!(value["screenTouch"]["availHeight"], 1040);
     assert_eq!(value["screenTouch"]["availLeft"], 0);
     assert_eq!(value["screenTouch"]["availTop"], 0);
     assert_eq!(value["screenTouch"]["colorDepth"], 24);
@@ -21959,7 +21959,7 @@ fn zhihu_probe_screen_values_match_successful_chromium_profile() {
 
     assert_eq!(
         result,
-        r#"{"width":1920,"height":1080,"availWidth":1920,"availHeight":1080,"availLeft":0,"availTop":0,"colorDepth":24,"pixelDepth":24}"#
+        r#"{"width":1920,"height":1080,"availWidth":1920,"availHeight":1040,"availLeft":0,"availTop":0,"colorDepth":24,"pixelDepth":24}"#
     );
 }
 
