@@ -39,7 +39,7 @@ strum = { version = "0.28.0", features = ["derive"] }
 tokio = { version = "1.51.0", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync"] }
 tracing = "0.1.41"
 url = "2.5.7"
-v8 = "146.8.0"
+v8 = "152.2.0"
 time = "0.3"
 chromiumoxide_cdp = "0.9.1"
 data-url = "0.3.2"

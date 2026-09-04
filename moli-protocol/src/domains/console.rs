@@ -1,4 +1,4 @@
-use crate::conn::{CdpConnection, Cmd};
+use crate::conn::{CdpConnection, Cmd, CommandOwnerScope};
 
 use crate::domains::actions::ConsoleAction;
 use crate::domains::command_output::CommandOutputPlan;
@@ -51,6 +51,27 @@ pub(crate) fn apply_console_output_state_for_session(
         ConsoleAction::Enable => set_console_enabled(conn, session_id, true),
         ConsoleAction::Disable => set_console_enabled(conn, session_id, false),
         ConsoleAction::ClearMessages => clear_console_messages(conn, session_id),
+    }
+}
+
+pub(crate) fn apply_console_output_state_for_owner(
+    conn: &mut CdpConnection,
+    owner: &CommandOwnerScope,
+    action: ConsoleAction,
+) -> bool {
+    if owner.session_id().is_some_and(|session_id| {
+        conn.shared_worker_target_for_session(Some(session_id))
+            .is_some()
+            || conn
+                .service_worker_target_for_session(Some(session_id))
+                .is_some()
+    }) {
+        return apply_console_output_state_for_session(conn, owner.session_id(), action);
+    }
+    match action {
+        ConsoleAction::Enable => conn.set_console_enabled_for_owner(owner, true),
+        ConsoleAction::Disable => conn.set_console_enabled_for_owner(owner, false),
+        ConsoleAction::ClearMessages => conn.clear_console_messages_for_owner(owner),
     }
 }
 
@@ -161,7 +182,7 @@ mod tests {
         bc.set_active_target_id("TID-1".to_owned());
         bc.set_target_url("data:text/html,console-test".to_owned());
         bc.attach_active_session("SID-1".to_owned());
-        ctx.conn.browser_context = Some(bc);
+        ctx.conn.install_browser_context_fixture_for_test(bc);
         ctx.install_navigation_fixture_for_session_owner(
             &format!("data:text/html,{html}"),
             Some("SID-1"),
@@ -199,7 +220,8 @@ mod tests {
         }
         let browser_context = ctx.conn.browser_context.as_ref().expect("browser context");
         assert!(
-            !browser_context.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+            !browser_context.active_page_target().devtools_sessions
+                [moli_page_types::DevToolsSessionKey::Primary]
                 .console_output_session_state
                 .console_enabled,
             "transitional observable-output enabled bit should track Console.disable"
@@ -221,6 +243,7 @@ mod tests {
                 .browser_context
                 .as_ref()
                 .expect("browser context should exist")
+                .active_page_target()
                 .devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
                 .console_output_session_state
                 .console_enabled,
@@ -245,6 +268,7 @@ mod tests {
                 .browser_context
                 .as_ref()
                 .expect("browser context should exist")
+                .active_page_target()
                 .devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
                 .console_output_session_state
                 .console_enabled,
@@ -269,7 +293,7 @@ mod tests {
             stack: None,
         });
         bc.insert_shared_worker_target(target);
-        ctx.conn.browser_context = Some(bc);
+        ctx.conn.install_browser_context_fixture_for_test(bc);
     }
 
     #[tokio::test]
@@ -322,7 +346,8 @@ mod tests {
             .browser_context
             .as_mut()
             .expect("browser context should be loaded");
-        bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+        bc.active_page_target_mut().devtools_sessions
+            [moli_page_types::DevToolsSessionKey::Primary]
             .console_output_session_state
             .console_enabled = true;
         assert_eq!(
@@ -338,7 +363,7 @@ mod tests {
         let script_execution = page.script_execution();
         let snapshot = super::pending_console_activity_snapshot(super::ConsoleActivitySource {
             observable: bc
-                .active_target
+                .active_page_target()
                 .owner_state
                 .console_output_state
                 .console_domain_emission_snapshot(
@@ -351,7 +376,7 @@ mod tests {
             .browser_context
             .as_mut()
             .expect("browser context should be loaded")
-            .active_target
+            .active_page_target_mut()
             .owner_state
             .console_output_state
             .advance_console_domain_to_current(
@@ -533,7 +558,7 @@ mod tests {
             None,
             None,
         );
-        ctx.conn.browser_context = Some(bc);
+        ctx.conn.install_browser_context_fixture_for_test(bc);
 
         ctx.process_async(json!({
             "id": 13,
@@ -545,13 +570,15 @@ mod tests {
         ctx.expect_result(13, json!({}), Some("SID-background"));
         let active = ctx.conn.browser_context.as_ref().expect("browser context");
         assert!(
-            !active.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+            !active.active_page_target().devtools_sessions
+                [moli_page_types::DevToolsSessionKey::Primary]
                 .console_output_session_state
                 .console_enabled
         );
         assert!(
             active
-                .parked_page_session_state("TID-background")
+                .background_target("TID-background")
+                .filter(|target| target.has_non_default_session_state())
                 .is_some_and(|state| state.devtools_sessions
                     [moli_page_types::DevToolsSessionKey::Primary]
                     .console_output_session_state

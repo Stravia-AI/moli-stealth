@@ -14,11 +14,11 @@ use super::{
     DevToolsSessionState, DuplicatePendingRendererCommand, PreparedRendererCallDispatch,
     RegisterRendererCallError, RendererCommandCorrelation, RendererCommandDescriptor,
     page_slot::RuntimeBindingDefinition,
-    parking::PendingInspectorAwait,
     shared_worker_attachment::{
         TargetSharedWorkerProtocolAttachmentIdentity,
         TargetSharedWorkerProtocolAttachmentRetirement, TargetSharedWorkerProtocolAttachmentScope,
     },
+    target_state::PendingInspectorAwait,
 };
 
 // Chromium does not reserve negative Runtime.ExecutionContextId values for
@@ -676,6 +676,19 @@ impl SharedWorkerTargetState {
     ) -> Option<RendererCommandCorrelation> {
         self.session_state_mut(owner_session_id)?
             .take_frontend_command_for_renderer_if_attachment_matches(
+                renderer_call_id,
+                dispatched_attachment_id,
+            )
+    }
+
+    pub(crate) fn renderer_command_descriptor_for_renderer_if_attachment_matches(
+        &self,
+        owner_session_id: &str,
+        renderer_call_id: moli_page_types::RendererCallId,
+        dispatched_attachment_id: Option<moli_page_types::RendererAgentAttachmentId>,
+    ) -> Option<RendererCommandDescriptor> {
+        self.session_state(owner_session_id)?
+            .renderer_command_descriptor_for_renderer_if_attachment_matches(
                 renderer_call_id,
                 dispatched_attachment_id,
             )

@@ -36,7 +36,7 @@ async fn load_page_async(ctx: &mut TestContext, html: &str) {
     let mut bc = BrowserContext::new("BID-1".into());
     bc.set_active_target_id("TID-1");
     let data_url = format!("data:text/html,{html}");
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.install_browser_context_fixture_for_test(bc);
     ctx.enable_page_events_for_test(None);
     ctx.install_navigation_fixture_for_session_owner(&data_url, None)
         .await;
@@ -49,9 +49,10 @@ async fn load_page_async(ctx: &mut TestContext, html: &str) {
 }
 
 async fn complete_child_frame_lifecycle(ctx: &mut TestContext) {
+    let owner = crate::conn::CommandOwnerScope::capture(&ctx.conn, None);
     let pending = ctx
         .conn
-        .start_child_frame_lifecycle_work_for_session_owner(None, std::time::Duration::from_secs(2))
+        .start_child_frame_lifecycle_work_for_owner(owner, std::time::Duration::from_secs(2))
         .expect("loaded page should expose child-frame lifecycle work");
     let completed = pending
         .wait()
@@ -186,7 +187,7 @@ async fn get_full_ax_tree_reads_live_renderer_dom_when_page_snapshot_is_stale() 
             .browser_context
             .as_mut()
             .expect("browser context")
-            .active_target
+            .active_page_target_mut()
             .runtime_slot
             .loaded_page_mut()
             .expect("loaded page");
@@ -230,7 +231,7 @@ async fn get_full_ax_tree_reads_live_renderer_dom_when_page_snapshot_is_stale() 
         .browser_context
         .as_mut()
         .expect("browser context")
-        .active_target
+        .active_page_target_mut()
         .runtime_slot
         .loaded_page_mut()
         .expect("loaded page");
@@ -409,7 +410,7 @@ fn renderer_backed_ax_node_id(node: &Value) -> String {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn accessibility_loaded_page_methods_target_background_owner_without_promotion() {
+async fn accessibility_loaded_page_methods_target_background_owner_without_activation() {
     let mut ctx = TestContext::new();
     let background = PageTargetHost::with_url(
         "TID-background".to_owned(),
@@ -421,7 +422,7 @@ async fn accessibility_loaded_page_methods_target_background_owner_without_promo
     bc.set_active_target_id("TID-active".to_owned());
     bc.attach_active_session("SID-active".to_owned());
     bc.insert_page_target_host(background);
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.install_browser_context_fixture_for_test(bc);
     ctx.install_navigation_fixture_for_session_owner(
         "data:text/html,<html><body><p>Intro</p><button>Owner</button></body></html>",
         Some("SID-background"),
@@ -533,13 +534,14 @@ async fn accessibility_loaded_page_methods_target_inactive_owner_without_activat
     let mut active = BrowserContext::new("BID-active".to_owned());
     active.set_active_target_id("TID-active".to_owned());
     active.attach_active_session("SID-active".to_owned());
-    ctx.conn.browser_context = Some(active);
+    ctx.conn.install_browser_context_fixture_for_test(active);
 
     let mut inactive = BrowserContext::new("BID-inactive".to_owned());
     inactive.set_active_target_id("TID-inactive".to_owned());
     inactive.set_target_url("about:blank".to_owned());
     inactive.attach_active_session("SID-inactive".to_owned());
-    ctx.conn.inactive_browser_contexts.push(inactive);
+    ctx.conn
+        .push_inactive_browser_context_fixture_for_test(inactive);
     ctx.install_navigation_fixture_for_session_owner(
         "data:text/html,<html><body><button>Inactive</button></body></html>",
         Some("SID-inactive"),
@@ -626,7 +628,7 @@ async fn get_full_ax_tree_uses_fresh_initial_document_without_adapter() {
             .browser_context
             .as_ref()
             .expect("browser context")
-            .active_target
+            .active_page_target()
             .runtime_slot
             .has_loaded_page(),
         "Target.createTarget should install the initial about:blank page before Accessibility"

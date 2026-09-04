@@ -4997,6 +4997,40 @@ fn computed_css_style_declaration_is_read_only() {
         "true|NoModificationAllowedError:7|NoModificationAllowedError:7|NoModificationAllowedError:7|NoModificationAllowedError:7|NoModificationAllowedError:7"
     );
 }
+
+#[test]
+fn computed_flex_flow_serializes_direction_and_wrap() {
+    let mut vm = new_storage_test_vm("https://computed-flex-flow.test/");
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const target = document.createElement('div');
+  (document.body || document.documentElement || document).appendChild(target);
+  const values = [
+    'initial',
+    'column',
+    'wrap',
+    'column wrap-reverse',
+    'row-reverse wrap'
+  ];
+  return values.map(value => {
+    target.style.flexFlow = value;
+    const computed = getComputedStyle(target);
+    return [computed.flexFlow, computed.flexDirection, computed.flexWrap].join('|');
+  }).join('/');
+})()
+"#,
+        )
+        .expect("computed flex-flow serialization should evaluate");
+
+    assert_eq!(
+        result,
+        "row nowrap|row|nowrap/column nowrap|column|nowrap/row wrap|row|wrap/column wrap-reverse|column|wrap-reverse/row-reverse wrap|row-reverse|wrap"
+    );
+}
+
 #[test]
 fn css_media_rule_exposes_mutable_media_list() {
     let mut vm = new_storage_test_vm("https://css-media-list.test/");
@@ -9473,6 +9507,36 @@ fn live_inline_style_css_text_getter_serializes_declaration_block() {
 }
 
 #[test]
+fn live_inline_font_family_getter_normalizes_quoted_family_names() {
+    let mut vm = new_storage_test_vm("https://inline-font-family-serialization.test/");
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const target = document.createElement('div');
+  const read = value => {
+    target.setAttribute('style', `font-family: ${value}`);
+    return [target.style.fontFamily, target.style.getPropertyValue('font-family')];
+  };
+  return JSON.stringify([
+    read("'Twisty Tie'"),
+    read("'Veronica'"),
+    read("'34J'"),
+    read("'serif'")
+  ]);
+})()
+"#,
+        )
+        .expect("inline font-family serialization should evaluate");
+
+    assert_eq!(
+        result,
+        r#"[["Twisty Tie","Twisty Tie"],["Veronica","Veronica"],["\"34J\"","\"34J\""],["\"serif\"","\"serif\""]]"#
+    );
+}
+
+#[test]
 fn live_inline_css_text_setter_uses_stylo_declaration_block_for_plain_properties() {
     let mut vm = new_storage_test_vm("https://inline-style-pdb-csstext.test/");
 
@@ -13267,6 +13331,37 @@ fn css_style_declaration_serializes_animation_shorthand_from_longhands() {
     assert_eq!(
         result,
         "1s cubic-bezier(0, -2, 1, 3) -3s 4 reverse both paused anim|1s cubic-bezier(0, -2, 1, 3) -3s 4 reverse both paused anim|reverse both paused anim, 1s cubic-bezier(0, -2, 1, 3) -3s 4|reverse both paused anim, 1s cubic-bezier(0, -2, 1, 3) -3s 4"
+    );
+}
+
+#[test]
+fn css_style_declaration_serializes_white_space_shorthand() {
+    let mut vm = new_storage_test_vm("https://css-style-white-space-shorthand.test/");
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const element = document.createElement('div');
+  const values = ['normal', 'pre', 'nowrap', 'pre-wrap', 'pre-line', 'inherit'];
+  const attributeValues = values.map(value => {
+    element.setAttribute('style', `white-space: ${value}`);
+    return [element.style.whiteSpace, element.style.getPropertyValue('white-space')].join('|');
+  });
+  const propertyValues = values.map(value => {
+    element.style.cssText = '';
+    element.style.whiteSpace = value;
+    return [element.style.whiteSpace, element.style.getPropertyValue('white-space')].join('|');
+  });
+  return [attributeValues.join(','), propertyValues.join(',')].join('/');
+})()
+"#,
+        )
+        .expect("white-space shorthand serialization should evaluate");
+
+    assert_eq!(
+        result,
+        "normal|normal,pre|pre,nowrap|nowrap,pre-wrap|pre-wrap,pre-line|pre-line,inherit|inherit/normal|normal,pre|pre,nowrap|nowrap,pre-wrap|pre-wrap,pre-line|pre-line,inherit|inherit"
     );
 }
 

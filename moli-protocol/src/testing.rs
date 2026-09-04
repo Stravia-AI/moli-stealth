@@ -261,6 +261,7 @@ impl TestContext {
         raw_url: &str,
         session_id: Option<&str>,
     ) {
+        self.conn.commit_declared_session_fixtures_for_test();
         let navigation = self
             .conn
             .load_navigation_via_runtime_for_session_owner_async(session_id, raw_url)
@@ -284,6 +285,7 @@ impl TestContext {
         response_body: String,
         session_id: Option<&str>,
     ) {
+        self.conn.commit_declared_session_fixtures_for_test();
         let navigation = self
             .conn
             .build_loaded_navigation_from_buffered_response_for_session_owner_async(
@@ -303,16 +305,16 @@ impl TestContext {
 
     async fn install_loaded_navigation_fixture_for_session_owner(
         &mut self,
-        mut navigation: crate::conn::LoadedNavigation,
+        navigation: crate::conn::LoadedNavigation,
         session_id: Option<&str>,
     ) {
+        let owner = crate::conn::CommandOwnerScope::capture(&self.conn, session_id);
         let (_, target_id) = self
             .conn
-            .target_owner_identity_for_session(session_id)
+            .target_owner_identity_for_owner(&owner)
             .expect("navigation fixture requires an installed browser context");
         let target_id = target_id.expect("navigation fixture requires an exact target");
         let renderer_output_predecessor = navigation.renderer_output_predecessor;
-        let navigation_engine = navigation.navigation_engine.take();
         let page_creation_artifacts = navigation.page_creation_artifacts;
         let final_url = navigation.final_url;
         let main_document_commit = navigation
@@ -320,8 +322,8 @@ impl TestContext {
             .expect("navigation fixture must retain its frozen Document commit identity");
         let page_commit = self
             .conn
-            .commit_loaded_navigation_page_for_session_owner_async(
-                session_id,
+            .commit_loaded_navigation_page_for_owner_async(
+                &owner,
                 navigation.page,
                 LoadedNavigationRendererAttachmentCommit::Prepare(None),
                 &final_url,
@@ -337,29 +339,23 @@ impl TestContext {
         );
         let _ = self
             .conn
-            .commit_loaded_navigation_target_identity_for_session_owner(
-                session_id,
+            .commit_loaded_navigation_target_identity_for_owner(
+                &owner,
                 &main_document_commit,
                 &final_url,
             );
-        let (binding, _) = self
-            .conn
-            .bind_renderer_document_lifecycle_for_session_owner(
-                session_id,
-                page_creation_artifacts,
-                None,
-                target_id,
-                crate::domains::page::LOADER_ID.to_owned(),
-            );
+        let (binding, _) = self.conn.bind_renderer_document_lifecycle_for_owner(
+            &owner,
+            page_creation_artifacts,
+            None,
+            target_id,
+            crate::domains::page::LOADER_ID.to_owned(),
+        );
         let binding =
             binding.expect("navigation fixture must install its exact renderer Document binding");
-        if let Some(navigation_engine) = navigation_engine {
-            self.conn
-                .adopt_loaded_navigation_engine_for_session_owner(session_id, navigation_engine);
-        }
         assert_eq!(
             self.conn
-                .target_root_document_lifecycle_identity_for_session(session_id),
+                .target_root_document_lifecycle_identity_for_owner(&owner,),
             Some(binding.renderer_document_identity()),
             "navigation fixture must retain its exact renderer Document binding"
         );
@@ -383,6 +379,16 @@ impl TestContext {
             .expect("test message must be a valid serialisable CDP command");
         let command_id = command.request().id();
         let session_id = command.request().session_id().map(str::to_owned);
+        let command_awaits_promise = match command.request().method() {
+            "Runtime.awaitPromise" => true,
+            "Runtime.evaluate" | "Runtime.callFunctionOn" | "Runtime.runScript" => command
+                .request()
+                .params()
+                .and_then(|params| params.get("awaitPromise"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            _ => false,
+        };
         let response_start = self.sent.len();
         Box::pin(self.process_parsed_command_like_scheduler(&command, true)).await;
         Box::pin(self.route_ready_test_command_response(command_id, response_start)).await;
@@ -390,6 +396,10 @@ impl TestContext {
             .conn
             .renderer_runtime_command_cause_for_frontend(session_id.as_deref(), command_id)
             .is_some()
+            && !(command_awaits_promise
+                && self
+                    .conn
+                    .has_pending_inspector_awaits_for_session_owner(session_id.as_deref()))
             && !self
                 .pending_runtime_deferred_replies
                 .iter()
@@ -692,7 +702,14 @@ impl TestContext {
         command: &ParsedCdpCommand,
         drain_after_command: bool,
     ) -> Vec<CdpSchedulerEvent> {
+        // Some low-level fixtures mutate target-side session declarations
+        // after installing their BrowserContext. Materialize those declarations
+        // as committed attachments at the test scheduler boundary; production
+        // route lookup remains control-plane-only.
+        self.conn.commit_declared_session_fixtures_for_test();
         let output_session_id = command.command_output_session_id().map(str::to_owned);
+        let output_owner =
+            crate::conn::CommandOwnerScope::capture(&self.conn, output_session_id.as_deref());
         let mut protocol_events = Vec::new();
         let mut scheduler_events = Vec::new();
         let mut command_context = crate::conn::CommandDispatchContext::default();
@@ -712,7 +729,7 @@ impl TestContext {
         if drain_after_command && completed {
             crate::domains::activity::project_protocol_local_command_outputs(
                 &mut self.conn,
-                output_session_id.as_deref(),
+                &output_owner,
                 &mut command_context,
             )
             .await;
@@ -844,12 +861,15 @@ impl TestContext {
                 CdpCommandTaskStep::Pending(mut pending)
                     if pending.waits_for_scheduler_deferred_inspector_reply() =>
                 {
-                    let session_id = pending.session_id().map(str::to_owned);
+                    let owner = pending
+                        .runtime_command_owner_scope()
+                        .expect("deferred Runtime commands have an exact owner")
+                        .clone();
                     protocol_events
                         .extend(pending.take_scheduler_deferred_inspector_reply_events());
                     crate::domains::activity::project_protocol_local_command_outputs(
                         &mut self.conn,
-                        session_id.as_deref(),
+                        &owner,
                         command_context,
                     )
                     .await;

@@ -3766,7 +3766,7 @@ async fn child_frame_describe_node_uses_the_calling_sessions_whitespace_projecti
     .await;
     let all_session_id = take_response_by_id(&mut ctx, 3)["result"]["sessionId"]
         .as_str()
-        .expect("auxiliary session id")
+        .expect("attached session id")
         .to_owned();
     ctx.sent.clear();
 
@@ -3837,7 +3837,7 @@ async fn child_frame_describe_node_uses_the_calling_sessions_whitespace_projecti
     );
     assert!(
         whitespace_text_node_count(&all_result.node) > 0,
-        "the auxiliary session's includeWhitespace=all mode must reach the child-frame root \
+        "the attached session's includeWhitespace=all mode must reach the child-frame root \
          snapshot: {all_result:?}"
     );
     assert_eq!(
@@ -3902,13 +3902,13 @@ async fn child_frame_get_outer_html_preserves_session_and_shadow_inclusion() {
         "params": { "targetId": "TID-1" }
     }))
     .await;
-    let auxiliary_session_id = take_response_by_id(&mut ctx, 3)["result"]["sessionId"]
+    let attached_session_id = take_response_by_id(&mut ctx, 3)["result"]["sessionId"]
         .as_str()
-        .expect("auxiliary session id")
+        .expect("attached session id")
         .to_owned();
     let cdp_context = DevToolsCommandContext {
         protocol: DevToolsProtocol::Cdp,
-        session_id: Some(DevToolsSessionId::from(auxiliary_session_id.as_str())),
+        session_id: Some(DevToolsSessionId::from(attached_session_id.as_str())),
         target_id: Some(DevToolsTargetId::from(child_frame_id.as_str())),
         browser_context_id: None,
     };
@@ -3924,7 +3924,7 @@ async fn child_frame_get_outer_html_preserves_session_and_shadow_inclusion() {
         .await
         .into_parts()
         .0
-        .expect("auxiliary-session child document describe should run");
+        .expect("attached-session child document describe should run");
     let DevToolsCommandResult::DescribeNode(described) = described else {
         panic!("expected child describe result");
     };
@@ -3933,7 +3933,7 @@ async fn child_frame_get_outer_html_preserves_session_and_shadow_inclusion() {
     let host_node_id = host["nodeId"]
         .as_u64()
         .and_then(|id| u32::try_from(id).ok())
-        .expect("auxiliary-session child frontend node id");
+        .expect("attached-session child frontend node id");
     let host_backend_node_id = host["backendNodeId"]
         .as_u64()
         .and_then(|id| u32::try_from(id).ok())
@@ -5013,31 +5013,15 @@ async fn get_frame_owner_invalid_params_error() {
 #[tokio::test(flavor = "multi_thread")]
 async fn get_frame_owner_without_selected_target_errors() {
     let mut ctx = TestContext::new();
-    load_bc(&mut ctx, "BID-A");
+    ctx.conn.browser_context = Some(crate::conn::BrowserContext::new("BID-A".to_owned()));
 
     ctx.process_async(json!({
         "id": 1,
-        "method": "Page.navigate",
-        "params": {
-            "url": "data:text/html,<!doctype html><html><body><div></div></body></html>"
-        }
-    }))
-    .await;
-    ctx.expect_result(1, json!({"loaderId": "LID-0000000001"}), None);
-    crate::testing::wait_until_renderer_document_load(&mut ctx, None, "TID-1", "LID-0000000001")
-        .await;
-    let _ = ctx.take_all();
-    if let Some(bc) = ctx.conn.browser_context.as_mut() {
-        bc.clear_active_target_id();
-    }
-
-    ctx.process_async(json!({
-        "id": 2,
         "method": "DOM.getFrameOwner",
         "params": { "frameId": "TID-1" }
     }))
     .await;
-    ctx.expect_error(2, -31998, "BrowserContextNotLoaded");
+    ctx.expect_error(1, -31998, "BrowserContextNotLoaded");
 }
 
 #[tokio::test(flavor = "multi_thread")]

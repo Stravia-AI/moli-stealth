@@ -108,7 +108,7 @@ async fn loaded_page_html_for_test(ctx: &mut TestContext) -> String {
         .conn
         .browser_context
         .as_mut()
-        .and_then(|bc| bc.active_target.runtime_slot.loaded_page_mut())
+        .and_then(|bc| bc.active_page_target_mut().runtime_slot.loaded_page_mut())
         .expect("loaded page");
     page.serialize_html_async()
         .await
@@ -162,7 +162,7 @@ fn load_bc_with_target(ctx: &mut TestContext, bc_id: &str, target_id: &str, url:
     let mut bc = BrowserContext::new(bc_id.into());
     bc.set_active_target_id(target_id);
     bc.set_target_url(url.into());
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.install_browser_context_fixture_for_test(bc);
 }
 fn load_bc_with_session(
     ctx: &mut TestContext,
@@ -177,13 +177,21 @@ fn load_bc_with_session(
     // materialized; setting only target/session/url metadata creates a Page
     // with no exact renderer Document attachment and makes typed child-frame
     // output correctly fail authorization.
-    bc.stage_active_target_demoting_current(
+    bc.stage_foreground_target(
         target_id.to_owned(),
         Some(session_id.to_owned()),
         url.to_owned(),
         Some(url.to_owned()),
     );
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.install_browser_context_fixture_for_test(bc);
+    ctx.conn.register_session_route_for_test(
+        session_id,
+        crate::conn::CdpSessionRoute::PageTarget {
+            browser_context_id: bc_id.to_owned(),
+            target_id: target_id.to_owned(),
+            session_key: moli_page_types::DevToolsSessionKey::Primary,
+        },
+    );
 }
 fn load_bc_with_service_worker_target(ctx: &mut TestContext) {
     let mut bc = BrowserContext::new("BID-service-worker-frame-tree".to_owned());
@@ -197,12 +205,20 @@ fn load_bc_with_service_worker_target(ctx: &mut TestContext) {
         None,
     );
     bc.insert_service_worker_target(target);
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.install_browser_context_fixture_for_test(bc);
 }
 async fn ensure_initial_document_for_session(ctx: &mut TestContext, session_id: Option<&str>) {
+    let owner = match session_id {
+        Some(session_id) => crate::conn::CommandOwnerScope::for_route(
+            ctx.conn
+                .session_route(Some(session_id))
+                .expect("test session must own a concrete target route"),
+        ),
+        None => crate::conn::CommandOwnerScope::capture(&ctx.conn, None),
+    };
     let pending = ctx
         .conn
-        .start_initial_document_page_ensure_for_session_owner(session_id)
+        .start_initial_document_page_ensure_for_owner(&owner)
         .expect("target lifecycle initial document ensure should start")
         .expect("metadata-only initial target should need an initial document page build");
     let completed = pending

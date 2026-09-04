@@ -3,7 +3,9 @@ use crate::devtools_runtime::{
     NavigationFrameEventKind, NavigationLifecycleEvent, PageLifecycleEvent,
 };
 
-use crate::conn::{BackgroundProtocolEvent, CdpConnection, CommittedRendererDocumentBinding};
+use crate::conn::{
+    BackgroundProtocolEvent, CdpConnection, CommandOwnerScope, CommittedRendererDocumentBinding,
+};
 use moli_core::page::{
     RendererDocumentLifecycleEvent, RendererDocumentLifecycleEventKind,
     RendererDocumentLifecycleMilestone, RendererLifecycleStartReason,
@@ -179,11 +181,11 @@ fn emit_renderer_navigation_domcontentloaded_background_events(
 pub(crate) fn emit_bound_renderer_document_lifecycle_background_events(
     conn: &mut CdpConnection,
     out: &mut Vec<BackgroundProtocolEvent>,
-    owner_session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     binding: &CommittedRendererDocumentBinding,
     events: &[RendererDocumentLifecycleEvent],
 ) {
-    let session_ids = conn.page_event_session_ids_for_session_owner(owner_session_id);
+    let session_ids = conn.page_event_session_ids_for_owner(owner);
     for event in events {
         if event.frame != binding.renderer_frame || event.document != binding.renderer_document {
             continue;
@@ -194,10 +196,11 @@ pub(crate) fn emit_bound_renderer_document_lifecycle_background_events(
                 RendererDocumentLifecycleMilestone::DomContentLoaded,
             ) => {
                 for session_id in &session_ids {
-                    if crate::domains::dom::dom_agent_enabled_for_session(
-                        conn,
-                        session_id.as_deref(),
-                    ) {
+                    let event_owner = session_id
+                        .as_deref()
+                        .map(CommandOwnerScope::for_session)
+                        .unwrap_or_else(|| owner.clone());
+                    if crate::domains::dom::dom_agent_enabled_for_owner(conn, &event_owner) {
                         emit_cdp_page_background_automation_event(
                             out,
                             navigation_frame_event(
@@ -210,7 +213,7 @@ pub(crate) fn emit_bound_renderer_document_lifecycle_background_events(
                         );
                     }
                     let lifecycle_enabled =
-                        page_lifecycle_events_enabled_for_session(conn, session_id.as_deref());
+                        page_lifecycle_events_enabled_for_owner(conn, &event_owner);
                     emit_renderer_navigation_domcontentloaded_background_events(
                         out,
                         session_id.as_deref(),
@@ -225,8 +228,12 @@ pub(crate) fn emit_bound_renderer_document_lifecycle_background_events(
                 RendererDocumentLifecycleMilestone::Load,
             ) => {
                 for session_id in &session_ids {
+                    let event_owner = session_id
+                        .as_deref()
+                        .map(CommandOwnerScope::for_session)
+                        .unwrap_or_else(|| owner.clone());
                     let lifecycle_enabled =
-                        page_lifecycle_events_enabled_for_session(conn, session_id.as_deref());
+                        page_lifecycle_events_enabled_for_owner(conn, &event_owner);
                     emit_renderer_navigation_load_background_events(
                         out,
                         session_id.as_deref(),
@@ -245,11 +252,15 @@ pub(crate) fn emit_bound_renderer_document_lifecycle_background_events(
                     | RendererLifecycleStartReason::JavascriptDocumentReplacement,
             } => {
                 let frame_identity = conn
-                    .target_session_owner_frame_tree_identity(owner_session_id)
+                    .target_session_owner_frame_tree_identity_for_owner(owner)
                     .map(|(_, url, security_origin, secure_context_type)| {
                         (url, security_origin, secure_context_type)
                     });
                 for session_id in &session_ids {
+                    let event_owner = session_id
+                        .as_deref()
+                        .map(CommandOwnerScope::for_session)
+                        .unwrap_or_else(|| owner.clone());
                     if let Some((url, security_origin, secure_context_type)) =
                         frame_identity.as_ref()
                     {
@@ -265,7 +276,7 @@ pub(crate) fn emit_bound_renderer_document_lifecycle_background_events(
                         ));
                     }
                     let lifecycle_enabled =
-                        page_lifecycle_events_enabled_for_session(conn, session_id.as_deref());
+                        page_lifecycle_events_enabled_for_owner(conn, &event_owner);
                     emit_navigation_lifecycle_init_background_events(
                         out,
                         session_id.as_deref(),
@@ -282,11 +293,11 @@ pub(crate) fn emit_bound_renderer_document_lifecycle_background_events(
     }
 }
 
-fn page_lifecycle_events_enabled_for_session(
+fn page_lifecycle_events_enabled_for_owner(
     conn: &CdpConnection,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
 ) -> bool {
-    conn.target_page_session_state_for_session(session_id)
+    conn.target_page_session_state_for_owner(owner)
         .is_some_and(|state| state.page_lifecycle_events)
 }
 

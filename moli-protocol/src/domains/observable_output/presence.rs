@@ -7,7 +7,7 @@ use super::ObservableOutputProjectionStep;
 use super::output_queue::{
     ObservablePreparedOutputs, ObservableSessionAuditsPreparedRange, TargetObservableOutputQueue,
 };
-use crate::conn::CdpConnection;
+use crate::conn::{CdpConnection, CommandOwnerScope};
 
 #[derive(Clone, Copy)]
 enum RuntimeObservableAudience {
@@ -83,18 +83,17 @@ pub(in crate::domains) fn observable_source_activity_outputs(
 pub(in crate::domains) fn runtime_console_message_prepared_outputs(
     conn: &mut CdpConnection,
     message: RuntimeConsoleMessageSnapshot,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
 ) -> ObservablePreparedOutputs {
     let mut prepared = ObservablePreparedOutputs::default();
-    let Some(source) = runtime_console_source_tail_for_session_owner(conn, message, session_id)
-    else {
+    let Some(source) = runtime_console_source_tail_for_owner(conn, message, owner) else {
         return prepared;
     };
     push_runtime_observable_tail_prepared_outputs(
         &mut prepared,
         conn,
         &source,
-        session_id,
+        owner,
         true,
         RuntimeObservableAudience::SourceSession,
     );
@@ -105,22 +104,19 @@ pub(in crate::domains) fn runtime_lifecycle_error_prepared_outputs(
     conn: &mut CdpConnection,
     text: String,
     execution_context_id: Option<i64>,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
 ) -> ObservablePreparedOutputs {
     let mut prepared = ObservablePreparedOutputs::default();
-    let Some(source) = runtime_lifecycle_error_source_tail_for_session_owner(
-        conn,
-        text,
-        execution_context_id,
-        session_id,
-    ) else {
+    let Some(source) =
+        runtime_lifecycle_error_source_tail_for_owner(conn, text, execution_context_id, owner)
+    else {
         return prepared;
     };
     push_runtime_observable_tail_prepared_outputs(
         &mut prepared,
         conn,
         &source,
-        session_id,
+        owner,
         true,
         RuntimeObservableAudience::EnabledTargetAttachments,
     );
@@ -131,7 +127,7 @@ pub(in crate::domains) fn inspector_issue_prepared_outputs(
     conn: &mut CdpConnection,
     source_document: moli_core::RendererDocumentLifecycleIdentity,
     issue: InspectorIssueSnapshot,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
 ) -> ObservablePreparedOutputs {
     let mut prepared = ObservablePreparedOutputs::default();
     // Inspector issues are Document facts. Resolve them only against the
@@ -139,7 +135,7 @@ pub(in crate::domains) fn inspector_issue_prepared_outputs(
     // issue from a retired generation could be stored and replayed as if it
     // belonged to its replacement.
     let Some(document_binding) = conn
-        .runtime_session_owner_slot(session_id)
+        .runtime_session_owner_slot_for_owner(owner)
         .ok()
         .and_then(|slot| slot.committed_renderer_document_binding())
     else {
@@ -151,7 +147,7 @@ pub(in crate::domains) fn inspector_issue_prepared_outputs(
     let page_attachment_id = document_binding.page_attachment_id;
     let frame_id = document_binding.frame_id.clone();
     let loader_id = document_binding.loader_id.clone();
-    let Some(storage) = conn.with_target_owner_state_for_session_mut(session_id, |owner_state| {
+    let Some(storage) = conn.with_target_owner_state_for_owner_mut(owner, |owner_state| {
         owner_state
             .audits_storage_state
             .append_concrete_issue(issue);
@@ -164,10 +160,13 @@ pub(in crate::domains) fn inspector_issue_prepared_outputs(
     // then fans out to every enabled frontend session. Each session keeps its
     // own cursor, matching Blink's per-session Audits agent state without
     // rediscovering the issue from a later Page snapshot.
-    for event_session_id in conn.page_event_session_ids_for_session_owner(session_id) {
+    for event_session_id in conn.page_event_session_ids_for_owner(owner) {
         let event_session_id = event_session_id.as_deref();
+        let event_owner = event_session_id
+            .map(CommandOwnerScope::for_session)
+            .unwrap_or_else(|| owner.clone());
         let Some(cursor) = conn
-            .target_page_session_state_for_session(event_session_id)
+            .target_page_session_state_for_owner(&event_owner)
             .and_then(|state| state.audits.pending_cursor(&storage))
         else {
             continue;
@@ -208,6 +207,7 @@ fn push_runtime_observable_source_prepared_outputs(
     source: &RendererRuntimeObservableSourceSummary,
     session_id: Option<&str>,
 ) {
+    let owner = CommandOwnerScope::capture(conn, session_id);
     let Some(source) = runtime_observable_source_tail_for_session_owner(conn, source, session_id)
     else {
         return;
@@ -216,7 +216,7 @@ fn push_runtime_observable_source_prepared_outputs(
         prepared,
         conn,
         &source,
-        session_id,
+        &owner,
         false,
         RuntimeObservableAudience::SourceSession,
     );
@@ -226,22 +226,21 @@ fn push_runtime_observable_tail_prepared_outputs(
     prepared: &mut ObservablePreparedOutputs,
     conn: &mut CdpConnection,
     source: &super::TargetRuntimeObservableSourceOutput,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     deliver_log_to_enabled_sessions: bool,
     runtime_audience: RuntimeObservableAudience,
 ) {
     let owner_state = conn
-        .target_owner_state_for_session(session_id)
+        .target_owner_state_for_owner(owner)
         .cloned()
         .unwrap_or_default();
-    let include_console_api_messages =
-        !renderer_agent_owns_page_console_api_events(conn, session_id);
+    let include_console_api_messages = !renderer_agent_owns_page_console_api_events(conn, owner);
 
     push_console_log_source_prepared_outputs(
         prepared,
         conn,
         source,
-        session_id,
+        owner,
         &owner_state,
         include_console_api_messages,
         deliver_log_to_enabled_sessions,
@@ -249,23 +248,26 @@ fn push_runtime_observable_tail_prepared_outputs(
 
     let attachments = match runtime_audience {
         RuntimeObservableAudience::SourceSession => conn
-            .target_page_protocol_attachment_identity_for_session(session_id)
+            .target_page_protocol_attachment_identity_for_owner(owner)
             .into_iter()
             .collect(),
         RuntimeObservableAudience::EnabledTargetAttachments => conn
-            .runtime_event_protocol_attachments_for_session_owner(session_id)
+            .runtime_event_protocol_attachments_for_owner(owner)
             .unwrap_or_default(),
     };
     for attachment in attachments {
         let event_session_id = attachment.session_id();
+        let event_owner = event_session_id
+            .map(CommandOwnerScope::for_session)
+            .unwrap_or_else(|| owner.clone());
         if !conn
-            .target_runtime_session_state_for_session(event_session_id)
+            .target_runtime_session_state_for_owner(&event_owner)
             .is_some_and(|state| state.runtime_frontend_enabled)
         {
             continue;
         }
         let include_runtime_console_api_messages =
-            !renderer_runtime_agent_owns_page_console_api_events(conn, event_session_id);
+            !renderer_runtime_agent_owns_page_console_api_events(conn, &event_owner);
         if let Some(items) = source.source_items_prepared_for_state(
             &owner_state.runtime_observable_state,
             include_runtime_console_api_messages,
@@ -279,14 +281,13 @@ fn push_console_log_source_prepared_outputs(
     prepared: &mut ObservablePreparedOutputs,
     conn: &CdpConnection,
     source: &super::TargetRuntimeObservableSourceOutput,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     owner_state: &crate::conn::TargetOwnerState,
     include_console_api_messages: bool,
     deliver_log_to_enabled_sessions: bool,
 ) {
     let queue = TargetObservableOutputQueue::from_runtime_source_output_ref(Some(source));
-    if let Some(devtools_session_state) = conn.target_devtools_session_state_for_session(session_id)
-    {
+    if let Some(devtools_session_state) = conn.target_devtools_session_state_for_owner(owner) {
         prepared.extend(
             queue.console_log_backlog_ranges(
                 source.url(),
@@ -298,7 +299,7 @@ fn push_console_log_source_prepared_outputs(
                 include_console_api_messages,
                 owner_state,
                 &devtools_session_state.console_output_session_state,
-                session_id,
+                owner.session_id(),
             ),
         );
     }
@@ -317,27 +318,27 @@ fn push_console_log_source_prepared_outputs(
         source.url(),
         source.page_attachment_id(),
         owner_state,
-        session_id,
+        owner,
     );
 }
 
 fn renderer_agent_owns_page_console_api_events(
     conn: &CdpConnection,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
 ) -> bool {
-    if session_id.is_some_and(|session_id| {
+    if owner.session_id().is_some_and(|session_id| {
         conn.shared_worker_target_for_session(Some(session_id))
             .is_some()
     }) {
         return false;
     }
-    let Ok(runtime_slot) = conn.runtime_session_owner_slot(session_id) else {
+    let Ok(runtime_slot) = conn.runtime_session_owner_slot_for_owner(owner) else {
         return false;
     };
     if !runtime_slot.has_loaded_page() {
         return false;
     }
-    conn.target_devtools_session_state_for_session(session_id)
+    conn.target_devtools_session_state_for_owner(owner)
         .is_some_and(|state| {
             state
                 .console_output_session_state
@@ -347,21 +348,21 @@ fn renderer_agent_owns_page_console_api_events(
 
 fn renderer_runtime_agent_owns_page_console_api_events(
     conn: &CdpConnection,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
 ) -> bool {
-    if session_id.is_some_and(|session_id| {
+    if owner.session_id().is_some_and(|session_id| {
         conn.shared_worker_target_for_session(Some(session_id))
             .is_some()
     }) {
         return false;
     }
-    let Ok(runtime_slot) = conn.runtime_session_owner_slot(session_id) else {
+    let Ok(runtime_slot) = conn.runtime_session_owner_slot_for_owner(owner) else {
         return false;
     };
     if !runtime_slot.has_loaded_page() {
         return false;
     }
-    conn.target_devtools_session_state_for_session(session_id)
+    conn.target_devtools_session_state_for_owner(owner)
         .is_some_and(|state| {
             state
                 .console_output_session_state
@@ -380,24 +381,24 @@ fn runtime_observable_source_tail_for_session_owner(
     runtime_slot.sync_observable_output_source_from_renderer_runtime_source(url, source)
 }
 
-fn runtime_console_source_tail_for_session_owner(
+fn runtime_console_source_tail_for_owner(
     conn: &mut CdpConnection,
     message: RuntimeConsoleMessageSnapshot,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
 ) -> Option<super::TargetRuntimeObservableSourceOutput> {
-    let url = conn.runtime_session_owner_target_url(session_id)?;
-    let runtime_slot = conn.runtime_session_owner_slot_mut(session_id).ok()?;
+    let url = conn.runtime_session_owner_target_url_for_owner(owner)?;
+    let runtime_slot = conn.runtime_session_owner_slot_mut_for_owner(owner).ok()?;
     runtime_slot.append_renderer_runtime_console_message(url, message)
 }
 
-fn runtime_lifecycle_error_source_tail_for_session_owner(
+fn runtime_lifecycle_error_source_tail_for_owner(
     conn: &mut CdpConnection,
     text: String,
     execution_context_id: Option<i64>,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
 ) -> Option<super::TargetRuntimeObservableSourceOutput> {
-    let url = conn.runtime_session_owner_target_url(session_id)?;
-    let runtime_slot = conn.runtime_session_owner_slot_mut(session_id).ok()?;
+    let url = conn.runtime_session_owner_target_url_for_owner(owner)?;
+    let runtime_slot = conn.runtime_session_owner_slot_mut_for_owner(owner).ok()?;
     runtime_slot.append_renderer_runtime_lifecycle_error(url, text, execution_context_id)
 }
 
@@ -425,16 +426,16 @@ pub(in crate::domains) fn observable_backlog_prepared_outputs_for_session_owner(
 /// instead and never calls this live projection entry point.
 pub(in crate::domains) fn live_log_prepared_outputs_for_renderer_network_fact(
     conn: &CdpConnection,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
 ) -> ObservablePreparedOutputs {
     let owner_state = conn
-        .target_owner_state_for_session(session_id)
+        .target_owner_state_for_owner(owner)
         .cloned()
         .unwrap_or_default();
-    let Some(runtime_slot) = conn.runtime_session_owner_slot(session_id).ok() else {
+    let Some(runtime_slot) = conn.runtime_session_owner_slot_for_owner(owner).ok() else {
         return ObservablePreparedOutputs::default();
     };
-    let Some(url) = conn.runtime_session_owner_target_url(session_id) else {
+    let Some(url) = conn.runtime_session_owner_target_url_for_owner(owner) else {
         return ObservablePreparedOutputs::default();
     };
     let Some(queue) = TargetObservableOutputQueue::from_log_storage(runtime_slot) else {
@@ -451,7 +452,7 @@ pub(in crate::domains) fn live_log_prepared_outputs_for_renderer_network_fact(
         &url,
         page_attachment_id,
         &owner_state,
-        session_id,
+        owner,
     );
     prepared
 }
@@ -471,8 +472,10 @@ fn observable_console_log_prepared_outputs_for_session_owner(
     let url = conn.runtime_session_owner_target_url(session_id)?;
     let queue = super::output_queue::TargetObservableOutputQueue::from_runtime_slot(runtime_slot)?;
     let page_attachment_id = runtime_slot.page_attachment_id()?;
-    let include_console_api_messages =
-        !renderer_agent_owns_page_console_api_events(conn, session_id);
+    let include_console_api_messages = !renderer_agent_owns_page_console_api_events(
+        conn,
+        &CommandOwnerScope::capture(conn, session_id),
+    );
     let mut prepared = ObservablePreparedOutputs::default();
 
     if console_allowed
@@ -496,6 +499,7 @@ fn observable_console_log_prepared_outputs_for_session_owner(
     }
 
     if log_allowed {
+        let owner = CommandOwnerScope::capture(conn, session_id);
         push_log_prepared_outputs_for_enabled_sessions(
             &mut prepared,
             conn,
@@ -503,7 +507,7 @@ fn observable_console_log_prepared_outputs_for_session_owner(
             &url,
             page_attachment_id,
             &owner_state,
-            session_id,
+            &owner,
         );
     }
 
@@ -517,16 +521,19 @@ fn push_log_prepared_outputs_for_enabled_sessions(
     url: &str,
     page_attachment_id: crate::conn::TargetPageAttachmentId,
     owner_state: &crate::conn::TargetOwnerState,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
 ) {
     // A concrete Page error is stored once but observed by every Log agent
     // attached to that target. The publication route names one canonical
     // session only; it must not accidentally turn a target-owned fact into a
     // single-session event.
-    for event_session_id in conn.page_event_session_ids_for_session_owner(session_id) {
+    for event_session_id in conn.page_event_session_ids_for_owner(owner) {
         let event_session_id = event_session_id.as_deref();
+        let event_owner = event_session_id
+            .map(CommandOwnerScope::for_session)
+            .unwrap_or_else(|| owner.clone());
         let Some(devtools_session_state) =
-            conn.target_devtools_session_state_for_session(event_session_id)
+            conn.target_devtools_session_state_for_owner(&event_owner)
         else {
             continue;
         };
@@ -553,7 +560,7 @@ mod tests {
         RendererRuntimeObservableSourceSummary, RuntimeConsoleMessageSnapshot,
     };
 
-    use crate::conn::BrowserContext;
+    use crate::conn::{BrowserContext, CommandOwnerScope};
     use crate::domains::observable_output::output_queue::TargetObservableOutputQueue;
     use crate::testing::TestContext;
 
@@ -569,18 +576,18 @@ mod tests {
         bc.set_active_target_id("TID-runtime-lifecycle".to_owned());
         bc.set_target_url("https://example.test/runtime-lifecycle".to_owned());
         bc.attach_active_session("SID-runtime-a".to_owned());
-        assert!(bc.assign_auxiliary_session_to_target(
+        assert!(bc.assign_attached_session_to_target(
             "TID-runtime-lifecycle",
             "SID-runtime-b".to_owned(),
         ));
-        assert!(bc.assign_auxiliary_session_to_target(
+        assert!(bc.assign_attached_session_to_target(
             "TID-runtime-lifecycle",
             "SID-runtime-disabled".to_owned(),
         ));
-        bc.active_target
+        bc.active_page_target_mut()
             .runtime_slot
             .set_page_attachment_id_for_test(17);
-        conn.browser_context = Some(bc);
+        conn.install_browser_context_fixture_for_test(bc);
         for session_id in enabled_session_ids {
             conn.with_target_devtools_session_state_for_session_mut(Some(session_id), |state| {
                 state.runtime_session_state.runtime_frontend_enabled = true
@@ -592,7 +599,7 @@ mod tests {
             &mut conn,
             "uncaught timer error".to_owned(),
             Some(7),
-            Some("SID-runtime-a"),
+            &CommandOwnerScope::for_session("SID-runtime-a"),
         )
         .take_runtime_observable_items()
         .into_iter()
@@ -604,13 +611,14 @@ mod tests {
     fn observable_source_outputs_own_runtime_observable_presence() {
         let mut conn = crate::conn::CdpConnection::default();
         let mut bc = BrowserContext::new_with_page_for_test("BID-1", "TID-1");
-        bc.active_target
+        bc.active_page_target_mut()
             .runtime_slot
             .set_page_attachment_id_for_test(1);
-        bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+        bc.active_page_target_mut().devtools_sessions
+            [moli_page_types::DevToolsSessionKey::Primary]
             .runtime_session_state
             .runtime_frontend_enabled = true;
-        conn.browser_context = Some(bc);
+        conn.install_browser_context_fixture_for_test(bc);
 
         assert_eq!(
             observable_source_activity_outputs(
@@ -652,19 +660,22 @@ mod tests {
         let mut conn = crate::conn::CdpConnection::default();
         let mut bc = BrowserContext::new_with_page_for_test("BID-1", "TID-1");
         bc.set_target_url("data:text/html,console-only-source".to_owned());
-        bc.active_target
+        bc.active_page_target_mut()
             .runtime_slot
             .set_page_attachment_id_for_test(1);
-        bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+        bc.active_page_target_mut().devtools_sessions
+            [moli_page_types::DevToolsSessionKey::Primary]
             .console_output_session_state
             .console_enabled = true;
-        bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+        bc.active_page_target_mut().devtools_sessions
+            [moli_page_types::DevToolsSessionKey::Primary]
             .page_session_state
             .log_enabled = true;
-        bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+        bc.active_page_target_mut().devtools_sessions
+            [moli_page_types::DevToolsSessionKey::Primary]
             .runtime_session_state
             .runtime_frontend_enabled = false;
-        conn.browser_context = Some(bc);
+        conn.install_browser_context_fixture_for_test(bc);
 
         let outputs = observable_source_activity_outputs(
             &mut conn,
@@ -703,13 +714,14 @@ mod tests {
     fn observable_source_outputs_require_concrete_runtime_prepared_items() {
         let mut conn = crate::conn::CdpConnection::default();
         let mut bc = BrowserContext::new_with_page_for_test("BID-1", "TID-1");
-        bc.active_target
+        bc.active_page_target_mut()
             .runtime_slot
             .set_page_attachment_id_for_test(1);
-        bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+        bc.active_page_target_mut().devtools_sessions
+            [moli_page_types::DevToolsSessionKey::Primary]
             .runtime_session_state
             .runtime_frontend_enabled = true;
-        conn.browser_context = Some(bc);
+        conn.install_browser_context_fixture_for_test(bc);
 
         assert!(
             observable_source_activity_outputs(
@@ -742,16 +754,18 @@ mod tests {
             .await
             .expect("test page should load");
         let _ = bc
-            .active_target
+            .active_page_target_mut()
             .runtime_slot
             .replace_loaded_page(Some(page));
-        bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+        bc.active_page_target_mut().devtools_sessions
+            [moli_page_types::DevToolsSessionKey::Primary]
             .console_output_session_state
             .console_enabled = true;
-        bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+        bc.active_page_target_mut().devtools_sessions
+            [moli_page_types::DevToolsSessionKey::Primary]
             .page_session_state
             .log_enabled = true;
-        ctx.conn.browser_context = Some(bc);
+        ctx.conn.install_browser_context_fixture_for_test(bc);
 
         let outputs = observable_backlog_activity_outputs(&ctx.conn, None);
         assert_eq!(
@@ -782,7 +796,7 @@ mod tests {
                 .conn
                 .browser_context
                 .as_ref()
-                .map(|bc| &bc.active_target.runtime_slot)
+                .map(|bc| &bc.active_page_target().runtime_slot)
                 .expect("browser context should be loaded");
             let queue = TargetObservableOutputQueue::from_runtime_slot(runtime_slot)
                 .expect("queue should load");

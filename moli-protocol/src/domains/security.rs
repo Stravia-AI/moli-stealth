@@ -97,11 +97,7 @@ pub(crate) fn complete_pending_security_command(
         Err(error) => return CommandOutputPlan::error(-32000, error),
     };
     let owner_scope = completed.owner_scope;
-    match conn.finish_rebuild_resource_runtime_for_route(
-        owner_scope.session_id(),
-        owner_scope.session_owner_route(),
-        completion,
-    ) {
+    match conn.finish_rebuild_resource_runtime_for_owner(&owner_scope, completion) {
         Ok(()) => CommandOutputPlan::success(),
         Err(error) => CommandOutputPlan::error(-32000, error),
     }
@@ -164,6 +160,7 @@ mod tests {
                 .iter()
                 .find(|bc| bc.id == "BID-2")
                 .expect("session browser context")
+                .active_page_target()
                 .tls_verify_host_override,
             Some(false)
         );
@@ -171,7 +168,7 @@ mod tests {
             ctx.conn
                 .browser_context
                 .as_ref()
-                .and_then(|bc| bc.tls_verify_host_override),
+                .and_then(|bc| bc.active_page_target().tls_verify_host_override),
             None
         );
     }

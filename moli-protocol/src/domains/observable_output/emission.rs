@@ -37,12 +37,13 @@ async fn project_observable_output_async(
     context: &mut ProtocolOutputProjectionContext<'_>,
     prepared_outputs: Option<&mut ProtocolOutputPayloads>,
 ) {
+    let owner = context.owner().clone();
     if let Some(slot) = prepared_outputs.and_then(ProtocolOutputPayloads::observable_mut) {
         slot.emit_activity_background_events_async(
             step,
             conn,
             context.command.protocol_events_mut(),
-            context.session_id,
+            owner.session_id(),
         )
         .await;
     }
@@ -371,7 +372,7 @@ mod tests {
             .as_mut()
             .expect("browser context should be loaded");
         let page = bc
-            .active_target
+            .active_page_target_mut()
             .runtime_slot
             .loaded_page_mut()
             .expect("loaded page should be installed");
@@ -404,16 +405,18 @@ mod tests {
             .await
             .expect("test page should load");
         let _ = bc
-            .active_target
+            .active_page_target_mut()
             .runtime_slot
             .replace_loaded_page(Some(page));
-        bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+        bc.active_page_target_mut().devtools_sessions
+            [moli_page_types::DevToolsSessionKey::Primary]
             .console_output_session_state
             .console_enabled = true;
-        bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+        bc.active_page_target_mut().devtools_sessions
+            [moli_page_types::DevToolsSessionKey::Primary]
             .page_session_state
             .log_enabled = true;
-        ctx.conn.browser_context = Some(bc);
+        ctx.conn.install_browser_context_fixture_for_test(bc);
 
         let queue = TargetObservableOutputQueue::for_test(vec![
             ScriptObservableOutputItem::ConsoleMessage("warn: planned".to_owned()),
@@ -428,15 +431,16 @@ mod tests {
             bc.target_url(),
             bc.page_attachment_id()
                 .expect("loaded Page must have an attachment id"),
-            bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+            bc.active_page_target().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
                 .console_output_session_state
                 .console_enabled,
-            bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+            bc.active_page_target().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
                 .page_session_state
                 .log_enabled,
             true,
-            &bc.active_target.owner_state,
-            &bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+            &bc.active_page_target().owner_state,
+            &bc.active_page_target().devtools_sessions
+                [moli_page_types::DevToolsSessionKey::Primary]
                 .console_output_session_state,
             Some("SID-1"),
         );
@@ -464,7 +468,7 @@ mod tests {
                 .browser_context
                 .as_ref()
                 .expect("browser context should be loaded")
-                .active_target
+                .active_page_target()
                 .owner_state
                 .console_output_state
                 .console_domain_cursor()
@@ -496,6 +500,7 @@ mod tests {
                 .browser_context
                 .as_ref()
                 .expect("browser context should be loaded")
+                .active_page_target()
                 .devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
                 .console_output_session_state
                 .log_lifecycle_entries
@@ -542,13 +547,14 @@ mod tests {
             .await
             .expect("test page should load");
         let _ = bc
-            .active_target
+            .active_page_target_mut()
             .runtime_slot
             .replace_loaded_page(Some(page));
-        bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+        bc.active_page_target_mut().devtools_sessions
+            [moli_page_types::DevToolsSessionKey::Primary]
             .console_output_session_state
             .console_enabled = true;
-        ctx.conn.browser_context = Some(bc);
+        ctx.conn.install_browser_context_fixture_for_test(bc);
 
         let mut prepared_slot =
             observable_backlog_activity_outputs(&ctx.conn, None).into_prepared_slot();
@@ -604,13 +610,14 @@ mod tests {
             .await
             .expect("test page should load");
         let _ = bc
-            .active_target
+            .active_page_target_mut()
             .runtime_slot
             .replace_loaded_page(Some(page));
-        bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+        bc.active_page_target_mut().devtools_sessions
+            [moli_page_types::DevToolsSessionKey::Primary]
             .console_output_session_state
             .console_enabled = true;
-        ctx.conn.browser_context = Some(bc);
+        ctx.conn.install_browser_context_fixture_for_test(bc);
 
         let mut prepared_slot =
             observable_backlog_activity_outputs(&ctx.conn, None).into_prepared_slot();
@@ -668,10 +675,11 @@ mod tests {
             .await
             .expect("first test page should load");
         let _ = bc.replace_loaded_page(Some(first_page));
-        bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+        bc.active_page_target_mut().devtools_sessions
+            [moli_page_types::DevToolsSessionKey::Primary]
             .console_output_session_state
             .console_enabled = true;
-        ctx.conn.browser_context = Some(bc);
+        ctx.conn.install_browser_context_fixture_for_test(bc);
 
         let mut prepared_slot =
             observable_backlog_activity_outputs(&ctx.conn, None).into_prepared_slot();
@@ -690,7 +698,8 @@ mod tests {
                 .expect("browser context should remain loaded");
             let _ = bc.replace_loaded_page(Some(second_page));
             bc.set_target_url(page_url.to_owned());
-            bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+            bc.active_page_target_mut().devtools_sessions
+                [moli_page_types::DevToolsSessionKey::Primary]
                 .console_output_session_state
                 .console_enabled = true;
         }
@@ -737,7 +746,8 @@ mod tests {
         bc.set_target_url("data:text/html,active-owner".to_owned());
         bc.attach_active_session("SID-active".to_owned());
         let _ = bc.replace_loaded_page(Some(active_page));
-        bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+        bc.active_page_target_mut().devtools_sessions
+            [moli_page_types::DevToolsSessionKey::Primary]
             .console_output_session_state
             .console_enabled = true;
         bc.insert_page_target_host(PageTargetHost::new(
@@ -746,12 +756,12 @@ mod tests {
             TargetIdentityState::with_url("data:text/html,background-owner".to_owned()),
             TargetPageSlot::with_loaded_page_for_test(background_page),
         ));
-        bc.mutate_parked_page_session_state("TID-background", |state| {
-            state.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
-                .console_output_session_state
-                .console_enabled = true;
-        });
-        ctx.conn.browser_context = Some(bc);
+        bc.background_target_mut("TID-background")
+            .expect("background target must exist")
+            .devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+            .console_output_session_state
+            .console_enabled = true;
+        ctx.conn.install_browser_context_fixture_for_test(bc);
 
         assert_eq!(
             observable_backlog_activity_outputs(&ctx.conn, Some("SID-background"))
@@ -803,7 +813,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn target_promotion_transfers_page_attachment_without_retargeting_prepared_output() {
+    async fn target_activation_preserves_page_attachment_ownership_without_retargeting_output() {
         let mut ctx = TestContext::new();
         let active_page = ctx
             .conn
@@ -812,49 +822,50 @@ mod tests {
             )
             .await
             .expect("active test page should load");
-        let promoted_page = ctx
+        let activated_page = ctx
             .conn
             .load_page_via_runtime_async(
-                "data:text/html,<!doctype html><script>console.warn('promoted owner')</script>",
+                "data:text/html,<!doctype html><script>console.warn('activated owner')</script>",
             )
             .await
-            .expect("promoted test page should load");
+            .expect("activated test page should load");
 
         let mut bc = BrowserContext::new("BID-1".into());
         bc.set_active_target_id("TID-active".to_owned());
         bc.set_target_url("data:text/html,old-active-owner".to_owned());
         bc.attach_active_session("SID-active".to_owned());
         let _ = bc.replace_loaded_page(Some(active_page));
-        bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+        bc.active_page_target_mut().devtools_sessions
+            [moli_page_types::DevToolsSessionKey::Primary]
             .console_output_session_state
             .console_enabled = true;
         bc.insert_page_target_host(PageTargetHost::new(
-            "TID-promoted".to_owned(),
-            Some("SID-promoted".to_owned()),
-            TargetIdentityState::with_url("data:text/html,promoted-owner".to_owned()),
-            TargetPageSlot::with_loaded_page_for_test(promoted_page),
+            "TID-activated".to_owned(),
+            Some("SID-activated".to_owned()),
+            TargetIdentityState::with_url("data:text/html,activated-owner".to_owned()),
+            TargetPageSlot::with_loaded_page_for_test(activated_page),
         ));
-        bc.mutate_parked_page_session_state("TID-promoted", |state| {
-            state.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
-                .console_output_session_state
-                .console_enabled = true;
-        });
-        ctx.conn.browser_context = Some(bc);
+        bc.background_target_mut("TID-activated")
+            .expect("background target must exist")
+            .devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+            .console_output_session_state
+            .console_enabled = true;
+        ctx.conn.install_browser_context_fixture_for_test(bc);
 
-        let (old_active_attachment, promoted_attachment) = {
+        let (old_active_attachment, activated_attachment) = {
             let bc = ctx.conn.browser_context.as_ref().expect("browser context");
             (
-                bc.active_target
+                bc.active_page_target()
                     .runtime_slot
                     .page_attachment_id()
                     .expect("active Page attachment"),
-                bc.background_target("TID-promoted")
-                    .expect("promoted target")
+                bc.background_target("TID-activated")
+                    .expect("activated target")
                     .page_attachment_id()
-                    .expect("promoted Page attachment"),
+                    .expect("activated Page attachment"),
             )
         };
-        assert_ne!(old_active_attachment, promoted_attachment);
+        assert_ne!(old_active_attachment, activated_attachment);
 
         let mut old_active_prepared =
             observable_backlog_activity_outputs(&ctx.conn, None).into_prepared_slot();
@@ -865,25 +876,25 @@ mod tests {
                 .browser_context
                 .as_mut()
                 .expect("browser context")
-                .promote_background_target_to_active_slot_async("TID-promoted")
+                .select_page_target_async("TID-activated")
                 .await
-                .expect("target promotion should succeed")
+                .expect("target activation should succeed")
         );
 
         {
             let bc = ctx.conn.browser_context.as_ref().expect("browser context");
-            assert_eq!(bc.active_target_id(), Some("TID-promoted"));
+            assert_eq!(bc.active_target_id(), Some("TID-activated"));
             assert_eq!(
-                bc.active_target.runtime_slot.page_attachment_id(),
-                Some(promoted_attachment),
-                "promotion must transfer the installed Page attachment without reallocating it"
+                bc.active_page_target().runtime_slot.page_attachment_id(),
+                Some(activated_attachment),
+                "activation must preserve the selected target's Page attachment"
             );
             assert_eq!(
                 bc.background_target("TID-active")
-                    .expect("previous active target should be parked")
+                    .expect("previous active target should be background")
                     .page_attachment_id(),
                 Some(old_active_attachment),
-                "parking must transfer the previous active Page attachment with its target slot"
+                "deactivation must leave the Page attachment with its original target host"
             );
         }
 
@@ -896,7 +907,7 @@ mod tests {
             )
             .await
             .is_none(),
-            "prepared output from the old active owner must not materialize on the promoted target"
+            "prepared output from the old active owner must not materialize on the activated target"
         );
 
         let old_owner_plan = ObservableActivityEmissionPlan::prepare_async(
@@ -906,7 +917,7 @@ mod tests {
             Some(old_active_owner_prepared.outputs_mut_for_test()),
         )
         .await
-        .expect("prepared output must remain addressable through its parked owner");
+        .expect("prepared output must remain addressable through its background owner");
         let mut old_owner_out = Vec::new();
         old_owner_plan.emit(&mut ctx.conn, &mut old_owner_out, Some("SID-active"));
         assert!(old_owner_out.iter().any(|message| {
@@ -914,21 +925,21 @@ mod tests {
                 && message["params"]["message"]["text"] == json!("old active owner")
         }));
 
-        let mut promoted_prepared =
+        let mut activated_prepared =
             observable_backlog_activity_outputs(&ctx.conn, None).into_prepared_slot();
-        let promoted_plan = ObservableActivityEmissionPlan::prepare_async(
+        let activated_plan = ObservableActivityEmissionPlan::prepare_async(
             ObservableOutputProjectionStep::Console,
             &mut ctx.conn,
             None,
-            Some(promoted_prepared.outputs_mut_for_test()),
+            Some(activated_prepared.outputs_mut_for_test()),
         )
         .await
-        .expect("promoted target current Page output should remain visible");
-        let mut promoted_out = Vec::new();
-        promoted_plan.emit(&mut ctx.conn, &mut promoted_out, None);
-        assert!(promoted_out.iter().any(|message| {
+        .expect("activated target current Page output should remain visible");
+        let mut activated_out = Vec::new();
+        activated_plan.emit(&mut ctx.conn, &mut activated_out, None);
+        assert!(activated_out.iter().any(|message| {
             message["method"] == json!("Console.messageAdded")
-                && message["params"]["message"]["text"] == json!("promoted owner")
+                && message["params"]["message"]["text"] == json!("activated owner")
         }));
     }
 
@@ -945,10 +956,11 @@ mod tests {
             .await
             .expect("test page should load");
         let _ = bc.replace_loaded_page(Some(page));
-        bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+        bc.active_page_target_mut().devtools_sessions
+            [moli_page_types::DevToolsSessionKey::Primary]
             .runtime_session_state
             .runtime_frontend_enabled = true;
-        ctx.conn.browser_context = Some(bc);
+        ctx.conn.install_browser_context_fixture_for_test(bc);
         ctx.sent.clear();
         ctx.conn
             .evaluate_runtime_expression_with_await_async("console.warn('runtime prepared')", false)
@@ -1003,10 +1015,11 @@ mod tests {
             .await
             .expect("test page should load");
         let _ = bc.replace_loaded_page(Some(page));
-        bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+        bc.active_page_target_mut().devtools_sessions
+            [moli_page_types::DevToolsSessionKey::Primary]
             .runtime_session_state
             .runtime_frontend_enabled = true;
-        ctx.conn.browser_context = Some(bc);
+        ctx.conn.install_browser_context_fixture_for_test(bc);
         ctx.sent.clear();
 
         let snapshot = RendererPageDiagnosticsSnapshot::from_runtime_observable_source(
@@ -1058,10 +1071,11 @@ mod tests {
             .await
             .expect("test page should load");
         let _ = bc.replace_loaded_page(Some(page));
-        bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+        bc.active_page_target_mut().devtools_sessions
+            [moli_page_types::DevToolsSessionKey::Primary]
             .runtime_session_state
             .runtime_frontend_enabled = true;
-        ctx.conn.browser_context = Some(bc);
+        ctx.conn.install_browser_context_fixture_for_test(bc);
 
         let snapshot = RendererPageDiagnosticsSnapshot::from_runtime_observable_source(
             RendererRuntimeObservableSourceSummary::from_source_messages(
@@ -1112,13 +1126,15 @@ mod tests {
             .await
             .expect("test page should load");
         let _ = bc.replace_loaded_page(Some(page));
-        bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+        bc.active_page_target_mut().devtools_sessions
+            [moli_page_types::DevToolsSessionKey::Primary]
             .runtime_session_state
             .runtime_frontend_enabled = true;
-        bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+        bc.active_page_target_mut().devtools_sessions
+            [moli_page_types::DevToolsSessionKey::Primary]
             .console_output_session_state
             .renderer_runtime_agent_owns_page_console_api_events = true;
-        ctx.conn.browser_context = Some(bc);
+        ctx.conn.install_browser_context_fixture_for_test(bc);
 
         let console_only_snapshot = RendererPageDiagnosticsSnapshot::from_runtime_observable_source(
             RendererRuntimeObservableSourceSummary::from_source_messages(
@@ -1188,10 +1204,11 @@ mod tests {
             .await
             .expect("test page should load");
         let _ = bc.replace_loaded_page(Some(page));
-        bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+        bc.active_page_target_mut().devtools_sessions
+            [moli_page_types::DevToolsSessionKey::Primary]
             .runtime_session_state
             .runtime_frontend_enabled = true;
-        ctx.conn.browser_context = Some(bc);
+        ctx.conn.install_browser_context_fixture_for_test(bc);
         ctx.conn
             .runtime_session_owner_slot_mut(None)
             .expect("runtime slot should exist")
@@ -1224,10 +1241,11 @@ mod tests {
             .await
             .expect("first test page should load");
         let _ = bc.replace_loaded_page(Some(first_page));
-        bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+        bc.active_page_target_mut().devtools_sessions
+            [moli_page_types::DevToolsSessionKey::Primary]
             .runtime_session_state
             .runtime_frontend_enabled = true;
-        ctx.conn.browser_context = Some(bc);
+        ctx.conn.install_browser_context_fixture_for_test(bc);
 
         let snapshot = RendererPageDiagnosticsSnapshot::from_runtime_observable_source(
             RendererRuntimeObservableSourceSummary::from_source_messages(
@@ -1252,7 +1270,8 @@ mod tests {
                 .expect("browser context should remain loaded");
             let _ = bc.replace_loaded_page(Some(second_page));
             bc.set_target_url(page_url.to_owned());
-            bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+            bc.active_page_target_mut().devtools_sessions
+                [moli_page_types::DevToolsSessionKey::Primary]
                 .runtime_session_state
                 .runtime_frontend_enabled = true;
         }
@@ -1284,10 +1303,11 @@ mod tests {
             .await
             .expect("first test page should load");
         let _ = bc.replace_loaded_page(Some(first_page));
-        bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+        bc.active_page_target_mut().devtools_sessions
+            [moli_page_types::DevToolsSessionKey::Primary]
             .runtime_session_state
             .runtime_frontend_enabled = true;
-        ctx.conn.browser_context = Some(bc);
+        ctx.conn.install_browser_context_fixture_for_test(bc);
         ctx.sent.clear();
         ctx.conn
             .evaluate_runtime_expression_with_await_async("console.warn('runtime old')", false)
@@ -1312,7 +1332,8 @@ mod tests {
                 .expect("browser context should remain loaded");
             let _ = bc.replace_loaded_page(Some(second_page));
             bc.set_target_url(page_url.to_owned());
-            bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+            bc.active_page_target_mut().devtools_sessions
+                [moli_page_types::DevToolsSessionKey::Primary]
                 .runtime_session_state
                 .runtime_frontend_enabled = true;
         }
@@ -1394,7 +1415,7 @@ mod tests {
             .browser_context
             .as_ref()
             .expect("browser context should exist")
-            .active_target
+            .active_page_target()
             .owner_state
             .runtime_observable_state;
         assert!(
@@ -1436,7 +1457,7 @@ mod tests {
             .browser_context
             .as_ref()
             .expect("browser context should exist")
-            .active_target
+            .active_page_target()
             .owner_state
             .runtime_observable_state;
         assert!(

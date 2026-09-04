@@ -63,7 +63,7 @@ fn service_worker_csp_report_seen(
                         && matches!(
                             body.result(),
                             crate::types::SubresourceBodyFinishedResult::Ready(response_body)
-                                if response_body.diagnostic_text() == expected_body
+                                if response_body.diagnostic_bytes().as_ref() == expected_body.as_bytes()
                         )
             )
         })
@@ -82,7 +82,7 @@ fn service_worker_csp_report_seen(
                             response_body,
                             ..
                         } if final_url.as_str() == report_url
-                            && response_body.diagnostic_text() == expected_body
+                            && response_body.diagnostic_bytes().as_ref() == expected_body.as_bytes()
                     )
         )
     });
@@ -7119,8 +7119,6 @@ fn webassembly_runtime_exposes_type_reflection_surface() {
                   globalConstructorOrder.push("value valueOf()");
                 }
               });
-              const wasmFunction = new WebAssembly.Function({ parameters: ["i32"], results: ["i32"] }, value => value + 1);
-              const wasmFunctionType = wasmFunction.type();
               const arrayFrom = Array.from;
               Array.from = () => { throw new Error("WebAssembly descriptor reflection must not use Array.from"); };
               const tag = new WebAssembly.Tag({
@@ -7156,11 +7154,7 @@ fn webassembly_runtime_exposes_type_reflection_surface() {
                 missingSetterResult,
                 missingSetterValue: mutableGlobal.value,
                 globalConstructorOrder: globalConstructorOrder.join("|"),
-                wasmFunctionConstructorLength: WebAssembly.Function.length,
-                wasmFunctionCall: wasmFunction(4),
-                wasmFunctionInstance: wasmFunction instanceof WebAssembly.Function,
-                wasmFunctionParameters: wasmFunctionType.parameters,
-                wasmFunctionResults: wasmFunctionType.results,
+                wasmFunction: typeof WebAssembly.Function,
                 tagType,
                 exceptionLength: WebAssembly.Exception.length,
                 exceptionOutOfRange: throwsName(() => exception.getArg(tag, 2)),
@@ -7180,7 +7174,7 @@ fn webassembly_runtime_exposes_type_reflection_surface() {
 
     assert_eq!(
         result,
-        r#"{"memoryTypeMinimum":2,"memoryTypeMaximum":4,"memoryBothBounds":"TypeError","memoryPlainReceiver":"TypeError","memorySpoofedReceiver":"TypeError","tableTypeMinimum":1,"tableTypeMaximum":3,"tableTypeElement":"funcref","tableBothBounds":"TypeError","tablePlainReceiver":"TypeError","tableSpoofedReceiver":"TypeError","globalTypeMutable":false,"globalTypeValue":"funcref","globalTypeKeys":["mutable","value"],"globalValueSetterName":"set value","globalValueSetterLength":1,"missingSetterValue":0,"globalConstructorOrder":"descriptor mutable|descriptor value|descriptor value toString|value valueOf()","wasmFunctionConstructorLength":2,"wasmFunctionCall":5,"wasmFunctionInstance":true,"wasmFunctionParameters":["i32"],"wasmFunctionResults":["i32"],"tagType":{"parameters":["i32","i64"]},"exceptionLength":2,"exceptionOutOfRange":"RangeError","exceptionValue":"9","namespaceInstanceName":"namespaceInstance","namespaceInstanceLength":1,"namespaceInstanceEnumerable":false,"namespaceInstanceWritable":true,"namespaceInstanceConfigurable":true,"namespaceInstancePlainObject":"TypeError","namespaceInstanceMissing":"TypeError"}"#
+        r#"{"memoryTypeMinimum":2,"memoryTypeMaximum":4,"memoryBothBounds":"TypeError","memoryPlainReceiver":"TypeError","memorySpoofedReceiver":"TypeError","tableTypeMinimum":1,"tableTypeMaximum":3,"tableTypeElement":"funcref","tableBothBounds":"TypeError","tablePlainReceiver":"TypeError","tableSpoofedReceiver":"TypeError","globalTypeMutable":false,"globalTypeValue":"funcref","globalTypeKeys":["mutable","value"],"globalValueSetterName":"set value","globalValueSetterLength":1,"missingSetterValue":0,"globalConstructorOrder":"descriptor mutable|descriptor value|descriptor value toString|value valueOf()","wasmFunction":"undefined","tagType":{"parameters":["i32","i64"]},"exceptionLength":2,"exceptionOutOfRange":"RangeError","exceptionValue":"9","namespaceInstanceName":"namespaceInstance","namespaceInstanceLength":1,"namespaceInstanceEnumerable":false,"namespaceInstanceWritable":true,"namespaceInstanceConfigurable":true,"namespaceInstancePlainObject":"TypeError","namespaceInstanceMissing":"TypeError"}"#
     );
 }
 #[test]
@@ -12999,7 +12993,7 @@ async fn navigator_service_worker_intercepts_element_resource_destinations_once(
                                     status: 200,
                                     response_body,
                                     ..
-                                } if response_body.diagnostic_text() == expected_body
+                                } if response_body.diagnostic_bytes().as_ref() == expected_body.as_bytes()
                             )
                 )
             }) {
@@ -13031,7 +13025,7 @@ async fn navigator_service_worker_intercepts_element_resource_destinations_once(
                                 && matches!(
                                     body.result(),
                                     crate::types::SubresourceBodyFinishedResult::Ready(response_body)
-                                        if response_body.diagnostic_text() == expected_body
+                                        if response_body.diagnostic_bytes().as_ref() == expected_body.as_bytes()
                                 )
                     )
                 })
@@ -13242,8 +13236,8 @@ async fn navigator_service_worker_intercepts_stylesheet_font_face_destination() 
                             response_body,
                             ..
                         } if final_url.as_str() == expected_font_url
-                            && response_body.diagnostic_text()
-                                == "stylesheet-font:font:/app/fonts/demo.woff2"
+                            && response_body.diagnostic_bytes().as_ref()
+                                == b"stylesheet-font:font:/app/fonts/demo.woff2"
                     )
             })
         });
@@ -23455,6 +23449,51 @@ fn window_open_lightweight_popup_location_assignment_uses_window_setter() {
     assert_eq!(
         result,
         "function|get location|function|set location|true|false|about:blank#assigned"
+    );
+}
+
+#[test]
+fn lightweight_popup_location_uses_its_exposed_dom_exception_constructor() {
+    let mut vm = new_storage_test_vm("https://example.com/");
+
+    let result = vm
+        .eval(
+            r##"
+            (() => {
+              const popup = open("about:blank");
+              const originalHref = popup.location.href;
+              const descriptor = Object.getOwnPropertyDescriptor(popup, "DOMException");
+              let thrown;
+              try {
+                popup.location.href = "https://example.com:notaport/common/blank.html";
+              } catch (error) {
+                thrown = [
+                  error.name,
+                  error.code,
+                  error.constructor === popup.DOMException,
+                  error instanceof popup.DOMException
+                ].join(":");
+              }
+              return [
+                typeof popup.DOMException,
+                descriptor.enumerable,
+                descriptor.configurable,
+                descriptor.writable,
+                thrown,
+                popup.location.href === originalHref
+              ].join("|");
+            })()
+            "##,
+        )
+        .expect("popup invalid Location URL probe should evaluate");
+
+    assert_eq!(
+        result,
+        "function|false|true|true|SyntaxError:12:true:true|true"
+    );
+    assert!(
+        vm.take_pending_location_navigation_with_seed().is_none(),
+        "invalid popup Location navigation must not escape to the opener"
     );
 }
 

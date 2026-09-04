@@ -1,4 +1,4 @@
-use crate::conn::CdpConnection;
+use crate::conn::{CdpConnection, CommandOwnerScope};
 use crate::domains::activity::{
     PreparedSubresourceContinueAction, ProtocolOutputPayloads, ProtocolOutputProjectionContext,
     ProtocolOutputSink, ProtocolOutputSlot,
@@ -55,13 +55,13 @@ impl NetworkPreparedOutputs {
     }
 
     pub(crate) fn backlog_projection_context<'a>(
-        session_id: Option<&'a str>,
+        owner: &CommandOwnerScope,
         frame_id: Option<&'a str>,
         base_timestamp: Option<f64>,
         contextual_subresource_request_id: Option<&'a str>,
         prepared_outputs: Option<&'a mut Self>,
     ) -> NetworkBacklogProjectionContext<'a> {
-        NetworkBacklogProjectionContext::new(session_id)
+        NetworkBacklogProjectionContext::for_owner(owner)
             .with_frame_id(frame_id)
             .with_base_timestamp(base_timestamp)
             .with_contextual_subresource_request_id(contextual_subresource_request_id)
@@ -81,7 +81,7 @@ impl NetworkPreparedOutputs {
 
     pub(crate) fn from_renderer_subresource_continue(
         conn: &mut CdpConnection,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         source_document: moli_core::RendererDocumentLifecycleIdentity,
         event: moli_core::page::PendingSubresourceContinueEvent,
     ) -> Self {
@@ -89,7 +89,7 @@ impl NetworkPreparedOutputs {
             pending_subresource_continue_actions:
                 prepare_subresource_continue_action_for_renderer_record(
                     conn,
-                    session_id,
+                    owner,
                     source_document,
                     event,
                 )
@@ -288,13 +288,13 @@ impl NetworkPreparedOutputSlot {
 
     pub(crate) fn backlog_projection_context<'a>(
         &'a mut self,
-        session_id: Option<&'a str>,
+        owner: &CommandOwnerScope,
         frame_id: Option<&'a str>,
         base_timestamp: Option<f64>,
         contextual_subresource_request_id: Option<&'a str>,
     ) -> NetworkBacklogProjectionContext<'a> {
         NetworkPreparedOutputs::backlog_projection_context(
-            session_id,
+            owner,
             frame_id,
             base_timestamp,
             contextual_subresource_request_id,
@@ -306,11 +306,11 @@ impl NetworkPreparedOutputSlot {
         &mut self,
         conn: &mut CdpConnection,
         out: &mut Vec<crate::conn::BackgroundProtocolEvent>,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
     ) {
         if let Some(actions) = self.take_pending_subresource_continue_actions() {
             flush_prepared_subresource_continue_actions_background_events_async(
-                conn, out, session_id, actions,
+                conn, out, owner, actions,
             )
             .await;
         }
@@ -320,7 +320,7 @@ impl NetworkPreparedOutputSlot {
         &mut self,
         conn: &mut CdpConnection,
         out: &mut Vec<crate::conn::BackgroundProtocolEvent>,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         frame_id: Option<&str>,
         base_timestamp: Option<f64>,
         contextual_subresource_request_id: Option<&str>,
@@ -329,7 +329,7 @@ impl NetworkPreparedOutputSlot {
             conn,
             out,
             self.backlog_projection_context(
-                session_id,
+                owner,
                 frame_id,
                 base_timestamp,
                 contextual_subresource_request_id,
@@ -341,12 +341,12 @@ impl NetworkPreparedOutputSlot {
         &mut self,
         conn: &mut CdpConnection,
         out: &mut Vec<crate::conn::BackgroundProtocolEvent>,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
     ) {
         super::emit_prepared_renderer_network_live_background_events(
             conn,
             out,
-            session_id,
+            owner,
             self.outputs.renderer_live_mut(),
         );
     }
@@ -368,13 +368,14 @@ impl NetworkOutputProjectionStep {
         context: &mut ProtocolOutputProjectionContext<'_>,
         prepared_outputs: Option<&mut ProtocolOutputPayloads>,
     ) {
+        let owner = context.owner().clone();
         match self {
             NetworkOutputProjectionStep::PendingSubresourceContinueEvents => {
                 if let Some(slot) = prepared_outputs.and_then(ProtocolOutputPayloads::network_mut) {
                     slot.emit_pending_subresource_continue_background_events(
                         conn,
                         context.command.protocol_events_mut(),
-                        context.session_id,
+                        &owner,
                     )
                     .await;
                 }
@@ -384,7 +385,7 @@ impl NetworkOutputProjectionStep {
                     slot.emit_renderer_live_background_events(
                         conn,
                         context.command.protocol_events_mut(),
-                        context.session_id,
+                        &owner,
                     );
                 }
             }
@@ -393,7 +394,7 @@ impl NetworkOutputProjectionStep {
                     slot.emit_backlog_activity_background_events(
                         conn,
                         context.command.protocol_events_mut(),
-                        context.session_id,
+                        &owner,
                         context.subresource_frame_id,
                         context.subresource_timestamp,
                         context.subresource_network_request_id,
@@ -406,12 +407,11 @@ impl NetworkOutputProjectionStep {
                     .and_then(NetworkPreparedOutputSlot::take_subresource_fetch_pauses)
                 {
                     let mut events = Vec::new();
-                    let network_session_ids =
-                        conn.network_event_session_ids_for_session_owner(context.session_id);
+                    let network_session_ids = conn.network_event_session_ids_for_owner(&owner);
                     fetch::emit_subresource_fetch_pause_outputs(
                         conn,
                         &mut events,
-                        context.session_id,
+                        &owner,
                         &network_session_ids,
                         pauses,
                     );
@@ -462,15 +462,16 @@ pub(in crate::domains) async fn project_subresource_fetch_interception_async(
         .await;
 }
 
-pub(in crate::domains) fn network_backlog_prepared_outputs(
+pub(in crate::domains) fn network_backlog_prepared_outputs_for_owner(
     conn: &mut CdpConnection,
-    session_id: Option<&str>,
+    owner: &crate::conn::CommandOwnerScope,
     preferred_request_id: Option<super::NetworkBacklogPreferredRequestId<'_>>,
 ) -> NetworkPreparedOutputs {
     let mut outputs = NetworkPreparedOutputs::default();
-    let primary_session_id = conn.runtime_session_owner_primary_session_id(session_id);
-    if let Some(backlog) = conn.network_backlog_prepared_delivery_for_session_owner(
-        session_id,
+    let session_id = owner.session_id();
+    let primary_session_id = conn.runtime_session_owner_primary_session_id_for_owner(owner);
+    if let Some(backlog) = conn.network_backlog_prepared_delivery_for_owner(
+        owner,
         session_id,
         primary_session_id.as_deref(),
         preferred_request_id,
@@ -487,7 +488,9 @@ pub(in crate::domains) fn network_backlog_prepared_outputs(
 
 #[cfg(test)]
 mod tests {
-    use crate::conn::{CommandDispatchContext, PendingSubresourceFetchOwnerKind};
+    use crate::conn::{
+        CommandDispatchContext, CommandOwnerScope, PendingSubresourceFetchOwnerKind,
+    };
     use axum::{
         Router,
         extract::ws::{Message, WebSocketUpgrade},
@@ -557,15 +560,16 @@ mod tests {
     #[test]
     fn network_prepared_outputs_build_backlog_projection_context() {
         let mut prepared = NetworkPreparedOutputs::default();
+        let owner = CommandOwnerScope::for_session("SID-1");
         let context = NetworkPreparedOutputs::backlog_projection_context(
-            Some("SID-1"),
+            &owner,
             Some("FRAME-1"),
             Some(11.0),
             Some("REQ-1"),
             Some(&mut prepared),
         );
 
-        assert_eq!(context.session_id, Some("SID-1"));
+        assert_eq!(context.session_id(), Some("SID-1"));
         assert_eq!(context.frame_id, Some("FRAME-1"));
         assert_eq!(context.base_timestamp, Some(11.0));
         assert!(
@@ -580,10 +584,10 @@ mod tests {
         let mut bc = BrowserContext::new("BID-1".into());
         bc.set_active_target_id("TID-1");
         bc.attach_active_session("SID-1");
-        bc.active_target
+        bc.active_page_target_mut()
             .runtime_slot
             .set_page_attachment_id_for_test(1);
-        conn.browser_context = Some(bc);
+        conn.install_browser_context_fixture_for_test(bc);
         let page_owner = conn
             .target_page_residence_identity_for_session(Some("SID-1"))
             .expect("test target should expose a Page residence identity");
@@ -602,8 +606,8 @@ mod tests {
             request_stage_chain: None,
         };
         assert!(
-            conn.register_in_flight_subresource_fetch_request_for_session_owner(
-                Some("SID-1"),
+            conn.register_in_flight_subresource_fetch_request_for_owner(
+                &crate::conn::CommandOwnerScope::for_session("SID-1"),
                 Some("fetch-req-1".to_owned()),
                 pending,
             ),
@@ -622,7 +626,7 @@ mod tests {
                 network_request_headers: None,
                 response_status: 200,
                 response_headers: vec![("content-type".to_owned(), "text/plain".to_owned())],
-                response_body: SubresourceResponseBody::from_text("prepared".to_owned()),
+                response_body: SubresourceResponseBody::from_bytes(b"prepared".to_vec()),
                 from_cache: false,
             });
         let action = crate::domains::activity::PreparedSubresourceContinueAction::capture_for_test(
@@ -637,15 +641,9 @@ mod tests {
                     action,
                 ]),
             ));
+        let owner = CommandOwnerScope::for_session("SID-1");
         let mut command_context = CommandDispatchContext::default();
-        let mut context = ProtocolOutputProjectionContext {
-            session_id: Some("SID-1"),
-            command: &mut command_context,
-            subresource_frame_id: None,
-            subresource_document_url: None,
-            subresource_timestamp: None,
-            subresource_network_request_id: None,
-        };
+        let mut context = ProtocolOutputProjectionContext::new(&owner, &mut command_context);
 
         super::NetworkOutputProjectionStep::PendingSubresourceContinueEvents
             .project_async(&mut conn, &mut context, Some(&mut prepared))
@@ -679,22 +677,20 @@ mod tests {
         let mut bc = BrowserContext::new("BID-collision".into());
         bc.set_active_target_id("TID-collision");
         bc.attach_active_session("SID-collision");
-        bc.active_target
+        bc.active_page_target_mut()
             .runtime_slot
             .set_page_attachment_id_for_test(1);
-        conn.browser_context = Some(bc);
+        conn.install_browser_context_fixture_for_test(bc);
 
         let old_owner = conn
             .target_page_residence_identity_for_session(Some("SID-collision"))
             .expect("old Page residence should exist");
         let reused_handle = SubresourceNetworkRequestHandle::new(9);
-        assert!(
-            conn.register_in_flight_subresource_fetch_request_for_session_owner(
-                Some("SID-collision"),
-                Some("FETCH-old".to_owned()),
-                pending_request_for_page(old_owner, 7, "NETWORK-old", reused_handle),
-            )
-        );
+        assert!(conn.register_in_flight_subresource_fetch_request_for_owner(
+            &crate::conn::CommandOwnerScope::for_session("SID-collision"),
+            Some("FETCH-old".to_owned()),
+            pending_request_for_page(old_owner, 7, "NETWORK-old", reused_handle),
+        ));
         let event =
             PendingSubresourceContinueEvent::ResponsePaused(PendingSubresourceResponseInfo {
                 internal_id: 7,
@@ -708,7 +704,7 @@ mod tests {
                 network_request_headers: None,
                 response_status: 200,
                 response_headers: Vec::new(),
-                response_body: SubresourceResponseBody::from_text("old".to_owned()),
+                response_body: SubresourceResponseBody::from_bytes(b"old".to_vec()),
                 from_cache: false,
             });
         let old_action =
@@ -725,19 +721,18 @@ mod tests {
         let replacement_owner = conn
             .target_page_residence_identity_for_session(Some("SID-collision"))
             .expect("replacement Page residence should exist");
-        assert!(
-            conn.register_in_flight_subresource_fetch_request_for_session_owner(
-                Some("SID-collision"),
-                Some("FETCH-new".to_owned()),
-                pending_request_for_page(replacement_owner, 7, "NETWORK-new", reused_handle),
-            )
-        );
+        assert!(conn.register_in_flight_subresource_fetch_request_for_owner(
+            &crate::conn::CommandOwnerScope::for_session("SID-collision"),
+            Some("FETCH-new".to_owned()),
+            pending_request_for_page(replacement_owner, 7, "NETWORK-new", reused_handle),
+        ));
 
         let mut out = Vec::new();
+        let command_owner = CommandOwnerScope::for_session("SID-collision");
         crate::domains::activity::flush_prepared_subresource_continue_actions_background_events_async(
             &mut conn,
             &mut out,
-            Some("SID-collision"),
+            &command_owner,
             vec![old_action],
         )
         .await;
@@ -747,8 +742,8 @@ mod tests {
             "stale continuation must not project an event for the replacement request"
         );
         assert_eq!(
-            conn.in_flight_subresource_fetch_request_id_for_session_owner(
-                Some("SID-collision"),
+            conn.in_flight_subresource_fetch_request_id_for_owner(
+                &crate::conn::CommandOwnerScope::for_session("SID-collision"),
                 7,
             )
             .as_deref(),
@@ -763,11 +758,11 @@ mod tests {
         let mut bc = BrowserContext::new("BID-1".into());
         bc.set_active_target_id("TID-1");
         bc.attach_active_session("SID-1");
-        assert!(bc.assign_auxiliary_session_to_target("TID-1", "FETCH-SID".to_owned()));
-        bc.active_target
+        assert!(bc.assign_attached_session_to_target("TID-1", "FETCH-SID".to_owned()));
+        bc.active_page_target_mut()
             .runtime_slot
             .set_page_attachment_id_for_test(1);
-        conn.browser_context = Some(bc);
+        conn.install_browser_context_fixture_for_test(bc);
         assert!(conn.enable_network_listener_for_session_owner(Some("FETCH-SID")));
         let page_owner = conn
             .target_page_residence_identity_for_session(Some("SID-1"))
@@ -776,15 +771,9 @@ mod tests {
             ProtocolOutputPayloads::from_slot(super::NetworkPreparedOutputSlot::from_outputs(
                 NetworkPreparedOutputs::from_subresource_fetch_interception_for_test(page_owner),
             ));
+        let owner = CommandOwnerScope::for_session("SID-1");
         let mut command_context = CommandDispatchContext::default();
-        let mut context = ProtocolOutputProjectionContext {
-            session_id: Some("SID-1"),
-            command: &mut command_context,
-            subresource_frame_id: None,
-            subresource_document_url: None,
-            subresource_timestamp: None,
-            subresource_network_request_id: None,
-        };
+        let mut context = ProtocolOutputProjectionContext::new(&owner, &mut command_context);
 
         super::NetworkOutputProjectionStep::SubresourceFetchInterception
             .project_async(&mut conn, &mut context, Some(&mut prepared))
@@ -815,7 +804,7 @@ mod tests {
             conn.browser_context
                 .as_ref()
                 .unwrap()
-                .active_target
+                .active_page_target()
                 .fetch_owner
                 .has_pending_subresource_fetch_for_test("FETCH-1"),
             "prepared emission should still register the paused request on the owner fetch state"
@@ -828,11 +817,11 @@ mod tests {
         let mut bc = BrowserContext::new("BID-1".into());
         bc.set_active_target_id("TID-1");
         bc.attach_active_session("SID-1");
-        assert!(bc.assign_auxiliary_session_to_target("TID-1", "FETCH-SID".to_owned()));
-        bc.active_target
+        assert!(bc.assign_attached_session_to_target("TID-1", "FETCH-SID".to_owned()));
+        bc.active_page_target_mut()
             .runtime_slot
             .set_page_attachment_id_for_test(1);
-        conn.browser_context = Some(bc);
+        conn.install_browser_context_fixture_for_test(bc);
         let page_owner = conn
             .target_page_residence_identity_for_session(Some("SID-1"))
             .expect("test target should expose a Page residence identity");
@@ -840,15 +829,9 @@ mod tests {
             ProtocolOutputPayloads::from_slot(super::NetworkPreparedOutputSlot::from_outputs(
                 NetworkPreparedOutputs::from_subresource_fetch_interception_for_test(page_owner),
             ));
+        let owner = CommandOwnerScope::for_session("SID-1");
         let mut command_context = CommandDispatchContext::default();
-        let mut context = ProtocolOutputProjectionContext {
-            session_id: Some("SID-1"),
-            command: &mut command_context,
-            subresource_frame_id: None,
-            subresource_document_url: None,
-            subresource_timestamp: None,
-            subresource_network_request_id: None,
-        };
+        let mut context = ProtocolOutputProjectionContext::new(&owner, &mut command_context);
 
         super::NetworkOutputProjectionStep::SubresourceFetchInterception
             .project_async(&mut conn, &mut context, Some(&mut prepared))
@@ -868,8 +851,9 @@ mod tests {
     #[test]
     fn network_backlog_prepared_outputs_are_absent_without_loaded_observed_page() {
         let mut conn = crate::conn::CdpConnection::default();
+        let owner = CommandOwnerScope::capture(&conn, None);
         assert_eq!(
-            super::network_backlog_prepared_outputs(&mut conn, None, None).outputs(),
+            super::network_backlog_prepared_outputs_for_owner(&mut conn, &owner, None,).outputs(),
             &[]
         );
     }
@@ -925,7 +909,7 @@ mod tests {
             Some("SID-background".to_owned()),
             page_url.clone(),
         ));
-        ctx.conn.browser_context = Some(bc);
+        ctx.conn.install_browser_context_fixture_for_test(bc);
 
         for (id, session_id) in [(1, "SID-active"), (2, "SID-background")] {
             ctx.process_async(serde_json::json!({
@@ -1013,7 +997,7 @@ mod tests {
         let mut bc = BrowserContext::new("BID-1".into());
         bc.set_active_target_id("TID-1");
         bc.attach_active_session("SID-1");
-        ctx.conn.browser_context = Some(bc);
+        ctx.conn.install_browser_context_fixture_for_test(bc);
         ctx.install_navigation_fixture_for_session_owner(&page_url, Some("SID-1"))
             .await;
         ctx.process_async(serde_json::json!({

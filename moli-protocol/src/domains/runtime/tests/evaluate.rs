@@ -331,6 +331,7 @@ async fn loaded_page_runtime_enable_projection_waits_for_v8_success() {
             .browser_context
             .as_ref()
             .expect("browser context should exist")
+            .active_page_target()
             .devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
             .runtime_session_state
             .runtime_frontend_enabled,
@@ -353,6 +354,7 @@ async fn loaded_page_runtime_enable_projection_waits_for_v8_success() {
             .browser_context
             .as_ref()
             .expect("browser context should exist")
+            .active_page_target()
             .devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
             .runtime_session_state
             .runtime_frontend_enabled,
@@ -549,11 +551,17 @@ async fn runtime_agent_configuration_is_restored_on_replacement_page_isolate() {
         .browser_context
         .as_ref()
         .expect("browser context should exist");
+    let v8_state_before_navigation = browser_context.active_page_target().devtools_sessions
+        [moli_page_types::DevToolsSessionKey::Primary]
+        .inspector_session_state
+        .v8_state
+        .clone()
+        .expect("successful Runtime agent commands must persist an opaque V8 state cookie");
     assert!(
-        browser_context.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
-            .inspector_session_state
-            .v8_state
-            .is_some(),
+        v8_state_before_navigation
+            .as_bytes()
+            .windows(b"customObjectFormatterEnabled".len())
+            .any(|window| window == b"customObjectFormatterEnabled"),
         "successful Runtime agent commands must persist an opaque V8 state cookie"
     );
 
@@ -568,11 +576,28 @@ async fn runtime_agent_configuration_is_restored_on_replacement_page_isolate() {
         navigate["result"]["frameId"].is_string(),
         "navigation should rebuild the Inspector backend with Runtime configuration: {navigate:?}"
     );
+    let v8_state_after_navigation = ctx
+        .conn
+        .browser_context
+        .as_ref()
+        .expect("browser context should exist")
+        .active_page_target()
+        .devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+        .inspector_session_state
+        .v8_state
+        .as_ref()
+        .expect("replacement Inspector session should publish its restored state");
+    assert_eq!(
+        v8_state_after_navigation.as_bytes(),
+        v8_state_before_navigation.as_bytes(),
+        "replacement V8 session should preserve the opaque Runtime configuration cookie"
+    );
 
     ctx.process_async(json!({
         "id": 11_022,
         "method": "Runtime.evaluate",
         "params": {
+            "generatePreview": true,
             "expression": r#"(() => {
   globalThis.devtoolsFormatters = [{
     header(value) {
@@ -615,13 +640,15 @@ async fn opaque_reattach_state_wins_over_conflicting_runtime_listener_configurat
         .as_mut()
         .expect("browser context should exist");
     assert!(
-        browser_context.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+        browser_context.active_page_target().devtools_sessions
+            [moli_page_types::DevToolsSessionKey::Primary]
             .inspector_session_state
             .v8_state
             .is_some(),
         "successful Runtime.disable must persist the disabled V8 agent cookie"
     );
-    browser_context.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+    browser_context.active_page_target_mut().devtools_sessions
+        [moli_page_types::DevToolsSessionKey::Primary]
         .runtime_session_state
         .runtime_frontend_enabled = true;
 
@@ -1696,6 +1723,7 @@ async fn enable_and_disable_update_browser_context_runtime_flag() {
             .browser_context
             .as_ref()
             .expect("browser context should exist")
+            .active_page_target()
             .devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
             .runtime_session_state
             .runtime_frontend_enabled
@@ -1709,6 +1737,7 @@ async fn enable_and_disable_update_browser_context_runtime_flag() {
             .browser_context
             .as_ref()
             .expect("browser context should exist")
+            .active_page_target()
             .devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
             .runtime_session_state
             .runtime_frontend_enabled
@@ -1722,6 +1751,7 @@ async fn enable_and_disable_update_browser_context_runtime_flag() {
             .browser_context
             .as_ref()
             .expect("browser context should exist")
+            .active_page_target()
             .devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
             .runtime_session_state
             .runtime_frontend_enabled
@@ -1787,6 +1817,7 @@ async fn evaluate_started_before_pending_navigation_can_complete() {
     browser_context.set_active_target_id("TID-1");
     browser_context.attach_active_session("SID-1");
     browser_context.set_target_url("data:text/html,previous".to_owned());
+    ctx.conn.commit_declared_session_fixtures_for_test();
     ctx.sent.clear();
 
     let step = ctx.conn.start_command_dispatch(
@@ -1819,7 +1850,7 @@ async fn evaluate_started_before_pending_navigation_can_complete() {
 }
 
 #[tokio::test]
-async fn evaluate_rejects_auxiliary_session_while_main_document_navigation_is_pending() {
+async fn evaluate_rejects_attached_session_while_main_document_navigation_is_pending() {
     let mut ctx = TestContext::new();
     with_loaded_document_async(
         &mut ctx,
@@ -1834,24 +1865,25 @@ async fn evaluate_rejects_auxiliary_session_while_main_document_navigation_is_pe
     browser_context.set_active_target_id("TID-1");
     browser_context.attach_active_session("SID-1");
     assert!(
-        browser_context.assign_auxiliary_session_to_target("TID-1", "SID-aux".to_owned()),
-        "auxiliary session should attach to the active target"
+        browser_context.assign_attached_session_to_target("TID-1", "SID-attached".to_owned()),
+        "attached session should attach to the active target"
     );
     browser_context.set_target_url("data:text/html,previous".to_owned());
     browser_context
         .start_document_navigation_for_active_target("PENDING-LOADER".to_owned())
         .expect("active navigation should start");
+    ctx.conn.commit_declared_session_fixtures_for_test();
     assert!(
         ctx.conn
-            .has_pending_document_navigation_for_session_owner(Some("SID-aux")),
-        "auxiliary session should inherit the active target document gate"
+            .has_pending_document_navigation_for_session_owner(Some("SID-attached")),
+        "attached session should inherit the active target document gate"
     );
     ctx.sent.clear();
 
     ctx.process_async(json!({
         "id": 4,
         "method": "Runtime.evaluate",
-        "sessionId": "SID-aux",
+        "sessionId": "SID-attached",
         "params": {
             "expression": "document.title",
             "returnByValue": true
@@ -1903,11 +1935,13 @@ async fn document_navigation_gate_is_scoped_to_background_target_owner() {
     let mut browser_context = BrowserContext::new("BID-1".to_owned());
     browser_context.set_active_target_id("TID-active");
     browser_context.attach_active_session("SID-active");
-    browser_context.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+    browser_context.active_page_target_mut().devtools_sessions
+        [moli_page_types::DevToolsSessionKey::Primary]
         .runtime_session_state
         .runtime_frontend_enabled = true;
     browser_context.insert_page_target_host(background_target);
-    ctx.conn.browser_context = Some(browser_context);
+    ctx.conn
+        .install_browser_context_fixture_for_test(browser_context);
     ctx.install_navigation_fixture_for_session_owner(
         "data:text/html,<html><title>active</title></html>",
         Some("SID-active"),
@@ -1919,11 +1953,12 @@ async fn document_navigation_gate_is_scoped_to_background_target_owner() {
     )
     .await;
     let browser_context = ctx.conn.browser_context.as_mut().expect("browser context");
-    browser_context.mutate_parked_page_session_state("TID-background", |state| {
-        state.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
-            .runtime_session_state
-            .runtime_frontend_enabled = true;
-    });
+    browser_context
+        .background_target_mut("TID-background")
+        .expect("background target must exist")
+        .devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+        .runtime_session_state
+        .runtime_frontend_enabled = true;
     browser_context
         .start_document_navigation_for_target(
             "TID-background",
@@ -2297,7 +2332,9 @@ async fn page_navigate_network_failure_commits_error_document() {
         .expect("loaded renderer Page residence");
     let before_renderer_attachment = ctx
         .conn
-        .current_renderer_agent_attachment_id_for_session_owner(Some("SID-1"))
+        .current_renderer_agent_attachment_id_for_owner(
+            &crate::conn::CommandOwnerScope::for_session("SID-1"),
+        )
         .expect("loaded renderer attachment");
     ctx.sent.clear();
 
@@ -2414,14 +2451,16 @@ async fn page_navigate_network_failure_commits_error_document() {
     );
     let error_document_loader_id = ctx
         .conn
-        .target_session_owner_frame_tree_loader_id(Some("SID-1"))
+        .target_session_owner_frame_tree_loader_id_for_owner(
+            &crate::conn::CommandOwnerScope::for_session("SID-1"),
+        )
         .expect("error Document loader id");
     let stale_request_id = "REQ-before-network-error";
     let stale_body_completion = BackgroundNavigationCompletion::main_document_body(
         old_document_token.clone(),
         crate::conn::NavigationDispatchState {
             navigate_id: None,
-            navigate_session_id: Some("SID-1".to_owned()),
+            owner: crate::conn::CommandOwnerScope::for_session("SID-1"),
             result_projection: crate::conn::NavigationResultProjection::Cdp(json!({})),
             frame_id: "TID-1".to_owned(),
             session_id: Some("SID-1".to_owned()),
@@ -2440,7 +2479,6 @@ async fn page_navigate_network_failure_commits_error_document() {
                 "InsecureScheme".to_owned(),
             ),
         },
-        None,
         Ok(crate::conn::CapturedBody::from_string(
             "stale body".to_owned(),
         )),
@@ -2459,7 +2497,9 @@ async fn page_navigate_network_failure_commits_error_document() {
     assert!(stale_completion_scheduler_events.is_empty());
     assert_eq!(
         ctx.conn
-            .target_session_owner_frame_tree_loader_id(Some("SID-1"))
+            .target_session_owner_frame_tree_loader_id_for_owner(
+                &crate::conn::CommandOwnerScope::for_session("SID-1")
+            )
             .as_deref(),
         Some(error_document_loader_id.as_str()),
         "stale body completion must not replace the error Document loader"
@@ -2495,8 +2535,9 @@ async fn page_navigate_network_failure_commits_error_document() {
         "the error Document must not reuse the retired renderer Page"
     );
     assert_ne!(
-        ctx.conn
-            .current_renderer_agent_attachment_id_for_session_owner(Some("SID-1")),
+        ctx.conn.current_renderer_agent_attachment_id_for_owner(
+            &crate::conn::CommandOwnerScope::for_session("SID-1"),
+        ),
         Some(before_renderer_attachment),
         "the error Document must own a replacement realm/Inspector attachment"
     );
@@ -2804,7 +2845,7 @@ async fn evaluate_await_promise_scheduler_routed_reply_clears_pending_await_regi
 }
 
 #[tokio::test]
-async fn runtime_await_promise_pending_registers_renderer_response_receiver() {
+async fn runtime_await_promise_releases_dispatch_before_session_response() {
     let mut ctx = TestContext::new();
     with_loaded_document_async(&mut ctx, "<html><title>ok</title><body></body></html>").await;
 
@@ -2834,50 +2875,45 @@ async fn runtime_await_promise_pending_registers_renderer_response_receiver() {
         .conn
         .try_start_pending_command_dispatch(&raw)
         .expect("Runtime.awaitPromise should start as a pending command");
-    let (mut pending, scheduler_events) = match ctx
-        .conn
-        .complete_pending_command_dispatch(pending.wait().await)
+    let completed = tokio::time::timeout(std::time::Duration::from_secs(1), pending.wait())
         .await
-    {
-        CdpCommandTaskStep::Pending(pending) => (*pending, ctx.conn.take_scheduler_events()),
-        CdpCommandTaskStep::Complete(outcome) => {
-            panic!(
-                "never-settling Runtime.awaitPromise should stay pending after initial inspector dispatch: {:?}",
-                outcome.into_parts().0
-            );
-        }
+        .expect("initial Page Inspector dispatch must not wait for Promise settlement");
+    let CdpCommandTaskStep::Complete(outcome) =
+        ctx.conn.complete_pending_command_dispatch(completed).await
+    else {
+        panic!("a Page session response must not enter the AdapterReply deferred-reply lane");
     };
+    drop(outcome);
     assert!(
-        scheduler_events.is_empty(),
-        "pending Runtime.awaitPromise must wait on its inspector response receiver, not scheduler follow-up work: {scheduler_events:?}"
+        ctx.conn.take_scheduler_events().is_empty(),
+        "an unresolved session response must not manufacture scheduler follow-up work"
     );
 
     assert!(
-        pending.waits_for_scheduler_deferred_inspector_reply(),
-        "Runtime.awaitPromise should enter scheduler deferred-reply state"
+        ctx.conn
+            .has_pending_inspector_awaits_for_session_owner(None),
+        "the unresolved await must remain registered to its exact Page session"
     );
     assert!(
         ctx.conn
-            .has_pending_inspector_awaits_for_session_owner(None),
-        "scheduler-deferred Runtime.awaitPromise should remain visible as pending command-owned work"
+            .has_unclaimed_pending_inspector_awaits_for_session_owner(None),
+        "the session output path must leave the await under renderer ownership"
     );
     assert!(
         !ctx.conn
-            .has_unclaimed_pending_inspector_awaits_for_session_owner(None),
-        "scheduler-deferred Runtime.awaitPromise should claim the pending await out of the document registry"
-    );
-    assert!(
-        ctx.conn
             .has_claimed_pending_inspector_awaits_for_session_owner(None),
-        "scheduler-deferred Runtime.awaitPromise should be tracked by the command-owned await index"
+        "the AdapterReply claimed-await index must remain unused"
     );
-    assert!(
-        pending
-            .take_scheduler_deferred_inspector_reply_receiver()
-            .is_some(),
-        "pending Runtime.awaitPromise should own the renderer response receiver"
+
+    ctx.process_async(json!({
+        "id": 3_024,
+        "method": "Page.close"
+    }))
+    .await;
+    assert_eq!(
+        take_response_by_id(&mut ctx, 3_023)["error"]["message"],
+        json!("Page closed")
     );
-    pending.forget_scheduler_deferred_inspector_reply(&mut ctx.conn);
 }
 
 #[tokio::test]
@@ -6620,7 +6656,7 @@ async fn registered_named_world_object_handles_remain_callable_after_navigation(
         .expect("browser context should exist");
     bc.set_active_target_id("TID-1");
     bc.attach_active_session("SID-1");
-    bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+    bc.active_page_target_mut().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
         .runtime_session_state
         .runtime_frontend_enabled = true;
 
@@ -6710,7 +6746,8 @@ async fn registered_named_world_object_handles_remain_callable_after_navigation(
     let mut other_context = crate::conn::BrowserContext::new("BID-2".into());
     other_context.set_active_target_id("TID-2");
     other_context.attach_active_session("SID-2");
-    ctx.conn.inactive_browser_contexts.push(other_context);
+    ctx.conn
+        .push_inactive_browser_context_fixture_for_test(other_context);
     assert!(
         ctx.conn.activate_browser_context_by_id_async("BID-2").await,
         "test setup should switch the active context away from the pending Runtime.callFunctionOn owner"
@@ -6762,7 +6799,8 @@ async fn call_function_on_rejects_object_id_known_to_different_target_owner() {
     let mut other_context = crate::conn::BrowserContext::new("BID-2".into());
     other_context.set_active_target_id("TID-2");
     other_context.attach_active_session("SID-2");
-    ctx.conn.inactive_browser_contexts.push(other_context);
+    ctx.conn
+        .push_inactive_browser_context_fixture_for_test(other_context);
 
     ctx.process_async(json!({
         "id": 513,
@@ -6948,7 +6986,8 @@ async fn call_function_on_rejects_dom_resolve_node_object_id_from_different_targ
     let mut other_context = crate::conn::BrowserContext::new("BID-2".into());
     other_context.set_active_target_id("TID-2");
     other_context.attach_active_session("SID-2");
-    ctx.conn.inactive_browser_contexts.push(other_context);
+    ctx.conn
+        .push_inactive_browser_context_fixture_for_test(other_context);
 
     ctx.process_async(json!({
         "id": 518,
@@ -7197,7 +7236,7 @@ async fn release_object_group_drops_inherited_get_properties_and_call_function_h
     );
 }
 #[tokio::test]
-async fn background_runtime_evaluate_emits_runtime_observable_from_background_owner_without_promotion()
+async fn background_runtime_evaluate_emits_runtime_observable_from_background_owner_without_activation()
  {
     let mut ctx = TestContext::new();
     with_loaded_runtime_frontend_enabled_background_target_async(
@@ -7252,12 +7291,12 @@ async fn background_runtime_evaluate_emits_runtime_observable_from_background_ow
             .as_ref()
             .and_then(|browser_context| browser_context.active_target_id()),
         Some("TID-active"),
-        "background Runtime.evaluate observable drain should not promote the target"
+        "background Runtime.evaluate observable drain should not activate the target"
     );
 }
 
 #[tokio::test]
-async fn call_function_on_loaded_background_owner_without_promotion() {
+async fn call_function_on_loaded_background_owner_without_activation() {
     let mut ctx = TestContext::new();
     with_loaded_runtime_frontend_enabled_background_target_async(
         &mut ctx,
@@ -7318,7 +7357,7 @@ async fn call_function_on_loaded_background_owner_without_promotion() {
             .as_ref()
             .and_then(|browser_context| browser_context.active_target_id()),
         Some("TID-active"),
-        "background Runtime.callFunctionOn should not promote the target"
+        "background Runtime.callFunctionOn should not activate the target"
     );
 
     ctx.process_async(json!({
@@ -8059,7 +8098,9 @@ fn replay_policy_command_rotates_lease_and_completes_on_replacement_attachment()
         .await;
         let old_attachment = ctx
             .conn
-            .current_renderer_agent_attachment_id_for_session_owner(Some("SID-1"))
+            .current_renderer_agent_attachment_id_for_owner(
+                &crate::conn::CommandOwnerScope::for_session("SID-1"),
+            )
             .expect("old Page attachment");
         let frontend_id = 9_021;
         let payload = json!({
@@ -8082,7 +8123,7 @@ fn replay_policy_command_rotates_lease_and_completes_on_replacement_attachment()
             .expect("register replay command");
         let (old_correlation, old_sender, response_receiver) = prepared.into_parts();
         let response_receiver = response_receiver
-            .expect("a synthesized CommandReply call must allocate a response receiver");
+            .expect("a synthesized AdapterReply call must allocate a response receiver");
 
         ctx.process_async(json!({
             "id": 9_022,
@@ -8096,7 +8137,9 @@ fn replay_policy_command_rotates_lease_and_completes_on_replacement_attachment()
 
         let new_attachment = ctx
             .conn
-            .current_renderer_agent_attachment_id_for_session_owner(Some("SID-1"))
+            .current_renderer_agent_attachment_id_for_owner(
+                &crate::conn::CommandOwnerScope::for_session("SID-1"),
+            )
             .expect("replacement Page attachment");
         assert_ne!(new_attachment, old_attachment);
         assert!(

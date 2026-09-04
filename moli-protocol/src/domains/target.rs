@@ -1,7 +1,8 @@
 use serde::Deserialize;
 
 use crate::conn::{
-    BackgroundProtocolEvent, BrowserContext, CdpConnection, Cmd, TargetHandlerAccessMode,
+    BackgroundProtocolEvent, BrowserContext, CdpConnection, Cmd, CommandOwnerScope,
+    TargetAttachSessionCommit, TargetHandlerAccessMode,
 };
 use crate::devtools_runtime::{
     DevToolsActivateTargetCommand, DevToolsCloseTargetCommand, DevToolsCommand,
@@ -25,6 +26,10 @@ mod info;
 mod popup;
 #[cfg(test)]
 mod protocol_neutral_tests;
+mod session_disposal;
+pub(crate) use session_disposal::{
+    dispose_closed_session_domains_async, dispose_uncommitted_session_async,
+};
 #[cfg(test)]
 mod tests;
 mod worker_target;
@@ -34,17 +39,16 @@ pub(crate) use popup::{
     PopupTargetCreation, PopupTargetOpenerIdentity, complete_popup_target_activation_action_async,
     complete_popup_target_navigation_owner_action_async,
     create_popup_target_from_renderer_output_background_events_async,
-    emit_target_info_changed_for_session_owner_background_event,
+    emit_target_info_changed_for_owner_background_event,
     schedule_initial_document_target_url_navigation_after_debugger_barrier_release_for_target,
     schedule_initial_document_target_url_navigation_after_debugger_resume,
 };
-pub(crate) fn popup_activation_creates_new_target(
+pub(crate) fn popup_activation_creates_new_target_for_owner(
     conn: &CdpConnection,
-    owner_session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     target_name: &str,
 ) -> bool {
-    if let Some((browser_context_id, _)) = conn.target_owner_identity_for_session(owner_session_id)
-    {
+    if let Some((browser_context_id, _)) = conn.target_owner_identity_for_owner(owner) {
         return conn
             .browser_context_by_id(&browser_context_id)
             .is_none_or(|browser_context| {
@@ -178,92 +182,12 @@ pub(in crate::domains) fn set_dedicated_worker_pause_on_start_owner(
     sync_dedicated_worker_pause_on_start_for_devtools(conn);
 }
 
-pub(in crate::domains::target) async fn clear_detached_target_fetch_state_background_events_async(
-    conn: &mut CdpConnection,
-    out: &mut Vec<BackgroundProtocolEvent>,
-    session_id: &str,
-) {
-    clear_detached_target_owner_fetch_state_background_events_async(conn, out, Some(session_id))
-        .await;
-}
-
-async fn clear_detached_target_owner_fetch_state_background_events_async(
-    conn: &mut CdpConnection,
-    out: &mut Vec<BackgroundProtocolEvent>,
-    session_id: Option<&str>,
-) {
-    let Some((pending_fetch_state, pending_page_command)) =
-        (match conn.start_disable_fetch_for_session_owner(session_id) {
-            Ok(disable_state) => disable_state,
-            Err(error) => {
-                tracing::warn!(
-                    ?session_id,
-                    error,
-                    "failed to disable Fetch interception while detaching target owner"
-                );
-                return;
-            }
-        })
-    else {
-        return;
-    };
-
-    if let Some(pending_page_command) = pending_page_command {
-        match pending_page_command.wait().await {
-            Ok(completion) => match conn.loaded_page_mut_for_protocol_access(session_id) {
-                Ok(page) => {
-                    if let Err(error) = page.finish_set_fetch_subresource_interception(completion) {
-                        tracing::warn!(
-                            ?session_id,
-                            %error,
-                            "failed to finish Fetch interception disable while detaching target owner"
-                        );
-                    }
-                }
-                Err(message) if message == "NoDocumentLoaded" => {}
-                Err(message) => {
-                    tracing::warn!(
-                        ?session_id,
-                        message,
-                        "failed to find page while detaching target owner Fetch state"
-                    );
-                }
-            },
-            Err(error) => {
-                tracing::warn!(
-                    ?session_id,
-                    %error,
-                    "renderer failed Fetch interception disable while detaching target owner"
-                );
-            }
-        }
-    }
-
-    let (
-        pending_navigations,
-        pending_auth_navigations,
-        pending_response_navigations,
-        pending_subresource_fetches,
-        pending_subresource_auths,
-        pending_subresource_responses,
-    ) = pending_fetch_state;
-    // Target-owner teardown has no command response to fence. The concrete
-    // renderer publication remains ordered on its own stream and will reach
-    // protocol ingress independently.
-    let _ = page::fail_pending_fetch_state_background_events_async(
-        conn,
-        out,
-        session_id,
-        "Target detached",
-        "Target detached",
-        pending_navigations,
-        pending_auth_navigations,
-        pending_response_navigations,
-        pending_subresource_fetches,
-        pending_subresource_auths,
-        pending_subresource_responses,
-    )
-    .await;
+/// Disables Target-domain policy owned by one DevTools session.
+pub(in crate::domains) fn dispose_session_handler(conn: &mut CdpConnection, session_id: &str) {
+    conn.clear_auto_attach_owner(Some(session_id));
+    conn.clear_target_discovery_for_owner(Some(session_id));
+    set_service_worker_pause_on_start_owner(conn, Some(session_id), false);
+    set_dedicated_worker_pause_on_start_owner(conn, Some(session_id), false);
 }
 
 impl CdpConnection {
@@ -280,12 +204,12 @@ impl CdpConnection {
             None,
             "Inspector detached",
         );
-        clear_detached_target_owner_fetch_state_background_events_async(
-            self,
-            side_effects.background_events_mut(),
-            None,
-        )
-        .await;
+        if let Err(error) =
+            super::fetch::dispose_owner_async(self, side_effects.background_events_mut(), None)
+                .await
+        {
+            tracing::warn!(%error, "failed to dispose root Fetch handler");
+        }
         let _ = self
             .detach_runtime_inspector_session_for_session_owner_async(None)
             .await;
@@ -308,7 +232,7 @@ impl CdpConnection {
 
 enum PendingTargetCommandKind {
     AttachToTarget {
-        attached_session_id: String,
+        prepared_session: TargetAttachSessionCommit,
         target_info: DevToolsTargetInfo,
         initial_document: Option<Box<crate::conn::PendingInitialDocumentPageBuild>>,
     },
@@ -318,12 +242,10 @@ enum PendingTargetCommandKind {
     SetAutoAttach {
         auto_attach: bool,
         owner_session_id: Option<String>,
-        legacy_disable_all: bool,
     },
     CreateTarget {
         response_plan: CommandOutputPlan,
         creation_commit: creation::TargetCreationCommit,
-        initial_document_route: Option<crate::conn::CdpSessionRoute>,
         initial_document: Option<Box<crate::conn::PendingInitialDocumentPageBuild>>,
     },
     DetachFromTarget {
@@ -344,7 +266,7 @@ enum PendingTargetCommandKind {
 
 enum CompletedTargetCommandKind {
     AttachToTarget {
-        attached_session_id: String,
+        prepared_session: TargetAttachSessionCommit,
         target_info: DevToolsTargetInfo,
         initial_document: Option<
             Result<
@@ -359,12 +281,10 @@ enum CompletedTargetCommandKind {
     SetAutoAttach {
         auto_attach: bool,
         owner_session_id: Option<String>,
-        legacy_disable_all: bool,
     },
     CreateTarget {
         response_plan: CommandOutputPlan,
         creation_commit: creation::TargetCreationCommit,
-        initial_document_route: Option<crate::conn::CdpSessionRoute>,
         initial_document: Option<
             Result<
                 Box<crate::conn::CompletedInitialDocumentPageBuild>,
@@ -392,11 +312,11 @@ impl PendingTargetCommandDispatch {
     pub(crate) async fn wait(self) -> CompletedTargetCommandDispatch {
         let kind = match *self.kind {
             PendingTargetCommandKind::AttachToTarget {
-                attached_session_id,
+                prepared_session,
                 target_info,
                 initial_document,
             } => CompletedTargetCommandKind::AttachToTarget {
-                attached_session_id,
+                prepared_session,
                 target_info,
                 initial_document: match initial_document {
                     Some(pending) => Some(pending.wait().await.map(Box::new)),
@@ -409,21 +329,17 @@ impl PendingTargetCommandDispatch {
             PendingTargetCommandKind::SetAutoAttach {
                 auto_attach,
                 owner_session_id,
-                legacy_disable_all,
             } => CompletedTargetCommandKind::SetAutoAttach {
                 auto_attach,
                 owner_session_id,
-                legacy_disable_all,
             },
             PendingTargetCommandKind::CreateTarget {
                 response_plan,
                 creation_commit,
-                initial_document_route,
                 initial_document,
             } => CompletedTargetCommandKind::CreateTarget {
                 response_plan,
                 creation_commit,
-                initial_document_route,
                 initial_document: match initial_document {
                     Some(pending) => Some(pending.wait().await.map(Box::new)),
                     None => None,
@@ -770,15 +686,14 @@ pub(crate) async fn complete_pending_target_command(
 ) -> TargetCommandTaskStep {
     match completed.kind {
         CompletedTargetCommandKind::AttachToTarget {
-            attached_session_id,
+            prepared_session,
             target_info,
             initial_document,
         } => {
             return TargetCommandTaskStep::Complete(
                 attachment::complete_attach_to_target_command_async(
                     conn,
-                    completed.session_id.as_deref(),
-                    attached_session_id,
+                    prepared_session,
                     target_info,
                     initial_document,
                 )
@@ -793,14 +708,12 @@ pub(crate) async fn complete_pending_target_command(
         CompletedTargetCommandKind::SetAutoAttach {
             auto_attach,
             owner_session_id,
-            legacy_disable_all,
         } => {
             return TargetCommandTaskStep::Complete(
                 auto_attach::complete_set_auto_attach_command_async(
                     conn,
                     auto_attach,
                     owner_session_id.as_deref(),
-                    legacy_disable_all,
                     command_context,
                 )
                 .await,
@@ -809,7 +722,6 @@ pub(crate) async fn complete_pending_target_command(
         CompletedTargetCommandKind::CreateTarget {
             response_plan,
             creation_commit,
-            initial_document_route,
             initial_document,
         } => {
             let activation_events = if let Some(activation) = creation_commit.activation() {
@@ -822,20 +734,11 @@ pub(crate) async fn complete_pending_target_command(
             match initial_document {
                 Some(Ok(completed_initial_document)) => {
                     let completed_initial_document = *completed_initial_document;
-                    let result = if let Some(route) = initial_document_route {
-                        let mut route_scope = conn.scoped_none_session_owner_route_override(route);
-                        route_scope
-                            .conn_mut()
-                            .complete_initial_document_page_build_for_owner_with_creation_diagnostics(
-                                completed_initial_document,
-                            )
-                            .await
-                    } else {
-                        conn.complete_initial_document_page_build_for_owner_with_creation_diagnostics(
+                    let result = conn
+                        .complete_initial_document_page_build_for_owner_with_creation_diagnostics(
                             completed_initial_document,
                         )
-                        .await
-                    };
+                        .await;
                     match result {
                         Ok(diagnostics) => {
                             if let Some(predecessor) = diagnostics.renderer_output_predecessor {
@@ -931,7 +834,6 @@ fn pending_set_auto_attach_command(
     session_id: Option<&str>,
     auto_attach: bool,
     owner_session_id: Option<&str>,
-    legacy_disable_all: bool,
 ) -> TargetCommandTaskStep {
     TargetCommandTaskStep::Pending(PendingTargetCommandDispatch {
         command_id,
@@ -939,7 +841,6 @@ fn pending_set_auto_attach_command(
         kind: Box::new(PendingTargetCommandKind::SetAutoAttach {
             auto_attach,
             owner_session_id: owner_session_id.map(str::to_owned),
-            legacy_disable_all,
         }),
     })
 }
@@ -1107,6 +1008,7 @@ fn select_browser_context_for_target(
 
 #[cfg(test)]
 mod devtools_runtime_entry_tests {
+    use crate::conn::RendererCommandDescriptor;
     use crate::devtools_runtime::{
         AutomationEvent, DevToolsActivateTargetCommand, DevToolsCloseTargetCommand,
         DevToolsCommand, DevToolsCommandContext, DevToolsCreateTargetCommand,
@@ -1208,7 +1110,7 @@ mod devtools_runtime_entry_tests {
             conn.browser_context
                 .as_ref()
                 .expect("browser context")
-                .active_target
+                .active_page_target()
                 .runtime_slot
                 .has_loaded_page()
         );
@@ -1219,8 +1121,16 @@ mod devtools_runtime_entry_tests {
         let mut conn = CdpConnection::new();
         let plan = attachment::complete_attach_to_target_command_async(
             &mut conn,
-            Some("SID-parent"),
-            "SID-child".to_owned(),
+            TargetAttachSessionCommit::direct(
+                "SID-child",
+                Some("SID-parent".to_owned()),
+                crate::conn::CdpSessionRoute::PageTarget {
+                    browser_context_id: "BID-child".to_owned(),
+                    target_id: "TID-child".to_owned(),
+                    session_key: moli_page_types::DevToolsSessionKey::Primary,
+                },
+                false,
+            ),
             DevToolsTargetInfo {
                 target_id: Some(DevToolsTargetId::from("TID-child")),
                 kind: DevToolsTargetKind::Page,
@@ -1263,12 +1173,16 @@ mod devtools_runtime_entry_tests {
     }
 
     #[tokio::test]
-    async fn devtools_target_legacy_close_drains_runtime_ready_events_without_serializing_them() {
+    async fn devtools_target_close_drains_runtime_ready_events_without_serializing_them() {
         let mut conn = CdpConnection::new();
         let mut browser_context = BrowserContext::new("BID-runtime-ready-close".to_owned());
         browser_context.set_active_target_id("TID-runtime-ready-close");
         browser_context.attach_active_session("SID-runtime-ready-close");
-        conn.browser_context = Some(browser_context);
+        assert!(browser_context.assign_attached_session_to_target(
+            "TID-runtime-ready-close",
+            "SID-runtime-ready-close-attached".to_owned(),
+        ));
+        conn.install_browser_context_fixture_for_test(browser_context);
         let page = conn
             .load_page_via_runtime_async("data:text/html,<p>runtime ready close</p>")
             .await
@@ -1276,17 +1190,42 @@ mod devtools_runtime_entry_tests {
         conn.browser_context
             .as_mut()
             .expect("browser context")
-            .active_target
+            .active_page_target_mut()
             .runtime_slot
             .set_loaded_page_for_test(page);
         conn.register_pending_inspector_await(7101, Some("SID-runtime-ready-close"));
         assert!(
             conn.claim_pending_inspector_await_for_scheduler_deferred_reply(
                 7101,
-                Some("SID-runtime-ready-close"),
+                &crate::conn::CommandOwnerScope::for_session("SID-runtime-ready-close"),
             )
             .is_some(),
             "test must cover scheduler-deferred Runtime await owner cleanup"
+        );
+        conn.register_pending_inspector_await(7102, Some("SID-runtime-ready-close-attached"));
+        let attached_dispatch = conn
+            .try_register_renderer_call_for_session_owner(
+                Some("SID-runtime-ready-close-attached"),
+                7102,
+                None,
+                RendererCommandDescriptor::from_synthesized_payload(
+                    json!({
+                        "id": 7102,
+                        "method": "Runtime.evaluate",
+                        "params": { "expression": "new Promise(() => {})" },
+                    })
+                    .to_string(),
+                )
+                .expect("test Runtime command should parse"),
+            )
+            .expect("attached renderer command should register");
+        assert!(
+            conn.claim_pending_inspector_await_for_scheduler_deferred_reply(
+                7102,
+                &crate::conn::CommandOwnerScope::for_session("SID-runtime-ready-close-attached",),
+            )
+            .is_some(),
+            "test must cover an attached scheduler-deferred Runtime await"
         );
 
         let (result, protocol_events) = execute_devtools_target_command_async_with_protocol_events(
@@ -1319,13 +1258,22 @@ mod devtools_runtime_entry_tests {
             "pending Runtime await cancellation must remain a typed runtime-ready event"
         );
         assert!(
+            protocol_events.iter().any(|event| event
+                .as_runtime_inspector_response_ready()
+                .is_some_and(|response| response.command_id() == 7102
+                    && response.error() == Some("Target closed")
+                    && response.has_bound_renderer_call_id())),
+            "an attached claimed await must settle through its correlated typed response before the Page route retires"
+        );
+        drop(attached_dispatch);
+        assert!(
             protocol_events.iter().all(|event| {
                 event.protocol_message().is_none_or(|message| {
                     message.pointer("/error/message").and_then(Value::as_str)
                         != Some("InternalRuntimeInspectorResponseReadyNotRouted")
                 })
             }),
-            "legacy Target executor must not serialize runtime-ready events as internal errors"
+            "Target executor must not serialize runtime-ready events as internal errors"
         );
     }
 

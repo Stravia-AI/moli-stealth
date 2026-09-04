@@ -3,8 +3,8 @@ use url::Url;
 
 use super::helpers::pending_subresource_response_stage_request_paused_event;
 use crate::conn::{
-    BackgroundProtocolEvent, CdpConnection, DEFAULT_LOADER_ID, FetchRequestStage,
-    PendingSubresourceFetchOwnerKind, PendingSubresourceFetchRequest,
+    BackgroundProtocolEvent, CdpConnection, CommandOwnerScope, DEFAULT_LOADER_ID,
+    FetchRequestStage, PendingSubresourceFetchOwnerKind, PendingSubresourceFetchRequest,
     PendingSubresourceFetchRequestStage, PendingSubresourceFetchRequestStageChain,
     PendingSubresourceFetchResponseRequest, build_event, monotonic_timestamp_seconds,
 };
@@ -57,18 +57,17 @@ struct PendingSubresourceFetchPauseSource {
 
 pub(crate) async fn subresource_fetch_pause_prepared_outputs_for_renderer_record_async(
     conn: &mut CdpConnection,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     source_document: moli_core::RendererDocumentLifecycleIdentity,
     info: moli_core::page::PendingSubresourceFetchInfo,
 ) -> network::NetworkPreparedOutputs {
-    if conn.target_root_document_lifecycle_identity_for_session(session_id) != Some(source_document)
-    {
+    if conn.target_root_document_lifecycle_identity_for_owner(owner) != Some(source_document) {
         return network::NetworkPreparedOutputs::default();
     }
     network::NetworkPreparedOutputs::from_subresource_fetch_pauses(
         prepare_subresource_fetch_pause_sources_async(
             conn,
-            session_id,
+            owner,
             None,
             None,
             vec![PendingSubresourceFetchPauseSource {
@@ -82,19 +81,18 @@ pub(crate) async fn subresource_fetch_pause_prepared_outputs_for_renderer_record
 
 pub(crate) async fn detached_parser_script_fetch_pause_prepared_outputs_for_renderer_record_async(
     conn: &mut CdpConnection,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     source_document: moli_core::RendererDocumentLifecycleIdentity,
     info: moli_core::page::PendingSubresourceFetchInfo,
     continuation: DetachedParserScriptFetchContinuation,
 ) -> network::NetworkPreparedOutputs {
-    if conn.target_root_document_lifecycle_identity_for_session(session_id) != Some(source_document)
-    {
+    if conn.target_root_document_lifecycle_identity_for_owner(owner) != Some(source_document) {
         return network::NetworkPreparedOutputs::default();
     }
     network::NetworkPreparedOutputs::from_subresource_fetch_pauses(
         prepare_subresource_fetch_pause_sources_async(
             conn,
-            session_id,
+            owner,
             None,
             None,
             vec![PendingSubresourceFetchPauseSource {
@@ -108,27 +106,28 @@ pub(crate) async fn detached_parser_script_fetch_pause_prepared_outputs_for_rend
 
 async fn prepare_subresource_fetch_pause_sources_async(
     conn: &mut CdpConnection,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     frame_id: Option<&str>,
     document_url: Option<&Url>,
     sources: Vec<PendingSubresourceFetchPauseSource>,
 ) -> Vec<network::TargetSubresourceFetchPauseOutput> {
     let mut outputs = Vec::new();
-    let page_owner = conn.target_page_residence_identity_for_session(session_id);
+    let session_id = owner.session_id();
+    let page_owner = conn.target_page_residence_identity_for_owner(owner);
     let Some((fetch_snapshot, frame_id)) = (|| {
         let target_frame_id = conn
-            .target_session_owner_frame_tree_identity(session_id)
+            .target_session_owner_frame_tree_identity_for_owner(owner)
             .map(|(target_id, _, _, _)| target_id)?;
         let frame_id = frame_id.unwrap_or(&target_frame_id);
         Some((
-            conn.target_fetch_subresource_interception_snapshot_for_session_owner(session_id)?,
+            conn.target_fetch_subresource_interception_snapshot_for_owner(owner)?,
             frame_id.to_owned(),
         ))
     })() else {
         return outputs;
     };
     let loader_id = conn
-        .current_document_loader_id_for_session_owner(session_id)
+        .current_document_loader_id_for_owner(owner)
         .unwrap_or_else(|| DEFAULT_LOADER_ID.to_owned());
     for source in sources {
         let PendingSubresourceFetchPauseSource {
@@ -136,7 +135,7 @@ async fn prepare_subresource_fetch_pause_sources_async(
             detached_parser_script_fetch_continuation,
         } = source;
         let Ok((request_id, network_request_id)) =
-            conn.allocate_pending_subresource_fetch_request_ids_for_session_owner(session_id)
+            conn.allocate_pending_subresource_fetch_request_ids_for_owner(owner)
         else {
             return outputs;
         };
@@ -202,6 +201,7 @@ async fn prepare_subresource_fetch_pause_sources_async(
                 pending.action_session_id = fetch_owner_session_id.clone();
                 continue_subresource_for_response_stage_async(
                     conn,
+                    owner,
                     response_stage_owner_session_id,
                     request_id,
                     pending,
@@ -232,6 +232,7 @@ async fn prepare_subresource_fetch_pause_sources_async(
                 pending.action_session_id = fetch_owner_session_id.clone();
                 continue_subresource_for_deferred_response_stage_async(
                     conn,
+                    owner,
                     response_stage_owner_session_id,
                     request_id,
                     pending,
@@ -246,7 +247,7 @@ async fn prepare_subresource_fetch_pause_sources_async(
                 .unwrap_or(PendingSubresourceFetchOwnerKind::NetworkOrBidi);
             continue_subresource_without_fetch_pause_async(
                 conn,
-                session_id,
+                owner,
                 handle_auth_requests.then_some(request_id),
                 page_owner.clone(),
                 info.internal_id,
@@ -298,7 +299,7 @@ async fn prepare_subresource_fetch_pause_sources_async(
         let mut remaining_sessions = Vec::new();
         for session in request_stage_pause_sessions.into_iter().skip(1) {
             let Ok((next_request_id, _)) =
-                conn.allocate_pending_subresource_fetch_request_ids_for_session_owner(session_id)
+                conn.allocate_pending_subresource_fetch_request_ids_for_owner(owner)
             else {
                 return outputs;
             };
@@ -355,7 +356,7 @@ async fn prepare_subresource_fetch_pause_sources_async(
 pub(crate) fn emit_subresource_fetch_pause_outputs(
     conn: &mut CdpConnection,
     out: &mut Vec<BackgroundProtocolEvent>,
-    owner_session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     network_session_ids: &[Option<String>],
     outputs: Vec<network::TargetSubresourceFetchPauseOutput>,
 ) {
@@ -374,7 +375,10 @@ pub(crate) fn emit_subresource_fetch_pause_outputs(
         let pending_owner_session_id = event_session_id
             .as_deref()
             .filter(|session_id| conn.session_route(Some(session_id)).is_some())
-            .or(owner_session_id);
+            .or(owner.session_id());
+        let pending_owner = pending_owner_session_id
+            .map(CommandOwnerScope::for_session)
+            .unwrap_or_else(|| owner.clone());
         pending.action_session_id = event_session_id.clone();
         let blocked_intercepts = blocked_intercepts_from_fetch_payload(&payload);
         let fetch_event = subresource_request_paused_event(
@@ -384,14 +388,14 @@ pub(crate) fn emit_subresource_fetch_pause_outputs(
             payload,
             blocked_intercepts,
         );
-        if !conn.register_pending_subresource_fetch_request_for_session_owner(
-            pending_owner_session_id,
+        if !conn.register_pending_subresource_fetch_request_for_owner(
+            &pending_owner,
             request_id,
             pending,
         ) {
             return;
         }
-        if let Ok(runtime_slot) = conn.runtime_session_owner_slot_mut(pending_owner_session_id) {
+        if let Ok(runtime_slot) = conn.runtime_session_owner_slot_mut_for_owner(&pending_owner) {
             // Chromium publishes Network.requestWillBeSent before the Fetch pause.
             // The renderer's later transport start belongs to the same lifecycle
             // and must not publish a second initial Network event.
@@ -587,7 +591,7 @@ mod tests {
     use url::Url;
 
     use crate::conn::{
-        BackgroundProtocolEvent, BrowserContext, CdpConnection, PageTargetHost,
+        BackgroundProtocolEvent, BrowserContext, CdpConnection, CommandOwnerScope, PageTargetHost,
         PendingSubresourceFetchOwnerKind, PendingSubresourceFetchRequest,
     };
     use crate::devtools_runtime::{AutomationEvent, DevToolsNetworkResourceType};
@@ -693,19 +697,20 @@ mod tests {
         let mut conn = CdpConnection::default();
         let mut browser_context = BrowserContext::new_with_page_for_test("BID-1", "TID-active");
         browser_context
-            .active_target
+            .active_page_target_mut()
             .runtime_slot
             .set_page_attachment_id_for_test(1);
-        conn.browser_context = Some(browser_context);
+        conn.install_browser_context_fixture_for_test(browser_context);
         let page_owner = conn
             .target_page_residence_identity_for_session(None)
             .expect("active test target should expose a Page residence identity");
+        let owner = CommandOwnerScope::capture(&conn, None);
 
         let mut events = Vec::new();
         super::emit_subresource_fetch_pause_outputs(
             &mut conn,
             &mut events,
-            None,
+            &owner,
             &[Some("NETWORK-SID".to_owned())],
             vec![
                 fetch_pause_output(
@@ -720,7 +725,7 @@ mod tests {
         super::emit_subresource_fetch_pause_outputs(
             &mut conn,
             &mut events,
-            None,
+            &owner,
             &[Some("NETWORK-SID".to_owned())],
             Vec::new(),
         );
@@ -755,12 +760,12 @@ mod tests {
 
         let bc = conn.browser_context.as_ref().unwrap();
         assert!(
-            bc.active_target
+            bc.active_page_target()
                 .fetch_owner
                 .has_pending_subresource_fetch_for_test("FETCH-1")
         );
         assert!(
-            bc.active_target
+            bc.active_page_target()
                 .fetch_owner
                 .has_pending_subresource_fetch_for_test("FETCH-2")
         );
@@ -771,19 +776,20 @@ mod tests {
         let mut conn = CdpConnection::default();
         let mut browser_context = BrowserContext::new_with_page_for_test("BID-1", "TID-active");
         browser_context
-            .active_target
+            .active_page_target_mut()
             .runtime_slot
             .set_page_attachment_id_for_test(1);
-        conn.browser_context = Some(browser_context);
+        conn.install_browser_context_fixture_for_test(browser_context);
         let page_owner = conn
             .target_page_residence_identity_for_session(None)
             .expect("active test target should expose a Page residence identity");
+        let owner = CommandOwnerScope::capture(&conn, None);
         let mut events = Vec::new();
 
         super::emit_subresource_fetch_pause_outputs(
             &mut conn,
             &mut events,
-            None,
+            &owner,
             &[Some("NETWORK-SID".to_owned())],
             vec![fetch_pause_output_with_cookie_report(
                 page_owner,
@@ -815,25 +821,26 @@ mod tests {
         let mut conn = CdpConnection::default();
         let mut browser_context = BrowserContext::new_with_page_for_test("BID-1", "TID-active");
         browser_context
-            .active_target
+            .active_page_target_mut()
             .runtime_slot
             .set_page_attachment_id_for_test(1);
-        conn.browser_context = Some(browser_context);
+        conn.install_browser_context_fixture_for_test(browser_context);
         let page_owner = conn
             .target_page_residence_identity_for_session(None)
             .expect("active test target should expose a Page residence identity");
         conn.browser_context
             .as_mut()
             .expect("browser context should remain installed")
-            .active_target
+            .active_page_target_mut()
             .runtime_slot
             .replace_page_attachment_id_for_test();
+        let owner = CommandOwnerScope::capture(&conn, None);
 
         let mut events = Vec::new();
         super::emit_subresource_fetch_pause_outputs(
             &mut conn,
             &mut events,
-            None,
+            &owner,
             &[Some("NETWORK-SID".to_owned())],
             vec![fetch_pause_output(
                 page_owner,
@@ -852,7 +859,7 @@ mod tests {
                 .browser_context
                 .as_ref()
                 .expect("browser context should remain installed")
-                .active_target
+                .active_page_target()
                 .fetch_owner
                 .has_pending_subresource_fetch_for_test("FETCH-1"),
             "a stale prepared pause must not install pending command state"
@@ -869,7 +876,7 @@ mod tests {
             "https://example.test/background".to_owned(),
         );
         bc.insert_page_target_host(target);
-        conn.browser_context = Some(bc);
+        conn.install_browser_context_fixture_for_test(bc);
         conn.runtime_session_owner_slot_mut(Some("SID-background"))
             .expect("background test target runtime slot")
             .set_page_attachment_id_for_test(1);
@@ -880,7 +887,7 @@ mod tests {
         super::emit_subresource_fetch_pause_outputs(
             &mut conn,
             &mut events,
-            Some("SID-background"),
+            &CommandOwnerScope::for_session("SID-background"),
             &[Some("NETWORK-SID".to_owned())],
             vec![fetch_pause_output(
                 page_owner,
@@ -904,11 +911,14 @@ mod tests {
 
         let bc = conn.browser_context.as_ref().unwrap();
         assert!(
-            bc.parked_fetch_state("TID-background")
-                .is_some_and(|state| state.has_pending_subresource_fetch_for_test("FETCH-1"))
+            bc.background_target("TID-background")
+                .expect("background target must exist")
+                .fetch_owner
+                .pending_state()
+                .has_pending_subresource_fetch_for_test("FETCH-1")
         );
         assert!(
-            !bc.active_target
+            !bc.active_page_target()
                 .fetch_owner
                 .has_pending_subresource_fetch_for_test("FETCH-1"),
             "background owner emission must not register the pause on the active target"

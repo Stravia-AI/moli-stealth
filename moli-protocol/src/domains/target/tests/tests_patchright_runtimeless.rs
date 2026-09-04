@@ -213,14 +213,15 @@ async fn patchright_over_cdp_switching_back_to_first_context_keeps_older_page_ru
     );
     assert_eq!(
         first_context
-            .active_target
+            .active_page_target()
             .owner_state
             .document_start_scripts
             .len(),
         1
     );
     assert!(
-        first_context.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+        first_context.active_page_target().devtools_sessions
+            [moli_page_types::DevToolsSessionKey::Primary]
             .runtime_bindings
             .iter()
             .any(|binding| {

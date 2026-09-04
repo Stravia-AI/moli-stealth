@@ -244,18 +244,14 @@ pub(crate) fn complete_pending_dom_debugger_command(
     completed: CompletedDomDebuggerCommandDispatch,
 ) -> CommandOutputPlan {
     let session_id = completed.owner_scope.session_id().map(str::to_owned);
-    let owner_route = completed.owner_scope.session_owner_route();
     match completed.operation {
         CompletedDomDebuggerOperation::GetEventListeners => {
             let resolution = completed.completed.and_then(|completion| {
-                conn.loaded_page_mut_for_protocol_access_for_route(
-                    session_id.as_deref(),
-                    owner_route,
-                )
-                .and_then(|page| {
-                    page.finish_dom_debugger_get_event_listeners(completion)
-                        .map_err(|error| error.to_string())
-                })
+                conn.loaded_page_mut_for_protocol_access_for_owner(&completed.owner_scope)
+                    .and_then(|page| {
+                        page.finish_dom_debugger_get_event_listeners(completion)
+                            .map_err(|error| error.to_string())
+                    })
             });
             match resolution {
                 Ok(RendererDomDebuggerEventListenersResolution::Found(listeners)) => {
@@ -272,17 +268,14 @@ pub(crate) fn complete_pending_dom_debugger_command(
             enabled,
         } => {
             let completion = completed.completed.and_then(|completion| {
-                conn.loaded_page_mut_for_protocol_access_for_route(
-                    session_id.as_deref(),
-                    owner_route,
-                )
-                .and_then(|page| {
-                    page.finish_unit_runtime_page_command(
-                        completion,
-                        "DOMDebugger event listener breakpoint",
-                    )
-                    .map_err(|error| error.to_string())
-                })
+                conn.loaded_page_mut_for_protocol_access_for_owner(&completed.owner_scope)
+                    .and_then(|page| {
+                        page.finish_unit_runtime_page_command(
+                            completion,
+                            "DOMDebugger event listener breakpoint",
+                        )
+                        .map_err(|error| error.to_string())
+                    })
             });
             if let Err(message) = completion {
                 return CommandOutputPlan::error(-32000, message);
@@ -311,14 +304,14 @@ pub(crate) fn complete_pending_dom_debugger_command(
             enabled,
         } => {
             let completion = completed.completed.and_then(|completion| {
-                conn.loaded_page_mut_for_protocol_access_for_route(
-                    session_id.as_deref(),
-                    owner_route,
-                )
-                .and_then(|page| {
-                    page.finish_unit_runtime_page_command(completion, "DOMDebugger XHR breakpoint")
+                conn.loaded_page_mut_for_protocol_access_for_owner(&completed.owner_scope)
+                    .and_then(|page| {
+                        page.finish_unit_runtime_page_command(
+                            completion,
+                            "DOMDebugger XHR breakpoint",
+                        )
                         .map_err(|error| error.to_string())
-                })
+                    })
             });
             if let Err(message) = completion {
                 return CommandOutputPlan::error(-32000, message);
@@ -340,14 +333,11 @@ pub(crate) fn complete_pending_dom_debugger_command(
         }
         CompletedDomDebuggerOperation::ConfigureDomBreakpoint => {
             let resolution = completed.completed.and_then(|completion| {
-                conn.loaded_page_mut_for_protocol_access_for_route(
-                    session_id.as_deref(),
-                    owner_route,
-                )
-                .and_then(|page| {
-                    page.finish_dom_debugger_configure_dom_breakpoint(completion)
-                        .map_err(|error| error.to_string())
-                })
+                conn.loaded_page_mut_for_protocol_access_for_owner(&completed.owner_scope)
+                    .and_then(|page| {
+                        page.finish_dom_debugger_configure_dom_breakpoint(completion)
+                            .map_err(|error| error.to_string())
+                    })
             });
             match resolution {
                 Ok(RendererDomDebuggerDomBreakpointResolution::Configured) => {
@@ -510,7 +500,8 @@ mod tests {
         browser_context.set_active_target_id("TID-1".to_owned());
         browser_context.set_target_url("data:text/html,dom-debugger-test".to_owned());
         browser_context.attach_active_session("SID-1".to_owned());
-        ctx.conn.browser_context = Some(browser_context);
+        ctx.conn
+            .install_browser_context_fixture_for_test(browser_context);
         ctx.install_navigation_fixture_for_session_owner(
             &format!("data:text/html,{html}"),
             Some("SID-1"),
@@ -1564,7 +1555,7 @@ mod tests {
         .await;
         {
             let browser_context = ctx.conn.browser_context.as_mut().expect("browser context");
-            assert!(browser_context.assign_auxiliary_session_to_target(
+            assert!(browser_context.assign_attached_session_to_target(
                 "TID-1",
                 "SID-event-breakpoint-owner".to_owned(),
             ));
@@ -1767,7 +1758,7 @@ mod tests {
 
         {
             let browser_context = ctx.conn.browser_context.as_mut().expect("browser context");
-            assert!(browser_context.assign_auxiliary_session_to_target(
+            assert!(browser_context.assign_attached_session_to_target(
                 "TID-1",
                 "SID-event-breakpoint-owner".to_owned(),
             ));
@@ -2078,10 +2069,12 @@ mod tests {
         load_document(&mut ctx, "<!doctype html><title>XHR owner</title>").await;
         {
             let browser_context = ctx.conn.browser_context.as_mut().expect("browser context");
-            assert!(browser_context.assign_auxiliary_session_to_target(
-                "TID-1",
-                "SID-xhr-breakpoint-owner".to_owned(),
-            ));
+            assert!(
+                browser_context.assign_attached_session_to_target(
+                    "TID-1",
+                    "SID-xhr-breakpoint-owner".to_owned(),
+                )
+            );
         }
 
         let primary_enable = command(
@@ -2224,10 +2217,12 @@ mod tests {
 
         {
             let browser_context = ctx.conn.browser_context.as_mut().expect("browser context");
-            assert!(browser_context.assign_auxiliary_session_to_target(
-                "TID-1",
-                "SID-xhr-breakpoint-owner".to_owned(),
-            ));
+            assert!(
+                browser_context.assign_attached_session_to_target(
+                    "TID-1",
+                    "SID-xhr-breakpoint-owner".to_owned(),
+                )
+            );
         }
         let reattached_enable = command(
             &mut ctx,

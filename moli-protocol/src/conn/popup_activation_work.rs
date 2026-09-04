@@ -1,6 +1,6 @@
 use super::{CdpConnection, CdpSessionRoute, CommandOwnerScope};
 
-/// Foreground activation for one already-created auxiliary target.
+/// Foreground selection for one already-created popup Page target.
 ///
 /// Target creation and navigation have separate lifetimes. In particular, a
 /// target waiting for `Runtime.runIfWaitingForDebugger` must still become the
@@ -22,14 +22,11 @@ impl PopupTargetActivationAction {
     ) -> Option<Self> {
         let route = conn.target_session_route_for_target_id(target_id)?;
         (route.browser_context_id() == Some(browser_context_id)).then(|| Self {
-            owner_scope: CommandOwnerScope::from_session_and_owner_route(
-                None,
-                Some(CdpSessionRoute::PageTarget {
-                    browser_context_id: browser_context_id.to_owned(),
-                    target_id: target_id.to_owned(),
-                    is_attached_session: false,
-                }),
-            ),
+            owner_scope: CommandOwnerScope::for_route(CdpSessionRoute::PageTarget {
+                browser_context_id: browser_context_id.to_owned(),
+                target_id: target_id.to_owned(),
+                session_key: moli_page_types::DevToolsSessionKey::Primary,
+            }),
             browser_context_id: browser_context_id.to_owned(),
             target_id: target_id.to_owned(),
         })

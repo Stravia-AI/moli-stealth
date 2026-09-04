@@ -1158,6 +1158,7 @@ impl TargetFetchConfig {
             })
     }
 
+    #[cfg(test)]
     pub(crate) fn reset(&mut self) {
         *self = Self::default();
     }
@@ -1763,6 +1764,7 @@ impl TargetFetchOwner {
         self.config.remove_network_intercept(intercept_id)
     }
 
+    #[cfg(test)]
     pub(crate) fn reset_config(&mut self) {
         self.config.reset();
     }
@@ -2373,7 +2375,13 @@ mod tests {
             document_navigation_token: None,
             navigation: NavigationDispatchState {
                 navigate_id: Some(1),
-                navigate_session_id: owner_session_id.map(str::to_owned),
+                owner: owner_session_id
+                    .map(crate::conn::CommandOwnerScope::for_session)
+                    .unwrap_or_else(|| {
+                        crate::conn::CommandOwnerScope::for_route(
+                            crate::conn::CdpSessionRoute::Browser,
+                        )
+                    }),
                 result_projection: NavigationResultProjection::Cdp(
                     json!({"frameId": "FRAME-1", "loaderId": "LOADER-1"}),
                 ),

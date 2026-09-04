@@ -215,8 +215,9 @@ pub use local_executor::is_on_js_local_executor;
 pub use native_bridge::element::ClientRect as RendererClientRect;
 pub use runtime::RendererRuntimeInspectorMessageResponseOrder;
 pub use runtime::{
-    DetachedParserScriptFetchContinuation, DevToolsSessionKey, ExternalRawDocumentBodyStream,
-    JsRuntime, JsRuntimeOwner, PageId, PendingHtmlPage, PreparedRendererDocument,
+    CompletedWorkerRuntimeInspectorCommandDispatch, DetachedParserScriptFetchContinuation,
+    DevToolsSessionKey, ExternalRawDocumentBodyStream, JsRuntime, JsRuntimeOwner, PageId,
+    PendingHtmlPage, PendingWorkerRuntimeInspectorSessionResponse, PreparedRendererDocument,
     RendererAccessibilityPayloadsForObjectId, RendererActivityDiagnostics,
     RendererAgentAttachmentId, RendererAutofillAddressField, RendererAutofillCreditCard,
     RendererAutofillTriggerOutcome, RendererAutofillTriggerRequest, RendererBrowserContextRuntime,

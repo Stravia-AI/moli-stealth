@@ -66,6 +66,17 @@ pub(crate) struct NativeBridgeBindings {
     named_node_map_wrapper_template: v8::Global<v8::ObjectTemplate>,
 }
 
+fn open_object_template<'a>(
+    isolate_ptr: &mut v8::UnsafeRawIsolatePtr,
+    template: &'a v8::Global<v8::ObjectTemplate>,
+) -> &'a v8::ObjectTemplate {
+    let isolate = unsafe { v8::Isolate::ref_from_raw_isolate_ptr_mut(isolate_ptr) };
+    // SAFETY: every template in NativeBridgeBindings belongs to this isolate,
+    // and these references are only exposed while its renderer thread owns and
+    // has entered the isolate. The returned reference cannot outlive `template`.
+    unsafe { template.open(isolate) }
+}
+
 fn wrapper_kind_for_handle(handle: &BridgeHandle) -> WrapperKind {
     match handle {
         BridgeHandle::Window => WrapperKind::Window,
@@ -391,68 +402,61 @@ impl NativeBridgeBindings {
     }
 
     pub(super) fn collection_wrapper_template(&mut self) -> &v8::ObjectTemplate {
-        let isolate = unsafe { v8::Isolate::ref_from_raw_isolate_ptr_mut(&mut self.isolate_ptr) };
-        self.collection_wrapper_template.open(isolate)
+        open_object_template(&mut self.isolate_ptr, &self.collection_wrapper_template)
     }
 
     pub(super) fn static_handle_node_list_wrapper_template(&mut self) -> &v8::ObjectTemplate {
-        let isolate = unsafe { v8::Isolate::ref_from_raw_isolate_ptr_mut(&mut self.isolate_ptr) };
-        self.static_handle_node_list_wrapper_template.open(isolate)
+        open_object_template(
+            &mut self.isolate_ptr,
+            &self.static_handle_node_list_wrapper_template,
+        )
     }
 
     pub(super) fn live_collection_wrapper_template(&mut self) -> &v8::ObjectTemplate {
-        let isolate = unsafe { v8::Isolate::ref_from_raw_isolate_ptr_mut(&mut self.isolate_ptr) };
-        self.live_collection_wrapper_template.open(isolate)
+        open_object_template(
+            &mut self.isolate_ptr,
+            &self.live_collection_wrapper_template,
+        )
     }
 
     pub(super) fn node_iterator_wrapper_template(&mut self) -> &v8::ObjectTemplate {
-        let isolate = unsafe { v8::Isolate::ref_from_raw_isolate_ptr_mut(&mut self.isolate_ptr) };
-        self.node_iterator_wrapper_template.open(isolate)
+        open_object_template(&mut self.isolate_ptr, &self.node_iterator_wrapper_template)
     }
 
     pub(super) fn tree_walker_wrapper_template(&mut self) -> &v8::ObjectTemplate {
-        let isolate = unsafe { v8::Isolate::ref_from_raw_isolate_ptr_mut(&mut self.isolate_ptr) };
-        self.tree_walker_wrapper_template.open(isolate)
+        open_object_template(&mut self.isolate_ptr, &self.tree_walker_wrapper_template)
     }
 
     fn bridge_template(&mut self) -> &v8::ObjectTemplate {
-        let isolate = unsafe { v8::Isolate::ref_from_raw_isolate_ptr_mut(&mut self.isolate_ptr) };
-        self.bridge_template.open(isolate)
+        open_object_template(&mut self.isolate_ptr, &self.bridge_template)
     }
 
     fn node_wrapper_template(
         &mut self,
         prototype_name: &'static str,
     ) -> Option<&v8::ObjectTemplate> {
-        let isolate = unsafe { v8::Isolate::ref_from_raw_isolate_ptr_mut(&mut self.isolate_ptr) };
-        self.node_wrapper_templates
-            .get(prototype_name)
-            .map(|template| template.open(isolate))
+        let template = self.node_wrapper_templates.get(prototype_name)?;
+        Some(open_object_template(&mut self.isolate_ptr, template))
     }
 
     fn window_wrapper_template(&mut self) -> &v8::ObjectTemplate {
-        let isolate = unsafe { v8::Isolate::ref_from_raw_isolate_ptr_mut(&mut self.isolate_ptr) };
-        self.window_wrapper_template.open(isolate)
+        open_object_template(&mut self.isolate_ptr, &self.window_wrapper_template)
     }
 
     fn dom_token_list_wrapper_template(&mut self) -> &v8::ObjectTemplate {
-        let isolate = unsafe { v8::Isolate::ref_from_raw_isolate_ptr_mut(&mut self.isolate_ptr) };
-        self.dom_token_list_wrapper_template.open(isolate)
+        open_object_template(&mut self.isolate_ptr, &self.dom_token_list_wrapper_template)
     }
 
     fn dom_string_map_wrapper_template(&mut self) -> &v8::ObjectTemplate {
-        let isolate = unsafe { v8::Isolate::ref_from_raw_isolate_ptr_mut(&mut self.isolate_ptr) };
-        self.dom_string_map_wrapper_template.open(isolate)
+        open_object_template(&mut self.isolate_ptr, &self.dom_string_map_wrapper_template)
     }
 
     fn style_wrapper_template(&mut self) -> &v8::ObjectTemplate {
-        let isolate = unsafe { v8::Isolate::ref_from_raw_isolate_ptr_mut(&mut self.isolate_ptr) };
-        self.style_wrapper_template.open(isolate)
+        open_object_template(&mut self.isolate_ptr, &self.style_wrapper_template)
     }
 
     pub(super) fn named_node_map_wrapper_template(&mut self) -> &v8::ObjectTemplate {
-        let isolate = unsafe { v8::Isolate::ref_from_raw_isolate_ptr_mut(&mut self.isolate_ptr) };
-        self.named_node_map_wrapper_template.open(isolate)
+        open_object_template(&mut self.isolate_ptr, &self.named_node_map_wrapper_template)
     }
 }
 

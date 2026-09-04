@@ -25,7 +25,7 @@ enum RendererSubresourceTeardownDisposition {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TargetNetworkAgentState {
     primary_enabled: bool,
-    auxiliary_event_session_ids: Vec<String>,
+    attached_event_session_ids: Vec<String>,
     output_queue: TargetNetworkOutputQueue,
     active_renderer_subresource_requests:
         HashMap<SubresourceNetworkRequestHandle, RendererSubresourceTeardownDisposition>,
@@ -208,6 +208,7 @@ impl TargetNetworkAgentState {
         self.primary_enabled = enabled;
     }
 
+    #[cfg(test)]
     pub(crate) fn enable_primary_events(&mut self) {
         self.set_primary_events_enabled(true);
     }
@@ -314,34 +315,34 @@ impl TargetNetworkAgentState {
         self.output_queue.websocket_event_count()
     }
 
-    pub(crate) fn enable_auxiliary_events(&mut self, session_id: &str) {
+    pub(crate) fn enable_attached_events(&mut self, session_id: &str) {
         if !self
-            .auxiliary_event_session_ids
+            .attached_event_session_ids
             .iter()
             .any(|enabled_session_id| enabled_session_id == session_id)
         {
-            self.auxiliary_event_session_ids.push(session_id.to_owned());
+            self.attached_event_session_ids.push(session_id.to_owned());
         }
     }
 
-    pub(crate) fn disable_auxiliary_events(&mut self, session_id: &str) -> bool {
-        let previous_len = self.auxiliary_event_session_ids.len();
-        self.auxiliary_event_session_ids
+    pub(crate) fn disable_attached_events(&mut self, session_id: &str) -> bool {
+        let previous_len = self.attached_event_session_ids.len();
+        self.attached_event_session_ids
             .retain(|enabled_session_id| enabled_session_id != session_id);
-        self.auxiliary_event_session_ids.len() != previous_len
+        self.attached_event_session_ids.len() != previous_len
     }
 
-    pub(crate) fn remove_auxiliary_session(&mut self, session_id: &str) {
-        self.disable_auxiliary_events(session_id);
+    pub(crate) fn remove_attached_session(&mut self, session_id: &str) {
+        self.disable_attached_events(session_id);
         self.remove_session_observation_cursor(Some(session_id));
     }
 
     pub(crate) fn has_event_listeners(&self) -> bool {
-        self.primary_enabled || !self.auxiliary_event_session_ids.is_empty()
+        self.primary_enabled || !self.attached_event_session_ids.is_empty()
     }
 
-    pub(crate) fn auxiliary_events_enabled_for_session(&self, session_id: &str) -> bool {
-        self.auxiliary_event_session_ids
+    pub(crate) fn attached_events_enabled_for_session(&self, session_id: &str) -> bool {
+        self.attached_event_session_ids
             .iter()
             .any(|enabled_session_id| enabled_session_id == session_id)
     }
@@ -356,7 +357,7 @@ impl TargetNetworkAgentState {
         if self.primary_enabled {
             session_ids.push(primary_event_session_id.map(str::to_owned));
         }
-        for session_id in &self.auxiliary_event_session_ids {
+        for session_id in &self.attached_event_session_ids {
             if !self.primary_enabled || Some(session_id.as_str()) != primary_event_session_id {
                 session_ids.push(Some(session_id.clone()));
             }
@@ -859,17 +860,13 @@ impl TargetNetworkAgentState {
             .request_id_for_websocket_socket(socket_id, request_id_allocator)
     }
 
-    pub(crate) fn clear_session_scoped_observation_artifacts(&mut self) {
-        self.artifacts.clear_session_scoped_observation_artifacts();
-    }
-
     pub(crate) fn reset_all_target_scoped_artifacts(&mut self) {
         self.artifacts.reset_all_target_scoped_artifacts();
     }
 
     #[cfg(test)]
-    pub(crate) fn has_auxiliary_events_for_session(&self, session_id: &str) -> bool {
-        self.auxiliary_events_enabled_for_session(session_id)
+    pub(crate) fn has_attached_events_for_session(&self, session_id: &str) -> bool {
+        self.attached_events_enabled_for_session(session_id)
     }
 
     #[cfg(test)]
@@ -1546,12 +1543,6 @@ impl TargetNetworkArtifacts {
     ) {
         self.websocket_network_artifacts
             .set_request_id_for_socket_if_absent(socket_id, request_id);
-    }
-
-    pub(crate) fn clear_session_scoped_observation_artifacts(&mut self) {
-        self.body_artifacts.clear_session_scoped();
-        self.subresource_network_artifacts.clear_request_ids();
-        self.websocket_network_artifacts.clear_all();
     }
 
     pub(crate) fn reset_all_target_scoped_artifacts(&mut self) {
@@ -2281,7 +2272,7 @@ mod tests {
     }
 
     #[test]
-    fn body_artifacts_clear_response_bodies_and_io_streams_together() {
+    fn target_artifact_reset_clears_response_bodies_and_io_streams_together() {
         let mut agent = TargetNetworkAgentState::default();
 
         agent.record_captured_response_body("REQ-1".to_owned(), "response body".to_owned(), [None]);
@@ -2289,17 +2280,8 @@ mod tests {
         assert!(agent.has_captured_response_body("REQ-1"));
         assert!(!agent.io_streams_empty());
 
-        agent.clear_session_scoped_observation_artifacts();
-        assert!(!agent.has_captured_response_body("REQ-1"));
-        assert!(agent.io_streams_empty());
-
-        agent.record_captured_response_body("REQ-2".to_owned(), "response body".to_owned(), [None]);
-        agent.insert_io_stream("STREAM-2".to_owned(), b"stream body".to_vec(), 0);
-        assert!(agent.has_captured_response_body("REQ-2"));
-        assert!(!agent.io_streams_empty());
-
         agent.reset_all_target_scoped_artifacts();
-        assert!(!agent.has_captured_response_body("REQ-2"));
+        assert!(!agent.has_captured_response_body("REQ-1"));
         assert!(agent.io_streams_empty());
     }
 
@@ -2469,17 +2451,17 @@ mod tests {
     }
 
     #[test]
-    fn auxiliary_network_event_sessions_follow_enable_insertion_order() {
+    fn attached_network_event_sessions_follow_enable_insertion_order() {
         let mut agent = TargetNetworkAgentState::default();
 
-        agent.enable_auxiliary_events("SID-z");
-        agent.enable_auxiliary_events("SID-a");
-        agent.enable_auxiliary_events("SID-z");
+        agent.enable_attached_events("SID-z");
+        agent.enable_attached_events("SID-a");
+        agent.enable_attached_events("SID-z");
 
         assert_eq!(
             agent.event_session_ids(Some("SID-primary"), Some("SID-primary")),
             vec![Some("SID-z".to_owned()), Some("SID-a".to_owned())],
-            "auxiliary Network listeners should not be sorted by session id"
+            "attached Network listeners should not be sorted by session id"
         );
 
         agent.enable_primary_events();
@@ -2490,11 +2472,11 @@ mod tests {
                 Some("SID-z".to_owned()),
                 Some("SID-a".to_owned()),
             ],
-            "primary listener remains first, followed by auxiliary enable order"
+            "primary listener remains first, followed by attached enable order"
         );
 
-        assert!(agent.disable_auxiliary_events("SID-z"));
-        agent.enable_auxiliary_events("SID-z");
+        assert!(agent.disable_attached_events("SID-z"));
+        agent.enable_attached_events("SID-z");
         assert_eq!(
             agent.event_session_ids(Some("SID-primary"), Some("SID-primary")),
             vec![
@@ -2502,7 +2484,7 @@ mod tests {
                 Some("SID-a".to_owned()),
                 Some("SID-z".to_owned()),
             ],
-            "disable then re-enable should append the auxiliary session"
+            "disable then re-enable should append the attached session"
         );
     }
 

@@ -250,8 +250,9 @@ pub enum RendererOwnerCommand {
         command: RendererPageCommand,
     },
     /// Renderer-side cleanup after the browser/protocol owner has already
-    /// disconnected a DevTools session and closed both of its ingress lanes.
-    /// This is lifecycle work, not another frontend Inspector command.
+    /// disconnected a DevTools session and suspended both of its ingress lanes.
+    /// Replacement frontend work remains queued behind this lifecycle task so
+    /// it cannot reuse the V8 session before destruction completes.
     FinalizeRuntimeInspectorSessionDetach {
         token: RendererPageToken,
         inspector_session_id: Option<String>,
@@ -1007,6 +1008,8 @@ pub(super) struct RendererOwnerState {
     pub(super) render_runtime_admission: std::sync::OnceLock<RenderRuntimeHandle>,
     pub(super) inspector_io_wake_tx: mpsc::UnboundedSender<RendererInspectorIoOwnerWake>,
     pub(super) browser_context_runtime: RendererBrowserContextRuntime,
+    pub(super) devtools_target_shutdown_registry:
+        crate::devtools::target::RendererDevToolsTargetShutdownRegistry,
     pub(super) owner_local_host_id: RendererOwnerLocalHostId,
     layout_policy: Mutex<RendererOwnerLayoutPolicyState>,
     context_shutdown_notify: tokio::sync::Notify,
@@ -1810,6 +1813,7 @@ impl RendererOwnerHandle {
             render_runtime_admission: std::sync::OnceLock::new(),
             inspector_io_wake_tx,
             browser_context_runtime,
+            devtools_target_shutdown_registry: Default::default(),
             owner_local_host_id,
             layout_policy: Mutex::new(RendererOwnerLayoutPolicyState::default()),
             context_shutdown_notify: tokio::sync::Notify::new(),
@@ -2333,6 +2337,7 @@ impl RendererOwnerHandle {
         // one side of this boundary: rejected with ownership returned to the
         // caller, or durably enqueued for the renderer terminal drain.
         self.render_runtime.close_admission();
+        self.state.devtools_target_shutdown_registry.terminate_all();
         self.state
             .page_table
             .terminate_and_cancel_all_contexts(RendererPageContextCancelReason::ContextDropped);
@@ -2517,7 +2522,7 @@ impl RendererOwnerHandle {
             RendererOwnerCommand::FinalizeRuntimeInspectorSessionDetach {
                 token,
                 inspector_session_id,
-                pause_guard: _pause_guard,
+                mut pause_guard,
             } => {
                 let mut entry = match checkout_entry_for_owner_turn_on_bound_owner_local_store(
                     token,
@@ -2526,6 +2531,7 @@ impl RendererOwnerHandle {
                     Err(
                         LivePageEntryCheckoutError::Retired | LivePageEntryCheckoutError::Missing,
                     ) => {
+                        pause_guard.complete();
                         return Ok(RendererOwnerReply::RuntimeInspectorSessionDetachFinalized(
                             false,
                         ))
@@ -2543,6 +2549,7 @@ impl RendererOwnerHandle {
                     .page_vm_mut()
                     .detach_runtime_inspector_session(inspector_session_id.as_deref());
                 restore_entry_after_command_on_bound_owner_local_store(token, entry);
+                pause_guard.complete();
                 Ok(RendererOwnerReply::RuntimeInspectorSessionDetachFinalized(
                     detached,
                 ))

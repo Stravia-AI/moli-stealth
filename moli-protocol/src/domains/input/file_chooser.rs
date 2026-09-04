@@ -3,7 +3,9 @@ use moli_core::page::{
     RendererPendingFileChooserActivation,
 };
 
-use crate::conn::{BackgroundProtocolEvent, CdpConnection, TargetPageResidenceIdentity};
+use crate::conn::{
+    BackgroundProtocolEvent, CdpConnection, CommandOwnerScope, TargetPageResidenceIdentity,
+};
 use crate::devtools_runtime::{
     DevToolsRemoteHandleId, webdriver_bidi_node_shared_id_for_backend_node_id,
 };
@@ -29,11 +31,11 @@ pub(super) struct PreparedFileChooserActivation {
 impl PreparedFileChooserActivation {
     pub(super) fn capture(
         conn: &CdpConnection,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         page_owner: TargetPageResidenceIdentity,
         activation: RendererPendingFileChooserActivation,
     ) -> Option<Self> {
-        if !conn.target_page_residence_identity_is_current_for_session(session_id, &page_owner) {
+        if !conn.target_page_residence_identity_is_current(&page_owner) {
             return None;
         }
         let source_document = activation.source_document();
@@ -41,7 +43,7 @@ impl PreparedFileChooserActivation {
             .source_frame_id()
             .map(str::to_owned)
             .or_else(|| {
-                conn.target_session_owner_frame_tree_identity(session_id)
+                conn.target_session_owner_frame_tree_identity_for_owner(owner)
                     .map(|(frame_id, _, _, _)| frame_id)
             })?;
         Some(Self {
@@ -87,26 +89,27 @@ impl PreparedFileChooserActivation {
 pub(super) async fn emit_prepared_activations_async(
     conn: &mut CdpConnection,
     out: &mut Vec<BackgroundProtocolEvent>,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     activations: Vec<PreparedFileChooserActivation>,
 ) {
     for activation in activations {
-        emit_prepared_activation_async(conn, out, session_id, activation).await;
+        emit_prepared_activation_async(conn, out, owner, activation).await;
     }
 }
 
 pub(super) async fn emit_prepared_activation_async(
     conn: &mut CdpConnection,
     out: &mut Vec<BackgroundProtocolEvent>,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     activation: PreparedFileChooserActivation,
 ) {
-    if !activation_is_current(conn, session_id, &activation) {
+    let session_id = owner.session_id();
+    if !activation_is_current(conn, &activation) {
         trace_stale_activation(session_id, &activation);
         return;
     }
     let event_enabled = conn
-        .target_page_session_state_for_session(session_id)
+        .target_page_session_state_for_owner(owner)
         .is_some_and(|state| {
             state.page_intercept_file_chooser_dialog_enabled
                 || state.page_file_chooser_opened_event_enabled
@@ -119,9 +122,8 @@ pub(super) async fn emit_prepared_activation_async(
     } else {
         "selectSingle"
     };
-    let element_shared_id =
-        element_shared_id_async(conn, session_id, activation.backend_node_id).await;
-    if !activation_is_current(conn, session_id, &activation) {
+    let element_shared_id = element_shared_id_async(conn, owner, activation.backend_node_id).await;
+    if !activation_is_current(conn, &activation) {
         trace_stale_activation(session_id, &activation);
         return;
     }
@@ -134,12 +136,8 @@ pub(super) async fn emit_prepared_activation_async(
     ));
 }
 
-fn activation_is_current(
-    conn: &CdpConnection,
-    session_id: Option<&str>,
-    activation: &PreparedFileChooserActivation,
-) -> bool {
-    conn.target_page_residence_identity_is_current_for_session(session_id, &activation.page_owner)
+fn activation_is_current(conn: &CdpConnection, activation: &PreparedFileChooserActivation) -> bool {
+    conn.target_page_residence_identity_is_current(&activation.page_owner)
 }
 
 fn trace_stale_activation(session_id: Option<&str>, activation: &PreparedFileChooserActivation) {
@@ -157,7 +155,7 @@ fn trace_stale_activation(session_id: Option<&str>, activation: &PreparedFileCho
 
 async fn element_shared_id_async(
     conn: &mut CdpConnection,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     backend_node_id: u32,
 ) -> DevToolsRemoteHandleId {
     // The event identity belongs to the frozen activation, while the DOM-agent
@@ -166,10 +164,7 @@ async fn element_shared_id_async(
     // before or during this async handoff; it must not erase the element from
     // the already-accepted file-chooser event.
     match conn
-        .document_bidi_node_shared_id_for_backend_node_id_for_session_owner_async(
-            session_id,
-            backend_node_id,
-        )
+        .document_bidi_node_shared_id_for_backend_node_id_for_owner_async(owner, backend_node_id)
         .await
     {
         Ok(RendererDomBidiNodeSharedIdResolution::SharedId(shared_id)) => {
@@ -187,8 +182,8 @@ async fn element_shared_id_async(
 
     let shared_id = webdriver_bidi_node_shared_id_for_backend_node_id(backend_node_id);
     if let Err(error) = conn
-        .register_document_bidi_node_binding_for_session_owner_async(
-            session_id,
+        .register_document_bidi_node_binding_for_owner_async(
+            owner,
             shared_id.as_str(),
             backend_node_id,
         )

@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use super::*;
 use crate::{
-    conn::{BrowserContext, CdpTargetFilter, CommandDispatchContext},
+    conn::{BrowserContext, CdpTargetFilter, CommandDispatchContext, CommandOwnerScope},
     devtools_runtime::AutomationEvent,
     domains::activity::{ProtocolOutputPayloads, ProtocolOutputProjectionContext},
 };
@@ -45,6 +45,13 @@ fn install_collision_target(conn: &mut CdpConnection) {
         .as_mut()
         .expect("test browser context")
         .insert_shared_worker_target(target);
+    conn.register_session_route_for_test(
+        SESSION_ID,
+        crate::conn::CdpSessionRoute::SharedWorkerTarget {
+            browser_context_id: BROWSER_CONTEXT_ID.to_owned(),
+            target_id: TARGET_ID.to_owned(),
+        },
+    );
 }
 
 fn runtime_inspector_messages(value: &str) -> Vec<RendererRuntimeInspectorMessage> {
@@ -66,10 +73,11 @@ async fn drain(
 ) -> Vec<crate::conn::BackgroundProtocolEvent> {
     let mut prepared =
         ProtocolOutputPayloads::from_slot(TargetPreparedOutputSlot::from_outputs(outputs));
+    let owner = CommandOwnerScope::capture(conn, None);
     let mut command = CommandDispatchContext::default();
     emit_target_lifecycle_events(
         conn,
-        &mut ProtocolOutputProjectionContext::new(None, &mut command),
+        &mut ProtocolOutputProjectionContext::new(&owner, &mut command),
         Some(&mut prepared),
     )
     .await;
@@ -163,7 +171,12 @@ async fn short_lived_shared_worker_preserves_exact_lifecycle_order() {
 #[tokio::test]
 async fn detached_session_cannot_be_resurrected_by_held_auto_attach_output() {
     let mut conn = CdpConnection::default();
-    conn.auto_attach = true;
+    conn.set_auto_attach_owner(
+        None,
+        true,
+        false,
+        crate::conn::CdpTargetFilter::default_auto_attach(),
+    );
     conn.browser_context = Some(BrowserContext::new(BROWSER_CONTEXT_ID.to_owned()));
 
     let outputs =

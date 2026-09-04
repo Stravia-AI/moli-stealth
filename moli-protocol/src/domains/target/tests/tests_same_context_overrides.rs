@@ -135,10 +135,13 @@ async fn same_context_targets_restore_their_own_page_session_overrides_after_swi
             .expect("active browser context");
         assert_eq!(bc.active_target_id(), Some("TID-000000000A"));
         assert_eq!(
-            bc.network_policy.extra_headers(),
+            bc.active_page_target().effective_policy().extra_headers(),
             vec![("X-Target".into(), "A".into())]
         );
-        assert_eq!(bc.locale_override.as_deref(), Some("en-GB"));
+        assert_eq!(
+            bc.active_page_target().effective_policy().locale_override(),
+            Some("en-GB")
+        );
     }
 
     ctx.process_async(json!({
@@ -193,10 +196,13 @@ async fn same_context_targets_restore_their_own_page_session_overrides_after_swi
             .expect("active browser context");
         assert_eq!(bc.active_target_id(), Some(second_target_id.as_str()));
         assert_eq!(
-            bc.network_policy.extra_headers(),
+            bc.active_page_target().effective_policy().extra_headers(),
             vec![("X-Target".into(), "B".into())]
         );
-        assert_eq!(bc.locale_override.as_deref(), Some("fr-FR"));
+        assert_eq!(
+            bc.active_page_target().effective_policy().locale_override(),
+            Some("fr-FR")
+        );
     }
 
     ctx.process_async(json!({
@@ -355,15 +361,22 @@ async fn same_context_targets_restore_their_own_network_conditions_after_session
             .as_ref()
             .expect("active browser context after direct background navigation");
         assert_eq!(active.active_target_id(), Some("TID-000000000NA"));
-        let parked = active
-            .parked_page_session_state(&second_target_id)
-            .expect("second target should keep parked network state");
-        assert!(parked.network_policy.network_offline());
-        assert_eq!(parked.network_policy.emulated_network_latency(), 25.0);
-        assert_eq!(parked.network_policy.emulated_download_throughput(), 2048.0);
-        assert_eq!(parked.network_policy.emulated_upload_throughput(), 256.0);
+        let background = active
+            .background_target(&second_target_id)
+            .filter(|target| target.has_non_default_session_state())
+            .expect("second target should keep background network state");
+        assert!(background.network_policy.network_offline());
+        assert_eq!(background.network_policy.emulated_network_latency(), 25.0);
         assert_eq!(
-            parked.network_policy.emulated_connection_type(),
+            background.network_policy.emulated_download_throughput(),
+            2048.0
+        );
+        assert_eq!(
+            background.network_policy.emulated_upload_throughput(),
+            256.0
+        );
+        assert_eq!(
+            background.network_policy.emulated_connection_type(),
             Some("wifi")
         );
     }
@@ -385,12 +398,33 @@ async fn same_context_targets_restore_their_own_network_conditions_after_session
             .as_ref()
             .expect("active browser context after restoring first target");
         assert_eq!(active.active_target_id(), Some("TID-000000000NA"));
-        assert!(!active.network_policy.network_offline());
-        assert_eq!(active.network_policy.emulated_network_latency(), 150.0);
-        assert_eq!(active.network_policy.emulated_download_throughput(), 1024.0);
-        assert_eq!(active.network_policy.emulated_upload_throughput(), 512.0);
+        assert!(!active.active_page_target().network_policy.network_offline());
         assert_eq!(
-            active.network_policy.emulated_connection_type(),
+            active
+                .active_page_target()
+                .network_policy
+                .emulated_network_latency(),
+            150.0
+        );
+        assert_eq!(
+            active
+                .active_page_target()
+                .network_policy
+                .emulated_download_throughput(),
+            1024.0
+        );
+        assert_eq!(
+            active
+                .active_page_target()
+                .network_policy
+                .emulated_upload_throughput(),
+            512.0
+        );
+        assert_eq!(
+            active
+                .active_page_target()
+                .network_policy
+                .emulated_connection_type(),
             Some("cellular3g")
         );
     }
@@ -608,7 +642,7 @@ async fn same_context_targets_restore_their_own_cookie_manager_surface_after_swi
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn same_context_targets_restore_their_own_cookie_manager_surface_after_close_target_promotion()
+async fn same_context_targets_restore_their_own_cookie_manager_surface_after_close_target_activation()
  {
     let mut ctx = TestContext::new();
     load_bc_with_titled_page_async(
@@ -741,7 +775,7 @@ async fn same_context_targets_restore_their_own_cookie_manager_surface_after_clo
             .conn
             .browser_context
             .as_ref()
-            .expect("active browser context after close promotion");
+            .expect("active browser context after close activation");
         assert_eq!(active.active_target_id(), Some("TID-000000000CKC"));
     }
 
@@ -854,12 +888,12 @@ async fn same_context_targets_restore_their_own_loader_overrides_after_switching
     ctx.take_all();
 
     ctx.process_async(json!({
-        "id": 1041741,
+        "id": 1041740,
         "method": "Target.activateTarget",
-        "params": { "targetId": second_target_id }
+        "params": { "targetId": "TID-000000000UA" }
     }))
     .await;
-    ctx.expect_result(1041741, json!({}), None);
+    ctx.expect_result(1041740, json!({}), None);
 
     ctx.process_async(json!({
         "id": 104175,
@@ -880,6 +914,46 @@ async fn same_context_targets_restore_their_own_loader_overrides_after_switching
     ctx.expect_result(104176, json!({}), Some(&second_session_id));
 
     {
+        let browser_context = ctx
+            .conn
+            .browser_context
+            .as_ref()
+            .expect("active browser context");
+        assert_ne!(
+            browser_context.active_target_id(),
+            Some(second_target_id.as_str()),
+            "the second target must still be in the background"
+        );
+        let background = browser_context
+            .page_target(&second_target_id)
+            .expect("background target");
+        assert_eq!(
+            background
+                .effective_policy()
+                .browser_identity_override()
+                .map(|identity| identity.user_agent()),
+            Some("Moli/Target-B")
+        );
+        assert_eq!(background.tls_verify_host_override, Some(true));
+        assert!(
+            background
+                .navigation_engine()
+                .expect("background navigation engine")
+                .fetch_config()
+                .tls_verify_host(),
+            "the exact background engine must be rebuilt before activation"
+        );
+    }
+
+    ctx.process_async(json!({
+        "id": 1041741,
+        "method": "Target.activateTarget",
+        "params": { "targetId": second_target_id }
+    }))
+    .await;
+    ctx.expect_result(1041741, json!({}), None);
+
+    {
         let active = ctx
             .conn
             .browser_context
@@ -887,10 +961,17 @@ async fn same_context_targets_restore_their_own_loader_overrides_after_switching
             .expect("active browser context");
         assert_eq!(active.active_target_id(), Some(second_target_id.as_str()));
         assert_eq!(
-            active.network_policy.user_agent_override(),
+            active
+                .active_page_target()
+                .effective_policy()
+                .browser_identity_override()
+                .map(|identity| identity.user_agent()),
             Some("Moli/Target-B")
         );
-        assert_eq!(active.tls_verify_host_override, Some(true));
+        assert_eq!(
+            active.active_page_target().tls_verify_host_override,
+            Some(true)
+        );
     }
     ctx.conn
         .ensure_resource_request_client()
@@ -914,10 +995,17 @@ async fn same_context_targets_restore_their_own_loader_overrides_after_switching
             .expect("active browser context");
         assert_eq!(active.active_target_id(), Some("TID-000000000UA"));
         assert_eq!(
-            active.network_policy.user_agent_override(),
+            active
+                .active_page_target()
+                .effective_policy()
+                .browser_identity_override()
+                .map(|identity| identity.user_agent()),
             Some("Moli/Target-A")
         );
-        assert_eq!(active.tls_verify_host_override, Some(false));
+        assert_eq!(
+            active.active_page_target().tls_verify_host_override,
+            Some(false)
+        );
     }
     ctx.conn
         .ensure_resource_request_client()
@@ -948,8 +1036,9 @@ async fn same_context_targets_restore_their_own_proxy_loader_overrides_after_swi
             .browser_context
             .as_mut()
             .expect("active browser context");
-        active.http_proxy_override = Some("http://proxy-a.test:8080".into());
-        active.http_no_proxy_override = Some("localhost,127.0.0.1".into());
+        active.active_page_target_mut().http_proxy_override =
+            Some("http://proxy-a.test:8080".into());
+        active.active_page_target_mut().http_no_proxy_override = Some("localhost,127.0.0.1".into());
     }
     ctx.conn.invalidate_resource_runtime_async().await;
     ctx.conn
@@ -1016,8 +1105,9 @@ async fn same_context_targets_restore_their_own_proxy_loader_overrides_after_swi
             .as_mut()
             .expect("active browser context");
         assert_eq!(active.active_target_id(), Some(second_target_id.as_str()));
-        active.http_proxy_override = Some("http://proxy-b.test:8080".into());
-        active.http_no_proxy_override = Some("::1,.example.com".into());
+        active.active_page_target_mut().http_proxy_override =
+            Some("http://proxy-b.test:8080".into());
+        active.active_page_target_mut().http_no_proxy_override = Some("::1,.example.com".into());
     }
     ctx.conn.invalidate_resource_runtime_async().await;
     ctx.conn
@@ -1042,11 +1132,14 @@ async fn same_context_targets_restore_their_own_proxy_loader_overrides_after_swi
             .expect("active browser context");
         assert_eq!(active.active_target_id(), Some("TID-000000000PX"));
         assert_eq!(
-            active.http_proxy_override.as_deref(),
+            active.active_page_target().http_proxy_override.as_deref(),
             Some("http://proxy-a.test:8080")
         );
         assert_eq!(
-            active.http_no_proxy_override.as_deref(),
+            active
+                .active_page_target()
+                .http_no_proxy_override
+                .as_deref(),
             Some("localhost,127.0.0.1")
         );
     }
@@ -1058,7 +1151,7 @@ async fn same_context_targets_restore_their_own_proxy_loader_overrides_after_swi
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn same_context_targets_restore_their_own_loader_overrides_after_close_target_promotion() {
+async fn same_context_targets_restore_their_own_loader_overrides_after_close_target_activation() {
     let mut ctx = TestContext::new();
     load_bc_with_titled_page_async(
         &mut ctx,
@@ -1169,20 +1262,27 @@ async fn same_context_targets_restore_their_own_loader_overrides_after_close_tar
             .expect("active browser context");
         assert_eq!(active.active_target_id(), Some("TID-000000000UC"));
         assert_eq!(
-            active.network_policy.user_agent_override(),
+            active
+                .active_page_target()
+                .effective_policy()
+                .browser_identity_override()
+                .map(|identity| identity.user_agent()),
             Some("Moli/Close-A")
         );
-        assert_eq!(active.tls_verify_host_override, Some(false));
+        assert_eq!(
+            active.active_page_target().tls_verify_host_override,
+            Some(false)
+        );
     }
     ctx.conn
         .ensure_resource_request_client()
-        .expect("restored loader after close promotion");
+        .expect("restored loader after close activation");
     assert_eq!(ctx.conn.user_agent(), "Moli/Close-A");
     assert!(!ctx.conn.tls_verify_host());
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn same_context_targets_restore_their_own_proxy_loader_overrides_after_close_target_promotion()
+async fn same_context_targets_restore_their_own_proxy_loader_overrides_after_close_target_activation()
  {
     let mut ctx = TestContext::new();
     load_bc_with_titled_page_async(
@@ -1204,8 +1304,9 @@ async fn same_context_targets_restore_their_own_proxy_loader_overrides_after_clo
             .browser_context
             .as_mut()
             .expect("active browser context");
-        active.http_proxy_override = Some("http://proxy-close-a.test:8080".into());
-        active.http_no_proxy_override = Some("localhost,127.0.0.1".into());
+        active.active_page_target_mut().http_proxy_override =
+            Some("http://proxy-close-a.test:8080".into());
+        active.active_page_target_mut().http_no_proxy_override = Some("localhost,127.0.0.1".into());
     }
     ctx.conn.invalidate_resource_runtime_async().await;
     ctx.conn
@@ -1274,8 +1375,9 @@ async fn same_context_targets_restore_their_own_proxy_loader_overrides_after_clo
             .browser_context
             .as_mut()
             .expect("active browser context");
-        active.http_proxy_override = Some("http://proxy-close-b.test:8080".into());
-        active.http_no_proxy_override = Some("::1,.example.com".into());
+        active.active_page_target_mut().http_proxy_override =
+            Some("http://proxy-close-b.test:8080".into());
+        active.active_page_target_mut().http_no_proxy_override = Some("::1,.example.com".into());
     }
     ctx.conn.invalidate_resource_runtime_async().await;
     ctx.conn
@@ -1304,17 +1406,20 @@ async fn same_context_targets_restore_their_own_proxy_loader_overrides_after_clo
             .expect("active browser context");
         assert_eq!(active.active_target_id(), Some("TID-000000000PC"));
         assert_eq!(
-            active.http_proxy_override.as_deref(),
+            active.active_page_target().http_proxy_override.as_deref(),
             Some("http://proxy-close-a.test:8080")
         );
         assert_eq!(
-            active.http_no_proxy_override.as_deref(),
+            active
+                .active_page_target()
+                .http_no_proxy_override
+                .as_deref(),
             Some("localhost,127.0.0.1")
         );
     }
     ctx.conn
         .ensure_resource_request_client()
-        .expect("restored loader after close promotion");
+        .expect("restored loader after close activation");
     assert_eq!(
         ctx.conn.http_proxy(),
         Some("http://proxy-close-a.test:8080")

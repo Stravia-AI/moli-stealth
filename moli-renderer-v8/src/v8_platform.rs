@@ -69,9 +69,9 @@ pub(crate) fn initialization_flags() -> &'static str {
         // Debug Rust frames are much larger than release frames. Keep V8's
         // debug JS stack budget above its small default, but still well below
         // the render runtime's 8 MiB native stack.
-        "--stack-size=4096 --harmony-import-attributes --js-source-phase-imports --experimental-wasm-type-reflection"
+        "--stack-size=4096 --harmony-import-attributes --js-source-phase-imports"
     } else {
-        "--harmony-import-attributes --js-source-phase-imports --experimental-wasm-type-reflection"
+        "--harmony-import-attributes --js-source-phase-imports"
     }
 }
 

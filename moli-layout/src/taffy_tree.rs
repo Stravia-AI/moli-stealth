@@ -1606,6 +1606,16 @@ where
         if self.should_hide(node_id, inputs) {
             return compute_hidden_layout(self, node_id);
         }
+        // A block parent's intrinsic height calculation consumes the child's
+        // collapsible-margin sets as well as its numeric size. Taffy's compact
+        // measurement cache intentionally retains only the latter, so a cache
+        // hit reconstructed as `LayoutOutput` would silently turn escaped
+        // descendant margins into zero. Keep this legacy LayoutOutput path
+        // uncached until block sizing uses the dedicated size protocol end to
+        // end; final layout remains cached below.
+        if inputs.run_mode == RunMode::ComputeSize {
+            return self.compute_child_layout_uncached(node_id, inputs, block_context);
+        }
         compute_cached_layout(self, node_id, inputs, |world, node_id, inputs| {
             world.compute_child_layout_uncached(node_id, inputs, block_context)
         })
@@ -2665,10 +2675,28 @@ fn inline_percentage_basis(
 #[cfg(test)]
 mod tests {
     use super::{inline_percentage_basis, round_layout_to_css_subpixels};
+    use crate::{LayoutBoxKind, LayoutDisplay, LayoutWorld, PaintColor, ResolvedLayoutStyle};
+    use style::Atom;
     use taffy::{
-        AvailableSpace, Layout, NodeId, Point, RoundTree, Size, SizingPurpose, TraversePartialTree,
-        TraverseTree,
+        AutoSizeBehavior, AvailableSpace, Dimension, Layout, LayoutBlockContainer, LayoutInput,
+        LengthPercentageAuto, Line, NodeId, Point, RequestedAxis, RoundTree, RunMode, Size,
+        SizingMode, SizingPurpose, Style, TraversePartialTree, TraverseTree, WritingMode,
     };
+
+    fn synthetic_block_box(source: u8, style: Style<Atom>) -> crate::LayoutBox<u8> {
+        LayoutWorld::new_box(
+            Some(source),
+            None,
+            None,
+            format!("block-{source}"),
+            None,
+            None,
+            None,
+            LayoutBoxKind::PrincipalBlock,
+            ResolvedLayoutStyle::synthetic(LayoutDisplay::Block, style, PaintColor::TRANSPARENT),
+            None,
+        )
+    }
 
     struct RoundNode {
         children: Vec<NodeId>,
@@ -2762,6 +2790,72 @@ mod tests {
         assert_eq!(
             inline_percentage_basis(AvailableSpace::MaxContent, SizingPurpose::Layout),
             None
+        );
+    }
+
+    #[test]
+    fn repeated_block_measurement_preserves_collapsible_margin_sets() {
+        let mut child_style = Style::default();
+        child_style.size.height = Dimension::length(10.0);
+        child_style.margin.top = LengthPercentageAuto::length(3.0);
+        child_style.margin.bottom = LengthPercentageAuto::length(6.0);
+
+        let mut world = LayoutWorld::new(synthetic_block_box(0, Style::default()), false);
+        let root = world.root();
+        let child = world.allocate(synthetic_block_box(1, child_style));
+        world.boxes[root.index()].children.push(child);
+        world.boxes[root.index()].layout_children.push(child);
+        world.boxes[child.index()].parent = Some(root);
+        world.boxes[child.index()].structural_parent = Some(root);
+        world.boxes[child.index()].layout_parent = Some(root);
+
+        let inputs = LayoutInput {
+            run_mode: RunMode::ComputeSize,
+            sizing_mode: SizingMode::InherentSize,
+            sizing_purpose: SizingPurpose::Layout,
+            axis: RequestedAxis::Both,
+            block_auto_behavior: AutoSizeBehavior::FitContent,
+            known_dimensions: Size {
+                width: Some(100.0),
+                height: None,
+            },
+            definite_dimensions: Size {
+                width: Some(100.0),
+                height: None,
+            },
+            parent_size: Size {
+                width: Some(100.0),
+                height: None,
+            },
+            parent_writing_mode: WritingMode::HorizontalTb,
+            available_space: Size {
+                width: AvailableSpace::Definite(100.0),
+                height: AvailableSpace::MaxContent,
+            },
+            vertical_margins_are_collapsible: Line::TRUE,
+        };
+
+        let first = LayoutBlockContainer::compute_block_child_layout(
+            &mut world,
+            root.to_taffy(),
+            inputs,
+            None,
+        );
+        let second = LayoutBlockContainer::compute_block_child_layout(
+            &mut world,
+            root.to_taffy(),
+            inputs,
+            None,
+        );
+
+        assert_eq!(first.size.height, 10.0);
+        assert_eq!(first.top_margin.resolve(), 3.0);
+        assert_eq!(first.bottom_margin.resolve(), 6.0);
+        assert_eq!(second.top_margin, first.top_margin);
+        assert_eq!(second.bottom_margin, first.bottom_margin);
+        assert_eq!(
+            second.margins_can_collapse_through,
+            first.margins_can_collapse_through
         );
     }
 }

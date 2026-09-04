@@ -485,7 +485,7 @@ mod tests {
             .browser_context
             .as_mut()
             .expect("browser context should be loaded");
-        assert!(browser_context.assign_auxiliary_session_to_target("TID-1", "SID-2".to_owned()));
+        assert!(browser_context.assign_attached_session_to_target("TID-1", "SID-2".to_owned()));
         ctx.process_async(json!({"id": 1, "method": "Log.enable", "sessionId": "SID-1"}))
             .await;
         ctx.expect_result(1, json!({}), Some("SID-1"));
@@ -516,8 +516,8 @@ mod tests {
                 .is_some()
         );
 
-        let prepared =
-            live_log_prepared_outputs_for_renderer_network_fact(&ctx.conn, Some("SID-1"));
+        let owner = crate::conn::CommandOwnerScope::for_session("SID-1");
+        let prepared = live_log_prepared_outputs_for_renderer_network_fact(&ctx.conn, &owner);
         let mut slot = ObservablePreparedOutputSlot::from_outputs(prepared);
         let mut events = Vec::new();
         slot.emit_activity_background_events_async(
@@ -653,7 +653,7 @@ mod tests {
             None,
             None,
         );
-        ctx.conn.browser_context = Some(bc);
+        ctx.conn.install_browser_context_fixture_for_test(bc);
 
         ctx.process_async(json!({
             "id": 1,
@@ -665,13 +665,15 @@ mod tests {
         ctx.expect_result(1, json!({}), Some("SID-background"));
         let active = ctx.conn.browser_context.as_ref().expect("browser context");
         assert!(
-            !active.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+            !active.active_page_target().devtools_sessions
+                [moli_page_types::DevToolsSessionKey::Primary]
                 .page_session_state
                 .log_enabled
         );
         assert!(
             active
-                .parked_page_session_state("TID-background")
+                .background_target("TID-background")
+                .filter(|target| target.has_non_default_session_state())
                 .is_some_and(|state| state.devtools_sessions
                     [moli_page_types::DevToolsSessionKey::Primary]
                     .page_session_state
@@ -689,7 +691,7 @@ mod tests {
                 .browser_context
                 .as_mut()
                 .expect("browser context")
-                .assign_auxiliary_session_to_target("TID-1", "SID-2".to_owned())
+                .assign_attached_session_to_target("TID-1", "SID-2".to_owned())
         );
 
         ctx.process_async(json!({"id": 1, "method": "Log.enable", "sessionId": "SID-1"}))
@@ -745,8 +747,8 @@ mod tests {
             .browser_context
             .as_mut()
             .expect("browser context should be loaded");
-        assert!(browser_context.assign_auxiliary_session_to_target("TID-1", "SID-2".to_owned()));
-        assert!(browser_context.assign_auxiliary_session_to_target("TID-1", "SID-3".to_owned()));
+        assert!(browser_context.assign_attached_session_to_target("TID-1", "SID-2".to_owned()));
+        assert!(browser_context.assign_attached_session_to_target("TID-1", "SID-3".to_owned()));
 
         ctx.process_async(json!({"id": 1, "method": "Log.enable", "sessionId": "SID-1"}))
             .await;
@@ -858,6 +860,7 @@ mod tests {
             .browser_context
             .as_ref()
             .expect("browser context")
+            .active_page_target()
             .devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
             .console_output_session_state
             .log_violation_thresholds;
@@ -875,6 +878,7 @@ mod tests {
                 .browser_context
                 .as_ref()
                 .expect("browser context")
+                .active_page_target()
                 .devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
                 .console_output_session_state
                 .log_violation_thresholds

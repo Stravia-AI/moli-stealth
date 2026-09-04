@@ -43,10 +43,10 @@ async fn continue_with_auth_retries_navigation_with_basic_credentials() {
 
     let mut ctx = TestContext::new();
     let mut bc = attached_browser_context();
-    bc.active_target
+    bc.active_page_target_mut()
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.install_browser_context_fixture_for_test(bc);
     ctx.enable_page_events_for_test(Some("SID-1"));
     ctx.enable_dom_events_for_test(Some("SID-1"));
     let url = format!("http://{addr}/auth");
@@ -204,10 +204,10 @@ async fn devtools_continue_response_credentials_retries_auth_navigation() {
 
     let mut ctx = TestContext::new();
     let mut bc = attached_browser_context();
-    bc.active_target
+    bc.active_page_target_mut()
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.install_browser_context_fixture_for_test(bc);
     ctx.enable_page_events_for_test(Some("SID-1"));
     let url = format!("http://{addr}/auth");
 
@@ -350,10 +350,10 @@ async fn continue_with_auth_and_intercept_response_pauses_before_authorized_body
 
     let mut ctx = TestContext::new();
     let mut bc = attached_browser_context();
-    bc.active_target
+    bc.active_page_target_mut()
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.install_browser_context_fixture_for_test(bc);
     let url = format!("http://{addr}/auth");
 
     ctx.process_async(json!({
@@ -484,10 +484,10 @@ async fn continue_with_non_basic_auth_and_intercept_response_fails_explicitly_wi
 
     let mut ctx = TestContext::new();
     let mut bc = attached_browser_context();
-    bc.active_target
+    bc.active_page_target_mut()
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.install_browser_context_fixture_for_test(bc);
     let url = format!("http://{addr}/auth");
 
     ctx.process_async(json!({
@@ -601,7 +601,7 @@ async fn navigation_auth_required_includes_synthesized_cookie_header() {
 
     let mut ctx = TestContext::new();
     let mut bc = attached_browser_context();
-    bc.active_target
+    bc.active_page_target_mut()
         .runtime_slot
         .enable_primary_network_events();
     let url = format!("http://{addr}/auth");
@@ -615,7 +615,7 @@ async fn navigation_auth_required_includes_synthesized_cookie_header() {
             )],
         );
     }
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.install_browser_context_fixture_for_test(bc);
 
     ctx.process_async(json!({
         "id": 72_001,
@@ -698,10 +698,10 @@ async fn continue_with_auth_prefers_supported_navigation_challenge_over_unsuppor
 
     let mut ctx = TestContext::new();
     let mut bc = attached_browser_context();
-    bc.active_target
+    bc.active_page_target_mut()
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.install_browser_context_fixture_for_test(bc);
     let url = format!("http://{addr}/auth");
 
     ctx.process_async(json!({
@@ -847,11 +847,11 @@ async fn run_navigation_cdp_fetch_then_bidi_network_auth_required_terminal(
 
     let mut ctx = TestContext::new();
     let mut bc = attached_browser_context();
-    assert!(bc.assign_auxiliary_session_to_target("TID-1", "SID-fetch".to_owned()));
-    bc.active_target
+    assert!(bc.assign_attached_session_to_target("TID-1", "SID-fetch".to_owned()));
+    bc.active_page_target_mut()
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.install_browser_context_fixture_for_test(bc);
     ctx.enable_page_events_for_test(Some("SID-1"));
     let url = format!("http://{addr}/auth");
 
@@ -927,7 +927,9 @@ async fn run_navigation_cdp_fetch_then_bidi_network_auth_required_terminal(
     let parsed_url = Url::parse(&url).unwrap();
     let auth_pause_sessions = ctx
         .conn
-        .target_fetch_subresource_interception_snapshot_for_session_owner(Some("SID-1"))
+        .target_fetch_subresource_interception_snapshot_for_owner(
+            &crate::conn::CommandOwnerScope::for_session("SID-1"),
+        )
         .expect("active target fetch snapshot")
         .matching_auth_required_pause_sessions(Some("SID-1"), &parsed_url);
     assert_eq!(
@@ -954,7 +956,7 @@ async fn run_navigation_cdp_fetch_then_bidi_network_auth_required_terminal(
     }))
     .await;
 
-    let paused = ctx.take_first_matching("auxiliary navigation Fetch.requestPaused", |message| {
+    let paused = ctx.take_first_matching("attached navigation Fetch.requestPaused", |message| {
         message["method"] == json!("Fetch.requestPaused")
             && message["sessionId"] == json!("SID-fetch")
             && message["params"]["resourceType"] == json!("Document")

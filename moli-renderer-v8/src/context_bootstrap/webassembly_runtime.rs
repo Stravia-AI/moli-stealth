@@ -211,7 +211,6 @@ pub(in crate::context_bootstrap) fn install_webassembly_runtime_extensions(
     install_table_constructor(scope, webassembly)?;
     install_global_constructor(scope, webassembly)?;
     install_tag_constructor(scope, webassembly)?;
-    install_function_shape(scope, webassembly);
     install_exception_shape(scope, webassembly)?;
     define_non_enumerable_bool_property(scope, webassembly, WASM_RUNTIME_INSTALLED_SLOT, true);
     Ok(())
@@ -1905,23 +1904,6 @@ fn global_value_setter_callback<'s>(
         args.get(0)
     };
     let _ = setter.call(scope, args.this().into(), &[value]);
-}
-
-fn install_function_shape<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    webassembly: v8::Local<'s, v8::Object>,
-) {
-    if let Some(function) = webassembly_constructor(scope, webassembly, "Function") {
-        let _ = define_value_property(
-            scope,
-            function.into(),
-            "length",
-            v8::Integer::new(scope, 2).into(),
-            false,
-            false,
-            true,
-        );
-    }
 }
 
 fn install_exception_shape<'s>(

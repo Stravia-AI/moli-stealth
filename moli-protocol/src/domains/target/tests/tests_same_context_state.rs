@@ -104,6 +104,8 @@ async fn same_context_targets_restore_their_own_script_execution_disabled_after_
             .browser_context
             .as_ref()
             .expect("active browser context")
+            .active_page_target()
+            .effective_emulation_state
             .script_execution_disabled
     );
 
@@ -152,6 +154,8 @@ async fn same_context_targets_restore_their_own_script_execution_disabled_after_
             .browser_context
             .as_ref()
             .expect("active browser context")
+            .active_page_target()
+            .effective_emulation_state
             .script_execution_disabled
     );
 
@@ -403,12 +407,16 @@ async fn same_context_targets_restore_their_own_crash_state_after_switching() {
         .browser_context
         .as_mut()
         .unwrap()
-        .active_target
+        .active_page_target_mut()
         .owner_state
         .target_crash_state
         .mark_crashed();
-    ctx.conn.browser_context.as_mut().unwrap().devtools_sessions
-        [moli_page_types::DevToolsSessionKey::Primary]
+    ctx.conn
+        .browser_context
+        .as_mut()
+        .unwrap()
+        .active_page_target_mut()
+        .devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
         .runtime_session_state
         .record_inspector_target_crashed();
 
@@ -491,7 +499,7 @@ async fn same_context_targets_restore_their_own_crash_state_after_switching() {
             .browser_context
             .as_ref()
             .expect("active browser context")
-            .active_target
+            .active_page_target()
             .owner_state
             .target_crash_state
             .is_crashed()
@@ -518,7 +526,7 @@ async fn same_context_targets_restore_their_own_crash_state_after_switching() {
             .browser_context
             .as_ref()
             .expect("browser context")
-            .active_target
+            .active_page_target()
             .owner_state
             .target_crash_state
             .is_crashed()
@@ -620,31 +628,35 @@ async fn same_context_targets_restore_their_own_domain_enablement_after_switchin
             .expect("active browser context");
         assert_eq!(bc.active_target_id(), Some("TID-000000000A"));
         assert!(
-            bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+            bc.active_page_target().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
                 .page_session_state
                 .page_lifecycle_events
         );
         assert!(
-            bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+            bc.active_page_target().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
                 .runtime_session_state
                 .runtime_frontend_enabled
         );
         assert!(
-            bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+            bc.active_page_target().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
                 .runtime_session_state
                 .inspector_enabled
         );
         assert!(
-            bc.active_target
+            bc.active_page_target()
                 .runtime_slot
                 .primary_network_events_enabled()
         );
-        assert!(bc.network_policy.cache_disabled());
-        assert!(bc.network_policy.bypass_service_worker());
-        assert!(bc.css_enabled);
-        assert!(bc.active_target.fetch_owner.is_enabled());
-        assert!(bc.active_target.fetch_owner.handle_auth_requests());
-        let fetch_config = bc.active_target.fetch_owner.config_snapshot();
+        assert!(bc.active_page_target().effective_policy().cache_disabled());
+        assert!(
+            bc.active_page_target()
+                .effective_policy()
+                .bypass_service_worker()
+        );
+        assert!(bc.active_page_target().css_enabled);
+        assert!(bc.active_page_target().fetch_owner.is_enabled());
+        assert!(bc.active_page_target().fetch_owner.handle_auth_requests());
+        let fetch_config = bc.active_page_target().fetch_owner.config_snapshot();
         assert_eq!(fetch_config.patterns().len(), 1);
         assert_eq!(fetch_config.patterns()[0].url_pattern, "*target-a*");
         assert_eq!(
@@ -668,32 +680,39 @@ async fn same_context_targets_restore_their_own_domain_enablement_after_switchin
             .expect("active browser context");
         assert_eq!(bc.active_target_id(), Some(second_target_id.as_str()));
         assert!(
-            !bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+            !bc.active_page_target().devtools_sessions
+                [moli_page_types::DevToolsSessionKey::Primary]
                 .page_session_state
                 .page_lifecycle_events
         );
         assert!(
-            !bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+            !bc.active_page_target().devtools_sessions
+                [moli_page_types::DevToolsSessionKey::Primary]
                 .runtime_session_state
                 .runtime_frontend_enabled
         );
         assert!(
-            !bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+            !bc.active_page_target().devtools_sessions
+                [moli_page_types::DevToolsSessionKey::Primary]
                 .runtime_session_state
                 .inspector_enabled
         );
         assert!(
-            !bc.active_target
+            !bc.active_page_target()
                 .runtime_slot
                 .primary_network_events_enabled()
         );
-        assert!(!bc.network_policy.cache_disabled());
-        assert!(!bc.network_policy.bypass_service_worker());
-        assert!(!bc.css_enabled);
-        assert!(!bc.active_target.fetch_owner.is_enabled());
-        assert!(!bc.active_target.fetch_owner.handle_auth_requests());
+        assert!(!bc.active_page_target().effective_policy().cache_disabled());
         assert!(
-            bc.active_target
+            !bc.active_page_target()
+                .effective_policy()
+                .bypass_service_worker()
+        );
+        assert!(!bc.active_page_target().css_enabled);
+        assert!(!bc.active_page_target().fetch_owner.is_enabled());
+        assert!(!bc.active_page_target().fetch_owner.handle_auth_requests());
+        assert!(
+            bc.active_page_target()
                 .fetch_owner
                 .config_snapshot()
                 .patterns()
@@ -851,12 +870,12 @@ async fn same_context_targets_restore_their_own_page_attachment_id_and_request_c
         .attach_active_session("SID-active");
     {
         let bc = ctx.conn.browser_context.as_mut().expect("browser context");
-        bc.active_target
+        bc.active_page_target_mut()
             .runtime_slot
             .set_page_attachment_id_for_test(11);
         bc.set_next_network_request_sequence_for_test(41);
         bc.set_subresource_network_emitted_record_count_for_test(12);
-        bc.active_target
+        bc.active_page_target_mut()
             .runtime_slot
             .set_network_request_counters_for_test(4, 5);
     }
@@ -895,12 +914,12 @@ async fn same_context_targets_restore_their_own_page_attachment_id_and_request_c
 
     {
         let bc = ctx.conn.browser_context.as_mut().expect("browser context");
-        bc.active_target
+        bc.active_page_target_mut()
             .runtime_slot
             .set_page_attachment_id_for_test(23);
         bc.set_next_network_request_sequence_for_test(71);
         bc.set_subresource_network_emitted_record_count_for_test(8);
-        bc.active_target
+        bc.active_page_target_mut()
             .runtime_slot
             .set_network_request_counters_for_test(9, 10);
     }
@@ -912,7 +931,7 @@ async fn same_context_targets_restore_their_own_page_attachment_id_and_request_c
         let bc = ctx.conn.browser_context.as_ref().expect("browser context");
         assert_eq!(bc.active_target_id(), Some("TID-000000000A"));
         assert_eq!(
-            bc.active_target
+            bc.active_page_target()
                 .runtime_slot
                 .page_attachment_id()
                 .map(crate::conn::TargetPageAttachmentId::get),
@@ -921,13 +940,13 @@ async fn same_context_targets_restore_their_own_page_attachment_id_and_request_c
         assert_eq!(bc.next_network_request_sequence_for_test(), 41);
         assert_eq!(bc.subresource_network_emitted_record_count_for_test(), 12);
         assert_eq!(
-            bc.active_target
+            bc.active_page_target()
                 .runtime_slot
                 .next_fetch_request_id_for_test(),
             4
         );
         assert_eq!(
-            bc.active_target
+            bc.active_page_target()
                 .runtime_slot
                 .next_subresource_fetch_request_id_for_test(),
             5
@@ -941,7 +960,7 @@ async fn same_context_targets_restore_their_own_page_attachment_id_and_request_c
         let bc = ctx.conn.browser_context.as_ref().expect("browser context");
         assert_eq!(bc.active_target_id(), Some(second_target_id.as_str()));
         assert_eq!(
-            bc.active_target
+            bc.active_page_target()
                 .runtime_slot
                 .page_attachment_id()
                 .map(crate::conn::TargetPageAttachmentId::get),
@@ -950,13 +969,13 @@ async fn same_context_targets_restore_their_own_page_attachment_id_and_request_c
         assert_eq!(bc.next_network_request_sequence_for_test(), 71);
         assert_eq!(bc.subresource_network_emitted_record_count_for_test(), 8);
         assert_eq!(
-            bc.active_target
+            bc.active_page_target()
                 .runtime_slot
                 .next_fetch_request_id_for_test(),
             9
         );
         assert_eq!(
-            bc.active_target
+            bc.active_page_target()
                 .runtime_slot
                 .next_subresource_fetch_request_id_for_test(),
             10
@@ -1029,8 +1048,16 @@ async fn same_context_targets_restore_their_own_security_identity_after_switchin
     {
         let bc = ctx.conn.browser_context.as_ref().expect("browser context");
         assert_eq!(bc.active_target_id(), Some("TID-000000000A"));
-        assert_eq!(bc.target_security_origin(), "https://a.example");
-        assert_eq!(bc.target_secure_context_type(), "Secure");
+        assert_eq!(
+            bc.active_page_target().target_identity().security_origin(),
+            "https://a.example"
+        );
+        assert_eq!(
+            bc.active_page_target()
+                .target_identity()
+                .secure_context_type(),
+            "Secure"
+        );
     }
 
     ctx.process_async(json!({"id": 1041972, "method": "Page.getFrameTree"}))
@@ -1051,8 +1078,16 @@ async fn same_context_targets_restore_their_own_security_identity_after_switchin
     {
         let bc = ctx.conn.browser_context.as_ref().expect("browser context");
         assert_eq!(bc.active_target_id(), Some(second_target_id.as_str()));
-        assert_eq!(bc.target_security_origin(), "null");
-        assert_eq!(bc.target_secure_context_type(), "InsecureScheme");
+        assert_eq!(
+            bc.active_page_target().target_identity().security_origin(),
+            "null"
+        );
+        assert_eq!(
+            bc.active_page_target()
+                .target_identity()
+                .secure_context_type(),
+            "InsecureScheme"
+        );
     }
 
     ctx.process_async(json!({"id": 1041974, "method": "Page.getFrameTree"}))
@@ -1268,12 +1303,16 @@ async fn same_context_targets_restore_their_own_crash_state_after_session_scoped
         .browser_context
         .as_mut()
         .unwrap()
-        .active_target
+        .active_page_target_mut()
         .owner_state
         .target_crash_state
         .mark_crashed();
-    ctx.conn.browser_context.as_mut().unwrap().devtools_sessions
-        [moli_page_types::DevToolsSessionKey::Primary]
+    ctx.conn
+        .browser_context
+        .as_mut()
+        .unwrap()
+        .active_page_target_mut()
+        .devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
         .runtime_session_state
         .record_inspector_target_crashed();
 
@@ -1331,7 +1370,7 @@ async fn same_context_targets_restore_their_own_crash_state_after_session_scoped
             .browser_context
             .as_ref()
             .expect("active browser context")
-            .active_target
+            .active_page_target()
             .owner_state
             .target_crash_state
             .is_crashed()
@@ -1355,7 +1394,7 @@ async fn same_context_targets_restore_their_own_crash_state_after_session_scoped
         "method": "Page.navigate",
         "sessionId": second_session_id,
         "params": {
-            "url": "data:text/html,<title>second-after-session-promotion</title><div id='ok'>second target</div>"
+            "url": "data:text/html,<title>second-after-session-activation</title><div id='ok'>second target</div>"
         }
     })).await;
     let _ = take_response_by_id(&mut ctx, 1042027);
@@ -1382,7 +1421,7 @@ async fn same_context_targets_restore_their_own_crash_state_after_session_scoped
             .browser_context
             .as_ref()
             .expect("browser context")
-            .active_target
+            .active_page_target()
             .owner_state
             .target_crash_state
             .is_crashed()
@@ -1406,7 +1445,7 @@ async fn same_context_targets_restore_their_own_crash_state_after_session_scoped
             .browser_context
             .as_ref()
             .expect("browser context")
-            .active_target
+            .active_page_target()
             .owner_state
             .target_crash_state
             .is_crashed()
@@ -1525,20 +1564,20 @@ async fn same_context_targets_restore_their_own_domain_enablement_after_session_
             .as_ref()
             .expect("active browser context");
         assert_eq!(bc.active_target_id(), Some("TID-000000000DS"));
-        assert!(bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary].page_session_state.page_lifecycle_events);
-        assert!(bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary].runtime_session_state.runtime_frontend_enabled);
-        assert!(bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary].runtime_session_state.inspector_enabled);
+        assert!(bc.active_page_target().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary].page_session_state.page_lifecycle_events);
+        assert!(bc.active_page_target().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary].runtime_session_state.runtime_frontend_enabled);
+        assert!(bc.active_page_target().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary].runtime_session_state.inspector_enabled);
         assert!(
-            bc.active_target
+            bc.active_page_target()
                 .runtime_slot
                 .primary_network_events_enabled()
         );
-        assert!(bc.network_policy.cache_disabled());
-        assert!(bc.network_policy.bypass_service_worker());
-        assert!(bc.css_enabled);
-        assert!(bc.active_target.fetch_owner.is_enabled());
-        assert!(bc.active_target.fetch_owner.handle_auth_requests());
-        let fetch_config = bc.active_target.fetch_owner.config_snapshot();
+        assert!(bc.active_page_target().effective_policy().cache_disabled());
+        assert!(bc.active_page_target().effective_policy().bypass_service_worker());
+        assert!(bc.active_page_target().css_enabled);
+        assert!(bc.active_page_target().fetch_owner.is_enabled());
+        assert!(bc.active_page_target().fetch_owner.handle_auth_requests());
+        let fetch_config = bc.active_page_target().fetch_owner.config_snapshot();
         assert_eq!(fetch_config.patterns().len(), 1);
         assert_eq!(fetch_config.patterns()[0].url_pattern, "*target-a*");
         assert_eq!(
@@ -1561,22 +1600,22 @@ async fn same_context_targets_restore_their_own_domain_enablement_after_session_
             .conn
             .browser_context
             .as_ref()
-            .expect("active browser context after session-scoped promotion");
+            .expect("active browser context after session-scoped activation");
         assert_eq!(bc.active_target_id(), Some(second_target_id.as_str()));
-        assert!(!bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary].page_session_state.page_lifecycle_events);
-        assert!(bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary].runtime_session_state.runtime_frontend_enabled);
-        assert!(!bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary].runtime_session_state.inspector_enabled);
+        assert!(!bc.active_page_target().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary].page_session_state.page_lifecycle_events);
+        assert!(bc.active_page_target().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary].runtime_session_state.runtime_frontend_enabled);
+        assert!(!bc.active_page_target().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary].runtime_session_state.inspector_enabled);
         assert!(
-            bc.active_target
+            bc.active_page_target()
                 .runtime_slot
                 .primary_network_events_enabled()
         );
-        assert!(!bc.network_policy.cache_disabled());
-        assert!(!bc.network_policy.bypass_service_worker());
-        assert!(!bc.css_enabled);
-        assert!(bc.active_target.fetch_owner.is_enabled());
-        assert!(!bc.active_target.fetch_owner.handle_auth_requests());
-        let fetch_config = bc.active_target.fetch_owner.config_snapshot();
+        assert!(!bc.active_page_target().effective_policy().cache_disabled());
+        assert!(!bc.active_page_target().effective_policy().bypass_service_worker());
+        assert!(!bc.active_page_target().css_enabled);
+        assert!(bc.active_page_target().fetch_owner.is_enabled());
+        assert!(!bc.active_page_target().fetch_owner.handle_auth_requests());
+        let fetch_config = bc.active_page_target().fetch_owner.config_snapshot();
         assert_eq!(fetch_config.patterns().len(), 1);
         assert_eq!(fetch_config.patterns()[0].url_pattern, "*target-b*");
         assert_eq!(
@@ -1601,20 +1640,20 @@ async fn same_context_targets_restore_their_own_domain_enablement_after_session_
             .as_ref()
             .expect("active browser context after restoring first target");
         assert_eq!(bc.active_target_id(), Some("TID-000000000DS"));
-        assert!(bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary].page_session_state.page_lifecycle_events);
-        assert!(bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary].runtime_session_state.runtime_frontend_enabled);
-        assert!(bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary].runtime_session_state.inspector_enabled);
+        assert!(bc.active_page_target().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary].page_session_state.page_lifecycle_events);
+        assert!(bc.active_page_target().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary].runtime_session_state.runtime_frontend_enabled);
+        assert!(bc.active_page_target().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary].runtime_session_state.inspector_enabled);
         assert!(
-            bc.active_target
+            bc.active_page_target()
                 .runtime_slot
                 .primary_network_events_enabled()
         );
-        assert!(bc.network_policy.cache_disabled());
-        assert!(bc.network_policy.bypass_service_worker());
-        assert!(bc.css_enabled);
-        assert!(bc.active_target.fetch_owner.is_enabled());
-        assert!(bc.active_target.fetch_owner.handle_auth_requests());
-        let fetch_config = bc.active_target.fetch_owner.config_snapshot();
+        assert!(bc.active_page_target().effective_policy().cache_disabled());
+        assert!(bc.active_page_target().effective_policy().bypass_service_worker());
+        assert!(bc.active_page_target().css_enabled);
+        assert!(bc.active_page_target().fetch_owner.is_enabled());
+        assert!(bc.active_page_target().fetch_owner.handle_auth_requests());
+        let fetch_config = bc.active_page_target().fetch_owner.config_snapshot();
         assert_eq!(fetch_config.patterns().len(), 1);
         assert_eq!(fetch_config.patterns()[0].url_pattern, "*target-a*");
         assert_eq!(

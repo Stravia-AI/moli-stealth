@@ -231,7 +231,7 @@ pub(super) fn named_node_map_indexed_setter(
     _index: u32,
     _value: v8::Local<'_, v8::Value>,
     _args: v8::PropertyCallbackArguments<'_>,
-    mut rv: v8::ReturnValue<'_, ()>,
+    mut rv: v8::ReturnValue<'_, v8::Boolean>,
 ) -> v8::Intercepted {
     rv.set_bool(false);
     v8::Intercepted::kYes
@@ -258,7 +258,7 @@ pub(super) fn named_node_map_indexed_definer(
     _index: u32,
     _descriptor: &v8::PropertyDescriptor,
     _args: v8::PropertyCallbackArguments<'_>,
-    mut rv: v8::ReturnValue<'_, ()>,
+    mut rv: v8::ReturnValue<'_, v8::Boolean>,
 ) -> v8::Intercepted {
     rv.set_bool(false);
     v8::Intercepted::kYes
@@ -420,7 +420,7 @@ pub(super) fn named_node_map_named_setter<'a>(
     key: v8::Local<'a, v8::Name>,
     value: v8::Local<'a, v8::Value>,
     args: v8::PropertyCallbackArguments<'a>,
-    mut rv: v8::ReturnValue<'_, ()>,
+    mut rv: v8::ReturnValue<'_, v8::Boolean>,
 ) -> v8::Intercepted {
     let Some(element) = named_node_map_element(scope, args.holder()) else {
         return v8::Intercepted::kNo;
@@ -505,7 +505,7 @@ pub(super) fn named_node_map_named_definer<'a>(
     key: v8::Local<'a, v8::Name>,
     descriptor: &v8::PropertyDescriptor,
     args: v8::PropertyCallbackArguments<'a>,
-    mut rv: v8::ReturnValue<'_, ()>,
+    mut rv: v8::ReturnValue<'_, v8::Boolean>,
 ) -> v8::Intercepted {
     let Some(element) = named_node_map_element(scope, args.holder()) else {
         return v8::Intercepted::kNo;

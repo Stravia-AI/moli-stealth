@@ -678,7 +678,7 @@ impl HostEventTargetRegistry {
             .unwrap_or_default();
         let script_id = listener.script_id();
         let script_url = listener
-            .get_script_origin()
+            .get_script_origin(scope)
             .resource_name()
             .map(|value| value.to_rust_string_lossy(scope))
             .filter(|value| !value.is_empty());

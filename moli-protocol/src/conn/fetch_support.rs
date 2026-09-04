@@ -5,7 +5,7 @@ use url::Url;
 
 use super::body_spool::ensure_materialize_limit;
 use super::{
-    CapturedBody, CapturedBodyWriter, CdpConnection, DocumentNavigationToken,
+    CapturedBody, CapturedBodyWriter, CdpConnection, CommandOwnerScope, DocumentNavigationToken,
     NavigationDispatchState, NavigationLoadOutcome, PausedResponsePreparedDocument,
 };
 use crate::devtools_runtime::{DevToolsNetworkInterceptId, DevToolsNetworkResourceType};
@@ -1563,8 +1563,7 @@ impl DocumentBodySource {
                 ..
             } => {
                 if !has_response_override && let Some(prepared_document) = prepared_document {
-                    let (engine, navigation) = prepared_document.resume_streaming(response, None);
-                    return Ok(navigation.with_navigation_engine(engine));
+                    return Ok(prepared_document.resume_streaming(response, None));
                 }
                 conn.build_navigation_from_streaming_raw_response_with_response_override_for_navigation_async(
                     navigation,
@@ -2056,8 +2055,33 @@ impl CdpConnection {
         intercept_response: bool,
         handle_auth_requests: bool,
     ) -> Result<PendingSubresourceContinueOutcome, String> {
+        let owner = CommandOwnerScope::capture(self, session_id);
+        self.continue_pending_subresource_fetch_for_owner_async(
+            &owner,
+            internal_id,
+            url,
+            method,
+            body,
+            headers,
+            intercept_response,
+            handle_auth_requests,
+        )
+        .await
+    }
+
+    pub(crate) async fn continue_pending_subresource_fetch_for_owner_async(
+        &mut self,
+        owner: &CommandOwnerScope,
+        internal_id: u64,
+        url: Option<Url>,
+        method: Option<String>,
+        body: Option<Option<String>>,
+        headers: Option<Vec<(String, String)>>,
+        intercept_response: bool,
+        handle_auth_requests: bool,
+    ) -> Result<PendingSubresourceContinueOutcome, String> {
         let page = self
-            .runtime_session_owner_slot_mut(session_id)?
+            .runtime_session_owner_slot_mut_for_owner(owner)?
             .loaded_page_mut()
             .ok_or_else(|| "NoDocumentLoaded".to_owned())?;
         page.continue_pending_subresource_fetch_async(
@@ -2088,8 +2112,19 @@ impl CdpConnection {
         internal_id: u64,
         auth: SubresourceAuthCredentials,
     ) -> Result<PendingSubresourceContinueOutcome, String> {
+        let owner = CommandOwnerScope::capture(self, session_id);
+        self.continue_pending_subresource_auth_for_owner_async(&owner, internal_id, auth)
+            .await
+    }
+
+    pub(crate) async fn continue_pending_subresource_auth_for_owner_async(
+        &mut self,
+        owner: &CommandOwnerScope,
+        internal_id: u64,
+        auth: SubresourceAuthCredentials,
+    ) -> Result<PendingSubresourceContinueOutcome, String> {
         let page = self
-            .runtime_session_owner_slot_mut(session_id)?
+            .runtime_session_owner_slot_mut_for_owner(owner)?
             .loaded_page_mut()
             .ok_or_else(|| "NoDocumentLoaded".to_owned())?;
         page.continue_pending_subresource_auth_async(internal_id, auth)
@@ -2112,8 +2147,19 @@ impl CdpConnection {
         internal_id: u64,
         error_text: String,
     ) -> Result<Option<moli_core::RendererOutputFence>, String> {
+        let owner = CommandOwnerScope::capture(self, session_id);
+        self.fail_pending_subresource_auth_for_owner_async(&owner, internal_id, error_text)
+            .await
+    }
+
+    pub(crate) async fn fail_pending_subresource_auth_for_owner_async(
+        &mut self,
+        owner: &CommandOwnerScope,
+        internal_id: u64,
+        error_text: String,
+    ) -> Result<Option<moli_core::RendererOutputFence>, String> {
         let page = self
-            .runtime_session_owner_slot_mut(session_id)?
+            .runtime_session_owner_slot_mut_for_owner(owner)?
             .loaded_page_mut()
             .ok_or_else(|| "NoDocumentLoaded".to_owned())?;
         page.fail_pending_subresource_auth_async(internal_id, error_text)
@@ -2136,8 +2182,19 @@ impl CdpConnection {
         internal_id: u64,
         error_text: String,
     ) -> Result<Option<moli_core::RendererOutputFence>, String> {
+        let owner = CommandOwnerScope::capture(self, session_id);
+        self.fail_pending_subresource_fetch_for_owner_async(&owner, internal_id, error_text)
+            .await
+    }
+
+    pub(crate) async fn fail_pending_subresource_fetch_for_owner_async(
+        &mut self,
+        owner: &CommandOwnerScope,
+        internal_id: u64,
+        error_text: String,
+    ) -> Result<Option<moli_core::RendererOutputFence>, String> {
         let page = self
-            .runtime_session_owner_slot_mut(session_id)?
+            .runtime_session_owner_slot_mut_for_owner(owner)?
             .loaded_page_mut()
             .ok_or_else(|| "NoDocumentLoaded".to_owned())?;
         page.fail_pending_subresource_fetch_async(internal_id, error_text)
@@ -2206,8 +2263,25 @@ impl CdpConnection {
         response_code: Option<u16>,
         response_headers: Option<Vec<(String, String)>>,
     ) -> Result<(), String> {
+        let owner = CommandOwnerScope::capture(self, session_id);
+        self.continue_pending_subresource_response_for_owner_async(
+            &owner,
+            internal_id,
+            response_code,
+            response_headers,
+        )
+        .await
+    }
+
+    pub(crate) async fn continue_pending_subresource_response_for_owner_async(
+        &mut self,
+        owner: &CommandOwnerScope,
+        internal_id: u64,
+        response_code: Option<u16>,
+        response_headers: Option<Vec<(String, String)>>,
+    ) -> Result<(), String> {
         let page = self
-            .runtime_session_owner_slot_mut(session_id)?
+            .runtime_session_owner_slot_mut_for_owner(owner)?
             .loaded_page_mut()
             .ok_or_else(|| "NoDocumentLoaded".to_owned())?;
         page.continue_pending_subresource_response_async(
@@ -2238,8 +2312,19 @@ impl CdpConnection {
         internal_id: u64,
         error_text: String,
     ) -> Result<Option<moli_core::RendererOutputFence>, String> {
+        let owner = CommandOwnerScope::capture(self, session_id);
+        self.fail_pending_subresource_response_for_owner_async(&owner, internal_id, error_text)
+            .await
+    }
+
+    pub(crate) async fn fail_pending_subresource_response_for_owner_async(
+        &mut self,
+        owner: &CommandOwnerScope,
+        internal_id: u64,
+        error_text: String,
+    ) -> Result<Option<moli_core::RendererOutputFence>, String> {
         let page = self
-            .runtime_session_owner_slot_mut(session_id)?
+            .runtime_session_owner_slot_mut_for_owner(owner)?
             .loaded_page_mut()
             .ok_or_else(|| "NoDocumentLoaded".to_owned())?;
         page.fail_pending_subresource_response_async(internal_id, error_text)

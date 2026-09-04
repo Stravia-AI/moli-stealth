@@ -92,7 +92,7 @@ fn unwrap_object_returns_live_value_and_context() {
     let object_id = extract_json_string_field(&response, "objectId")
         .unwrap_or_else(|| panic!("response should contain objectId: {response}"));
 
-    let mut unwrapped = session
+    let (value, context, mut object_group) = session
         .unwrap_object(scope, v8::inspector::StringView::from(object_id.as_bytes()))
         .unwrap_or_else(|error| {
             let message = error
@@ -101,22 +101,20 @@ fn unwrap_object_returns_live_value_and_context() {
                 .unwrap_or_default();
             panic!("objectId should unwrap: {message}");
         });
-    assert!(unwrapped.value.is_object());
+    assert!(value.is_object());
     assert_eq!(
-        v8::inspector::V8Inspector::execution_context_id(unwrapped.context),
+        v8::inspector::V8Inspector::execution_context_id(context),
         execution_context_id
     );
     assert_eq!(
-        unwrapped
-            .object_group
+        object_group
             .as_mut()
             .map(|group| format!("{}", group.string()))
             .as_deref(),
         Some("unwrap-test")
     );
 
-    let object = unwrapped
-        .value
+    let object = value
         .try_cast::<v8::Object>()
         .expect("unwrapped value should be an object");
     let answer_key: v8::Local<'_, v8::Value> = v8::String::new(scope, "answer").unwrap().into();

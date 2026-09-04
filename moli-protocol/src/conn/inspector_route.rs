@@ -7,7 +7,7 @@ use super::state::{
     CommittedRendererAgentAttachment, FinishedRendererDocumentNavigation,
     PreparedRendererAgentAttachment, RendererAgentAttachment, RendererPageResidenceIdentity,
 };
-use super::{CdpConnection, DocumentNavigationToken};
+use super::{CdpConnection, CommandOwnerScope, DocumentNavigationToken};
 
 impl CdpConnection {
     pub(crate) fn renderer_agent_attachment_is_current_for_session_owner(
@@ -21,24 +21,24 @@ impl CdpConnection {
             .is_some_and(|attachment| attachment.id() == attachment_id)
     }
 
-    pub(crate) fn current_renderer_agent_attachment_id_for_session_owner(
+    pub(crate) fn current_renderer_agent_attachment_id_for_owner(
         &self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
     ) -> Option<RendererAgentAttachmentId> {
-        self.runtime_session_owner_slot(session_id)
+        self.runtime_session_owner_slot_for_owner(owner)
             .ok()
             .and_then(|slot| slot.current_renderer_attachment())
             .map(RendererAgentAttachment::id)
     }
 
-    pub(crate) fn prepare_renderer_agent_candidate_for_session_owner(
+    pub(crate) fn prepare_renderer_agent_candidate_for_owner(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         token: &DocumentNavigationToken,
         page: &mut Page,
     ) -> Result<PreparedRendererAgentAttachment, String> {
-        let candidate = self.prepare_renderer_agent_candidate_token_for_session_owner(
-            session_id,
+        let candidate = self.prepare_renderer_agent_candidate_token_for_owner(
+            owner,
             token,
             page.renderer_devtools_agent_token(),
         )?;
@@ -46,30 +46,30 @@ impl CdpConnection {
         Ok(candidate)
     }
 
-    pub(crate) fn prepare_renderer_agent_candidate_token_for_session_owner(
+    pub(crate) fn prepare_renderer_agent_candidate_token_for_owner(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         token: &DocumentNavigationToken,
         agent_token: RendererDevToolsAgentToken,
     ) -> Result<PreparedRendererAgentAttachment, String> {
-        self.validate_navigation_target_owner(session_id, token)?;
-        self.runtime_session_owner_slot(session_id)?
+        self.validate_navigation_target_owner_for_scope(owner, token)?;
+        self.runtime_session_owner_slot_mut_for_owner(owner)?
             .prepare_renderer_agent_candidate_token(token, agent_token)
             .map_err(|error| error.to_string())
     }
 
-    pub(crate) fn route_current_renderer_inspector_output_for_session_owner(
+    pub(crate) fn route_current_renderer_inspector_output_for_owner(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         batches: Vec<RendererRuntimeInspectorMessageBatch>,
     ) -> Vec<RendererRuntimeInspectorMessageBatch> {
-        let mut batches =
-            self.filter_renderer_inspector_batches_for_target_owner(session_id, batches);
+        let session_id = owner.session_id();
+        let mut batches = self.filter_renderer_inspector_batches_for_target_owner(owner, batches);
         if batches.is_empty() {
             return Vec::new();
         }
         let current_attachment = self
-            .runtime_session_owner_slot(session_id)
+            .runtime_session_owner_slot_for_owner(owner)
             .ok()
             .and_then(|slot| slot.current_renderer_attachment());
         if let Some(current_attachment) = current_attachment {
@@ -116,22 +116,23 @@ impl CdpConnection {
             })
             .collect::<Vec<_>>();
         match self
-            .runtime_session_owner_slot_mut(session_id)
+            .runtime_session_owner_slot_mut_for_owner(owner)
             .and_then(|slot| {
                 slot.route_current_renderer_inspector_output(attachment_id, batches)
                     .map_err(|error| error.to_string())
             }) {
             Ok(batches) => {
-                let primary_session_id = self.runtime_session_owner_primary_session_id(session_id);
+                let primary_session_id =
+                    self.runtime_session_owner_primary_session_id_for_owner(owner);
                 for (session, state) in state_updates {
                     let state_session_id = match &session {
                         DevToolsSessionKey::Primary => primary_session_id.as_deref(),
                         DevToolsSessionKey::Attached(session_id) => Some(session_id.as_str()),
                     };
-                    let _ = self.merge_v8_inspector_session_state_for_session_owner(
-                        state_session_id,
-                        state,
-                    );
+                    let state_owner = state_session_id
+                        .map(CommandOwnerScope::for_session)
+                        .unwrap_or_else(|| owner.clone());
+                    let _ = self.merge_v8_inspector_session_state_for_owner(&state_owner, state);
                 }
                 batches
             }
@@ -146,48 +147,48 @@ impl CdpConnection {
         }
     }
 
-    pub(crate) fn commit_renderer_agent_candidate_for_session_owner(
+    pub(crate) fn commit_renderer_agent_candidate_for_owner(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         candidate: PreparedRendererAgentAttachment,
         renderer_page: RendererPageResidenceIdentity,
     ) -> Result<CommittedRendererAgentAttachment, String> {
-        self.validate_navigation_target_owner(session_id, candidate.navigation())?;
+        self.validate_navigation_target_owner_for_scope(owner, candidate.navigation())?;
         let transaction = self
-            .runtime_session_owner_slot_mut(session_id)?
+            .runtime_session_owner_slot_mut_for_owner(owner)?
             .commit_renderer_agent_candidate_transaction(candidate, renderer_page)
             .map_err(|error| error.to_string())?;
         let page_owner = self
-            .pending_target_page_residence_identity_for_session(session_id)
+            .pending_target_page_residence_identity_for_owner(owner)
             .ok_or_else(|| "NavigationTargetOwnerMissing".to_owned())?;
         self.bind_renderer_page_output_owner(renderer_page, page_owner);
         Ok(transaction)
     }
 
-    pub(crate) fn rollback_committed_renderer_agent_candidate_for_session_owner(
+    pub(crate) fn rollback_committed_renderer_agent_candidate_for_owner(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         transaction: CommittedRendererAgentAttachment,
     ) -> Result<(), String> {
-        self.validate_navigation_target_owner(session_id, transaction.navigation())?;
-        self.runtime_session_owner_slot_mut(session_id)?
+        self.validate_navigation_target_owner_for_scope(owner, transaction.navigation())?;
+        self.runtime_session_owner_slot_mut_for_owner(owner)?
             .rollback_committed_renderer_agent_candidate(transaction)
             .map_err(|error| error.to_string())
     }
 
-    pub(crate) fn finish_renderer_document_navigation_for_session_owner(
+    pub(crate) fn finish_renderer_document_navigation_for_owner(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         token: &DocumentNavigationToken,
     ) -> Option<FinishedRendererDocumentNavigation> {
         if self
-            .validate_navigation_target_owner(session_id, token)
+            .validate_navigation_target_owner_for_scope(owner, token)
             .is_err()
         {
             return None;
         }
         match self
-            .runtime_session_owner_slot_mut(session_id)
+            .runtime_session_owner_slot_mut_for_owner(owner)
             .and_then(|slot| {
                 slot.finish_renderer_document_navigation(token)
                     .map_err(|error| error.to_string())
@@ -196,7 +197,7 @@ impl CdpConnection {
             Err(error) => {
                 tracing::debug!(
                     %error,
-                    session_id,
+                    session_id = owner.session_id(),
                     loader_id = token.loader_id,
                     "renderer channel rejected navigation completion"
                 );
@@ -207,30 +208,30 @@ impl CdpConnection {
 
     fn filter_renderer_inspector_batches_for_target_owner(
         &self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         batches: Vec<RendererRuntimeInspectorMessageBatch>,
     ) -> Vec<RendererRuntimeInspectorMessageBatch> {
-        let owner = self.target_owner_identity_for_session(session_id);
+        let owner_identity = self.target_owner_identity_for_owner(owner);
         batches
             .into_iter()
             .filter(|batch| match &batch.session {
-                DevToolsSessionKey::Primary => owner.is_some(),
+                DevToolsSessionKey::Primary => owner_identity.is_some(),
                 DevToolsSessionKey::Attached(attached_session_id) => {
-                    owner.is_some()
+                    owner_identity.is_some()
                         && self.target_owner_identity_for_session(Some(attached_session_id))
-                            == owner
+                            == owner_identity
                 }
             })
             .collect()
     }
 
-    fn validate_navigation_target_owner(
+    fn validate_navigation_target_owner_for_scope(
         &self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         token: &DocumentNavigationToken,
     ) -> Result<(), String> {
         let (_, target_id) = self
-            .target_owner_identity_for_session(session_id)
+            .target_owner_identity_for_owner(owner)
             .ok_or_else(|| "NoDocumentLoaded".to_owned())?;
         if target_id.as_deref() != Some(token.target_id.as_str()) {
             return Err("renderer channel navigation target owner mismatch".to_owned());
@@ -274,24 +275,24 @@ mod tests {
         ));
         assert!(
             browser_context
-                .assign_auxiliary_session_to_target("TID-active", "SID-active-aux".to_owned(),)
+                .assign_attached_session_to_target("TID-active", "SID-active-attached".to_owned(),)
         );
-        assert!(
-            browser_context.assign_auxiliary_session_to_target(
-                "TID-background",
-                "SID-background-aux".to_owned(),
-            )
-        );
+        assert!(browser_context.assign_attached_session_to_target(
+            "TID-background",
+            "SID-background-attached".to_owned(),
+        ));
         let mut conn = CdpConnection::default();
-        conn.browser_context = Some(browser_context);
+        conn.install_browser_context_fixture_for_test(browser_context);
 
         let filtered = conn.filter_renderer_inspector_batches_for_target_owner(
-            Some("SID-active-primary"),
+            &CommandOwnerScope::for_session("SID-active-primary"),
             vec![
                 batch(DevToolsSessionKey::Primary),
-                batch(DevToolsSessionKey::Attached("SID-active-aux".to_owned())),
                 batch(DevToolsSessionKey::Attached(
-                    "SID-background-aux".to_owned(),
+                    "SID-active-attached".to_owned(),
+                )),
+                batch(DevToolsSessionKey::Attached(
+                    "SID-background-attached".to_owned(),
                 )),
                 batch(DevToolsSessionKey::Attached("SID-unknown".to_owned())),
             ],
@@ -301,7 +302,7 @@ mod tests {
         assert_eq!(filtered[0].session, DevToolsSessionKey::Primary);
         assert_eq!(
             filtered[1].session,
-            DevToolsSessionKey::Attached("SID-active-aux".to_owned())
+            DevToolsSessionKey::Attached("SID-active-attached".to_owned())
         );
     }
 
@@ -319,16 +320,19 @@ mod tests {
         browser_context.set_active_target_id("TID-state-route".to_owned());
         browser_context.attach_active_session("SID-state-primary".to_owned());
         assert!(
-            browser_context
-                .assign_auxiliary_session_to_target("TID-state-route", "SID-state-aux".to_owned(),)
+            browser_context.assign_attached_session_to_target(
+                "TID-state-route",
+                "SID-state-attached".to_owned(),
+            )
         );
         browser_context.set_loaded_page_async(page).await;
         let current = browser_context
-            .active_target
+            .active_page_target()
             .runtime_slot
             .current_renderer_attachment()
             .expect("installed page should have a renderer attachment");
-        ctx.conn.browser_context = Some(browser_context);
+        ctx.conn
+            .install_browser_context_fixture_for_test(browser_context);
 
         let accepted_state = V8InspectorSessionState::from_bytes(vec![1, 2, 3]);
         let mut accepted = batch(DevToolsSessionKey::Primary);
@@ -337,31 +341,9 @@ mod tests {
         accepted.bind_renderer_agent_attachment(current.id());
         assert_eq!(
             ctx.conn
-                .route_current_renderer_inspector_output_for_session_owner(None, vec![accepted])
-                .len(),
-            1
-        );
-        assert_eq!(
-            ctx.conn
-                .browser_context
-                .as_ref()
-                .expect("browser context")
-                .devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
-                .inspector_session_state
-                .v8_state,
-            Some(accepted_state.clone())
-        );
-
-        let auxiliary_state = V8InspectorSessionState::from_bytes(vec![7, 8]);
-        let mut auxiliary = batch(DevToolsSessionKey::Attached("SID-state-aux".to_owned()));
-        auxiliary.agent_token = current.agent_token();
-        auxiliary.v8_state_update = Some(auxiliary_state.clone());
-        auxiliary.bind_renderer_agent_attachment(current.id());
-        assert_eq!(
-            ctx.conn
-                .route_current_renderer_inspector_output_for_session_owner(
-                    Some("SID-state-primary"),
-                    vec![auxiliary],
+                .route_current_renderer_inspector_output_for_owner(
+                    &CommandOwnerScope::capture(&ctx.conn, None),
+                    vec![accepted],
                 )
                 .len(),
             1
@@ -371,13 +353,42 @@ mod tests {
                 .browser_context
                 .as_ref()
                 .expect("browser context")
-                .devtools_sessions
-                .attached("SID-state-aux")
-                .expect("auxiliary session state")
+                .active_page_target()
+                .devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
                 .inspector_session_state
                 .v8_state,
-            Some(auxiliary_state),
-            "auxiliary session cookies must remain isolated from the primary session"
+            Some(accepted_state.clone())
+        );
+
+        let attached_state = V8InspectorSessionState::from_bytes(vec![7, 8]);
+        let mut attached = batch(DevToolsSessionKey::Attached(
+            "SID-state-attached".to_owned(),
+        ));
+        attached.agent_token = current.agent_token();
+        attached.v8_state_update = Some(attached_state.clone());
+        attached.bind_renderer_agent_attachment(current.id());
+        assert_eq!(
+            ctx.conn
+                .route_current_renderer_inspector_output_for_owner(
+                    &CommandOwnerScope::for_session("SID-state-primary"),
+                    vec![attached],
+                )
+                .len(),
+            1
+        );
+        assert_eq!(
+            ctx.conn
+                .browser_context
+                .as_ref()
+                .expect("browser context")
+                .active_page_target()
+                .devtools_sessions
+                .attached("SID-state-attached")
+                .expect("attached session state")
+                .inspector_session_state
+                .v8_state,
+            Some(attached_state),
+            "attached session cookies must remain isolated from the primary session"
         );
 
         let rejected_state = V8InspectorSessionState::from_bytes(vec![9, 9, 9]);
@@ -387,8 +398,8 @@ mod tests {
         stale_attachment.bind_renderer_agent_attachment(RendererAgentAttachmentId::allocate());
         assert!(
             ctx.conn
-                .route_current_renderer_inspector_output_for_session_owner(
-                    None,
+                .route_current_renderer_inspector_output_for_owner(
+                    &CommandOwnerScope::capture(&ctx.conn, None),
                     vec![stale_attachment],
                 )
                 .is_empty()
@@ -399,7 +410,10 @@ mod tests {
         stale_agent.bind_renderer_agent_attachment(current.id());
         assert!(
             ctx.conn
-                .route_current_renderer_inspector_output_for_session_owner(None, vec![stale_agent],)
+                .route_current_renderer_inspector_output_for_owner(
+                    &CommandOwnerScope::capture(&ctx.conn, None),
+                    vec![stale_agent],
+                )
                 .is_empty()
         );
 
@@ -409,8 +423,8 @@ mod tests {
         page_creation_batch.v8_state_update = Some(route_completed_state.clone());
         assert_eq!(
             ctx.conn
-                .route_current_renderer_inspector_output_for_session_owner(
-                    None,
+                .route_current_renderer_inspector_output_for_owner(
+                    &CommandOwnerScope::capture(&ctx.conn, None),
                     vec![page_creation_batch],
                 )
                 .len(),
@@ -422,6 +436,7 @@ mod tests {
                 .browser_context
                 .as_ref()
                 .expect("browser context")
+                .active_page_target()
                 .devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
                 .inspector_session_state
                 .v8_state,
@@ -435,13 +450,15 @@ mod tests {
             Vec::new(),
         );
         let mut ordered_events = Vec::new();
+        let owner = CommandOwnerScope::capture(&ctx.conn, None);
         assert!(
-            !ctx.conn.route_renderer_runtime_command_output_into(
-                output,
-                Some(77),
-                None,
-                &mut ordered_events,
-            ),
+            !ctx.conn
+                .route_renderer_runtime_command_output_for_owner_into(
+                    output,
+                    Some(77),
+                    &owner,
+                    &mut ordered_events,
+                ),
             "a validated state-only response must not invent a frontend completion"
         );
         assert!(ordered_events.is_empty());
@@ -450,6 +467,7 @@ mod tests {
                 .browser_context
                 .as_ref()
                 .expect("browser context")
+                .active_page_target()
                 .devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
                 .inspector_session_state
                 .v8_state,

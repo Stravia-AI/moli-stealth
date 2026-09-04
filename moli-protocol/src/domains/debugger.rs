@@ -28,7 +28,7 @@ mod tests {
 
     use serde_json::{Value, json};
 
-    use crate::conn::BrowserContext;
+    use crate::conn::{BrowserContext, CommandOwnerScope};
     use crate::testing::TestContext;
 
     async fn with_loaded_document(ctx: &mut TestContext) {
@@ -48,7 +48,7 @@ mod tests {
             .browser_context
             .as_mut()
             .expect("browser context")
-            .active_target
+            .active_page_target_mut()
             .runtime_slot
             .replace_loaded_page(Some(page));
     }
@@ -152,10 +152,11 @@ mod tests {
             .map(str::to_owned)
             .expect("Debugger.scriptParsed for the suspended-renderer source");
 
+        let navigation_owner = CommandOwnerScope::capture(&ctx.conn, None);
         let navigation = ctx
             .conn
-            .start_document_navigation_for_session_owner(
-                None,
+            .start_document_navigation_for_owner(
+                &navigation_owner,
                 "LOADER-debugger-interrupt".to_owned(),
             )
             .expect("start cross-Document navigation");
@@ -183,10 +184,10 @@ mod tests {
 
         let _ = ctx
             .conn
-            .finish_renderer_document_navigation_for_session_owner(None, &navigation);
+            .finish_renderer_document_navigation_for_owner(&navigation_owner, &navigation);
         ctx.conn
-            .clear_pending_document_navigation_for_session_owner_if_loader_matches(
-                None,
+            .clear_pending_document_navigation_for_owner_if_loader_matches(
+                &navigation_owner,
                 &navigation.loader_id,
             );
     }
@@ -328,7 +329,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn debugger_instrumentation_navigation_publishes_new_context_with_bound_origin() {
+    async fn debugger_instrumentation_navigation_publishes_new_context_and_tears_down_paused() {
         let mut ctx = TestContext::new();
         with_loaded_document(&mut ctx).await;
 
@@ -389,20 +390,42 @@ mod tests {
             json!("data:text/html,<script>globalThis.__instrumentedNavigation = true</script>"),
             "the instrumented replacement script must reach V8"
         );
+
+        // Keep the instrumentation pause active. Connection teardown must
+        // close the in-flight replacement Document's Inspector target and
+        // join its renderer owner without requiring a frontend resume.
+        drop(ctx);
     }
 
     #[tokio::test]
-    async fn debugger_paused_auxiliary_session_detach_wakes_owner() {
+    async fn debugger_paused_attached_session_detach_wakes_owner() {
         let mut ctx = TestContext::new();
         with_loaded_document(&mut ctx).await;
         {
             let browser_context = ctx.conn.browser_context.as_mut().expect("browser context");
             browser_context.attach_active_session("SID-debugger-primary");
-            assert!(
-                browser_context.assign_auxiliary_session_to_target(
-                    "TID-debugger",
-                    "SID-debugger-aux".to_owned(),
-                )
+            assert!(browser_context.assign_attached_session_to_target(
+                "TID-debugger",
+                "SID-debugger-attached".to_owned(),
+            ));
+        }
+        for (session_id, session_key) in [
+            (
+                "SID-debugger-primary",
+                moli_page_types::DevToolsSessionKey::Primary,
+            ),
+            (
+                "SID-debugger-attached",
+                moli_page_types::DevToolsSessionKey::Attached("SID-debugger-attached".to_owned()),
+            ),
+        ] {
+            ctx.conn.register_session_route_for_test(
+                session_id,
+                crate::conn::CdpSessionRoute::PageTarget {
+                    browser_context_id: "BID-debugger".to_owned(),
+                    target_id: "TID-debugger".to_owned(),
+                    session_key,
+                },
             );
         }
 
@@ -410,7 +433,7 @@ mod tests {
             &mut ctx,
             json!({
                 "id": 41,
-                "sessionId": "SID-debugger-aux",
+                "sessionId": "SID-debugger-attached",
                 "method": "Debugger.enable"
             }),
             41,
@@ -421,7 +444,7 @@ mod tests {
             &mut ctx,
             json!({
                 "id": 42,
-                "sessionId": "SID-debugger-aux",
+                "sessionId": "SID-debugger-attached",
                 "method": "Runtime.evaluate",
                 "params": {
                     "expression": "setTimeout(() => { debugger; globalThis.__afterDebuggerDetach = 1; }, 50); true"
@@ -432,9 +455,9 @@ mod tests {
         .await;
         assert_eq!(timer["result"]["result"]["value"], json!(true));
 
-        ctx.wait_for_scheduler_message("auxiliary Debugger.paused", |message| {
+        ctx.wait_for_scheduler_message("attached Debugger.paused", |message| {
             message["method"] == json!("Debugger.paused")
-                && message["sessionId"] == json!("SID-debugger-aux")
+                && message["sessionId"] == json!("SID-debugger-attached")
         })
         .await;
 
@@ -447,7 +470,7 @@ mod tests {
                     "method": "Target.detachFromTarget",
                     "params": {
                         "targetId": "TID-debugger",
-                        "sessionId": "SID-debugger-aux"
+                        "sessionId": "SID-debugger-attached"
                     }
                 }),
                 43,
@@ -478,15 +501,32 @@ mod tests {
         {
             let browser_context = ctx.conn.browser_context.as_mut().expect("browser context");
             browser_context.attach_active_session("SID-debugger-primary");
-            assert!(
-                browser_context.assign_auxiliary_session_to_target(
-                    "TID-debugger",
-                    "SID-debugger-aux".to_owned(),
-                )
+            assert!(browser_context.assign_attached_session_to_target(
+                "TID-debugger",
+                "SID-debugger-attached".to_owned(),
+            ));
+        }
+        for (session_id, session_key) in [
+            (
+                "SID-debugger-primary",
+                moli_page_types::DevToolsSessionKey::Primary,
+            ),
+            (
+                "SID-debugger-attached",
+                moli_page_types::DevToolsSessionKey::Attached("SID-debugger-attached".to_owned()),
+            ),
+        ] {
+            ctx.conn.register_session_route_for_test(
+                session_id,
+                crate::conn::CdpSessionRoute::PageTarget {
+                    browser_context_id: "BID-debugger".to_owned(),
+                    target_id: "TID-debugger".to_owned(),
+                    session_key,
+                },
             );
         }
 
-        for (id, session_id) in [(61, "SID-debugger-primary"), (62, "SID-debugger-aux")] {
+        for (id, session_id) in [(61, "SID-debugger-primary"), (62, "SID-debugger-attached")] {
             let enable = command(
                 &mut ctx,
                 json!({
@@ -512,7 +552,7 @@ mod tests {
         .await;
         assert_eq!(timer["result"]["result"]["value"], json!(true));
 
-        for session_id in ["SID-debugger-primary", "SID-debugger-aux"] {
+        for session_id in ["SID-debugger-primary", "SID-debugger-attached"] {
             ctx.wait_for_scheduler_message("multi-session Debugger.paused", |message| {
                 message["method"] == json!("Debugger.paused")
                     && message["sessionId"] == json!(session_id)
@@ -531,7 +571,7 @@ mod tests {
         )
         .await;
         assert_eq!(resume["result"], json!({}), "{resume:?}");
-        for session_id in ["SID-debugger-primary", "SID-debugger-aux"] {
+        for session_id in ["SID-debugger-primary", "SID-debugger-attached"] {
             ctx.wait_for_scheduler_message("multi-session Debugger.resumed", |message| {
                 message["method"] == json!("Debugger.resumed")
                     && message["sessionId"] == json!(session_id)

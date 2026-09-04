@@ -2,14 +2,13 @@ use moli_core::page::{
     Page, RendererMainDocumentCommit, RendererPageCreationArtifacts,
     RendererPendingDownloadActivation, RendererRuntimeRealmInfo,
 };
-use moli_core::runtime::NavigationEngine;
 use moli_fetch::StreamingRawResponse;
 use serde::Serialize;
 use serde_json::Value;
 use std::sync::Arc;
 use url::Url;
 
-use crate::conn::ResponseCommitReady;
+use crate::conn::{CommandOwnerScope, ResponseCommitReady};
 use crate::devtools_runtime::DevToolsProtocol;
 use crate::domains::network::{
     CompletedDocumentProgressTransfer, CompletedDownloadProgressTransfer,
@@ -194,16 +193,10 @@ pub struct LoadedNavigation {
     pub renderer_output_predecessor: Option<moli_core::RendererOutputFence>,
     pub(crate) main_document_commit: Option<Arc<RendererMainDocumentCommit>>,
     pub(crate) document_progress_transfer: CompletedDocumentProgressTransfer,
-    pub(crate) navigation_engine: Option<NavigationEngine>,
     pub(crate) network_error_page: Option<NetworkErrorPageNavigation>,
 }
 
 impl LoadedNavigation {
-    pub(crate) fn with_navigation_engine(mut self, engine: NavigationEngine) -> Self {
-        self.navigation_engine = Some(engine);
-        self
-    }
-
     #[cfg(test)]
     pub(crate) fn response_body(&self) -> String {
         self.document_progress_transfer
@@ -241,27 +234,12 @@ impl NavigationLoadOutcome {
         Self::ResponseCommitReady(Box::new(navigation))
     }
 
-    pub(crate) fn loaded(navigation: LoadedNavigation) -> Self {
-        Self::Loaded(Box::new(navigation))
-    }
-
     pub(crate) fn download(navigation: DownloadNavigation) -> Self {
         Self::Download(Box::new(navigation))
     }
 
     pub(crate) fn network_failure(error_text: String) -> Self {
         Self::NetworkFailure(error_text)
-    }
-
-    pub(crate) fn with_navigation_engine(self, engine: NavigationEngine) -> Self {
-        match self {
-            Self::ResponseCommitReady(navigation) => {
-                Self::response_commit_ready(navigation.with_navigation_engine(engine))
-            }
-            Self::Loaded(navigation) => Self::loaded(navigation.with_navigation_engine(engine)),
-            Self::Download(navigation) => Self::Download(navigation),
-            Self::NetworkFailure(error_text) => Self::NetworkFailure(error_text),
-        }
     }
 }
 
@@ -317,7 +295,7 @@ impl NavigationResultProjection {
 #[derive(Debug, Clone)]
 pub struct NavigationDispatchState {
     pub navigate_id: Option<u64>,
-    pub navigate_session_id: Option<String>,
+    pub(crate) owner: CommandOwnerScope,
     pub(crate) result_projection: NavigationResultProjection,
     pub frame_id: String,
     pub session_id: Option<String>,
@@ -377,12 +355,12 @@ impl<'a> TargetInfo<'a> {
             target_id,
             kind: "page",
             title: bc
-                .active_target
+                .active_page_target()
                 .owner_state
                 .committed_document_title()
                 .map(str::to_owned)
                 .or_else(|| {
-                    bc.active_target
+                    bc.active_page_target()
                         .runtime_slot
                         .loaded_page()
                         .map(|page| page.document_title())

@@ -176,7 +176,7 @@ fn dataset_indexed_setter(
     index: u32,
     value: v8::Local<'_, v8::Value>,
     args: v8::PropertyCallbackArguments<'_>,
-    rv: v8::ReturnValue<'_, ()>,
+    rv: v8::ReturnValue<'_, v8::Boolean>,
 ) -> v8::Intercepted {
     let Some(key) = dataset_index_name(scope, index) else {
         return v8::Intercepted::kNo;
@@ -201,7 +201,7 @@ fn dataset_indexed_definer(
     index: u32,
     descriptor: &v8::PropertyDescriptor,
     args: v8::PropertyCallbackArguments<'_>,
-    rv: v8::ReturnValue<'_, ()>,
+    rv: v8::ReturnValue<'_, v8::Boolean>,
 ) -> v8::Intercepted {
     let Some(key) = dataset_index_name(scope, index) else {
         return v8::Intercepted::kNo;
@@ -364,7 +364,7 @@ fn dataset_named_setter(
     key: v8::Local<'_, v8::Name>,
     value: v8::Local<'_, v8::Value>,
     args: v8::PropertyCallbackArguments<'_>,
-    _rv: v8::ReturnValue<'_, ()>,
+    _rv: v8::ReturnValue<'_, v8::Boolean>,
 ) -> v8::Intercepted {
     let Ok((runtime_ptr, handle)) = dataset_runtime_and_handle_from_object(scope, args.holder())
     else {
@@ -391,7 +391,7 @@ fn dataset_named_definer(
     key: v8::Local<'_, v8::Name>,
     descriptor: &v8::PropertyDescriptor,
     args: v8::PropertyCallbackArguments<'_>,
-    mut rv: v8::ReturnValue<'_, ()>,
+    mut rv: v8::ReturnValue<'_, v8::Boolean>,
 ) -> v8::Intercepted {
     if descriptor.has_get() || descriptor.has_set() {
         rv.set_bool(false);

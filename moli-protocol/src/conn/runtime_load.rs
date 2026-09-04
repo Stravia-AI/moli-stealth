@@ -176,7 +176,6 @@ enum PendingInitialDocumentPageBuildKind {
         owner: InitialDocumentPageOwner,
         load_inputs: Box<TargetNavigationLoadInputs>,
         override_mode: NavigationLoadInputOverrideMode,
-        engine: Box<Option<NavigationEngine>>,
         pending: moli_core::runtime::PendingBuiltDocumentPage,
     },
     Join {
@@ -189,7 +188,6 @@ pub(crate) enum CompletedInitialDocumentPageBuild {
         owner: InitialDocumentPageOwner,
         load_inputs: Box<TargetNavigationLoadInputs>,
         override_mode: NavigationLoadInputOverrideMode,
-        engine: Box<Option<NavigationEngine>>,
         built: Box<moli_core::runtime::BuiltDocumentPage>,
     },
     Joined,
@@ -248,7 +246,6 @@ impl PendingInitialDocumentPageBuild {
                 owner,
                 load_inputs,
                 override_mode,
-                engine,
                 pending,
             } => {
                 let built = match pending.await_ready().await {
@@ -264,7 +261,6 @@ impl PendingInitialDocumentPageBuild {
                     owner,
                     load_inputs,
                     override_mode,
-                    engine,
                     built: Box::new(built),
                 })
             }
@@ -305,7 +301,6 @@ pub struct ResponseCommitReady {
     response_status: u16,
     response_headers: Vec<(String, String)>,
     response_from_cache: bool,
-    navigation_engine: Option<NavigationEngine>,
     timing_started: Option<std::time::Instant>,
     main_document_commit: Option<Arc<RendererMainDocumentCommit>>,
     network_error_page: Option<NetworkErrorPageNavigation>,
@@ -399,11 +394,6 @@ impl ResponseCommitReady {
             .issue_commit_permit()
     }
 
-    pub(crate) fn with_navigation_engine(mut self, engine: NavigationEngine) -> Self {
-        self.navigation_engine = Some(engine);
-        self
-    }
-
     pub(crate) async fn commit(
         mut self,
         permit: PreparedDocumentPageCommitPermit,
@@ -492,7 +482,6 @@ impl ResponseCommitReady {
             renderer_output_predecessor: diagnostics.renderer_output_predecessor,
             main_document_commit: self.main_document_commit.take(),
             document_progress_transfer,
-            navigation_engine: self.navigation_engine.take(),
             network_error_page: self.network_error_page.take(),
         })
     }
@@ -521,7 +510,6 @@ pub struct PausedResponsePreparedDocument {
     response_from_cache: bool,
     negotiated_http_version: Option<moli_fetch::NegotiatedHttpVersion>,
     network_observation_journal: NetworkObservationJournal,
-    engine: NavigationEngine,
     timing_started: Option<std::time::Instant>,
     main_document_commit: Option<Arc<RendererMainDocumentCommit>>,
 }
@@ -552,7 +540,7 @@ impl PausedResponsePreparedDocument {
         self,
         response: StreamingRawResponse,
         body_completion_sink: Option<BackgroundNavigationBodyCompletionSink>,
-    ) -> (NavigationEngine, NavigationLoadOutcome) {
+    ) -> NavigationLoadOutcome {
         let network_extra_info_available = !self.network_observation_journal.is_empty();
         self.body_progress_source.emit_response_metadata(
             &self.request_method,
@@ -588,15 +576,11 @@ impl PausedResponsePreparedDocument {
             response_status: self.response_status,
             response_headers: self.response_headers,
             response_from_cache: self.response_from_cache,
-            navigation_engine: None,
             timing_started: self.timing_started,
             main_document_commit: self.main_document_commit,
             network_error_page: None,
         };
-        (
-            self.engine,
-            NavigationLoadOutcome::response_commit_ready(ready),
-        )
+        NavigationLoadOutcome::response_commit_ready(ready)
     }
 }
 
@@ -704,8 +688,9 @@ pub(crate) struct BackgroundNavigationLoadJob {
     body_progress_source: MainDocumentBodyProgressSource,
     /// Browser-context transport/cache state shared with the resident engine.
     ///
-    /// The detached job must not retain a source Page's request-policy view;
-    /// its own NavigationEngine supplies the target Page policy.
+    /// The detached job's NavigationEngine handle shares the resident target's
+    /// Page policy while retaining this exact browser-resource runtime for the
+    /// captured navigation.
     shared_resource_runtime: Option<moli_core::network::BrowserResourceRuntime>,
 }
 
@@ -736,7 +721,6 @@ pub(crate) struct BackgroundNavigationBodyCompletionSink {
         tokio::sync::mpsc::UnboundedSender<crate::domains::page::BackgroundNavigationCompletion>,
     token: DocumentNavigationToken,
     state: NavigationDispatchState,
-    none_session_owner_route: Option<CdpSessionRoute>,
 }
 
 impl BackgroundNavigationBodyCompletionSink {
@@ -746,13 +730,11 @@ impl BackgroundNavigationBodyCompletionSink {
         >,
         token: DocumentNavigationToken,
         state: NavigationDispatchState,
-        none_session_owner_route: Option<CdpSessionRoute>,
     ) -> Self {
         Self {
             sender,
             token,
             state,
-            none_session_owner_route,
         }
     }
 
@@ -768,7 +750,6 @@ impl BackgroundNavigationBodyCompletionSink {
             crate::domains::page::BackgroundNavigationCompletion::main_document_body(
                 self.token,
                 self.state,
-                self.none_session_owner_route,
                 body,
                 false,
                 body_progress_source,
@@ -832,11 +813,7 @@ impl BackgroundNavigationLoadJob {
     pub(crate) async fn run(
         mut self,
         body_completion_sink: Option<BackgroundNavigationBodyCompletionSink>,
-    ) -> (
-        NavigationEngine,
-        Result<NavigationLoadOutcome, String>,
-        bool,
-    ) {
+    ) -> (Result<NavigationLoadOutcome, String>, bool) {
         let timing_started = moli_trace::cdp_nav_timing_enabled().then(std::time::Instant::now);
         let timing_url = self.raw_url.clone();
         let mut engine = self.engine;
@@ -844,7 +821,7 @@ impl BackgroundNavigationLoadJob {
         if let Some(resource_runtime) = self.shared_resource_runtime.take()
             && let Err(error) = engine.adopt_registered_resource_runtime(resource_runtime)
         {
-            return (engine, Err(error.to_string()), false);
+            return (Err(error.to_string()), false);
         }
         let mut early_result_sent = false;
         let navigation = async {
@@ -994,7 +971,7 @@ impl BackgroundNavigationLoadJob {
                 elapsed_ms = started.elapsed().as_millis(),
             );
         }
-        (engine, navigation, early_result_sent)
+        (navigation, early_result_sent)
     }
 }
 
@@ -1002,14 +979,14 @@ impl BackgroundStreamingResponseNavigationLoadJob {
     pub(crate) async fn run(
         mut self,
         body_completion_sink: Option<BackgroundNavigationBodyCompletionSink>,
-    ) -> (NavigationEngine, Result<NavigationLoadOutcome, String>) {
+    ) -> Result<NavigationLoadOutcome, String> {
         let mut engine = self.engine;
         if let Some(resource_runtime) = self.shared_resource_runtime.take()
             && let Err(error) = engine.adopt_registered_resource_runtime(resource_runtime)
         {
-            return (engine, Err(error.to_string()));
+            return Err(error.to_string());
         }
-        let navigation = build_navigation_from_streaming_raw_response_with_engine_async(
+        build_navigation_from_streaming_raw_response_with_engine_async(
             &mut engine,
             self.page_reservation,
             &self.load_inputs,
@@ -1026,8 +1003,7 @@ impl BackgroundStreamingResponseNavigationLoadJob {
             CommittedDocumentResourceSource::Synthetic,
             RendererReplyBoundary::DocumentCommit,
         )
-        .await;
-        (engine, navigation)
+        .await
     }
 }
 
@@ -1441,7 +1417,6 @@ async fn build_navigation_from_streaming_raw_response_with_engine_async(
                 response_status,
                 response_headers,
                 response_from_cache,
-                navigation_engine: None,
                 timing_started: timing_enabled.then_some(timing_started),
                 main_document_commit,
                 network_error_page: None,
@@ -1534,7 +1509,6 @@ async fn build_navigation_from_streaming_raw_response_with_engine_async(
             response_status,
             response_headers,
             response_from_cache,
-            navigation_engine: None,
             timing_started: timing_enabled.then_some(timing_started),
             main_document_commit,
             network_error_page: None,
@@ -1548,21 +1522,19 @@ impl CdpConnection {
         navigation: &NavigationDispatchState,
     ) -> TargetNavigationLoadInputs {
         apply_navigation_request_load_policy(
-            self.navigation_load_inputs_for_session_owner(
-                navigation.navigate_session_id.as_deref(),
-            ),
+            self.navigation_load_inputs_for_owner(&navigation.owner),
             navigation.request_load_policy,
         )
         .with_main_document_commit_seed(RendererMainDocumentCommitSeed::from_navigation(navigation))
     }
 
-    pub(crate) fn prepared_document_commit_configuration_for_session_owner(
+    pub(crate) fn prepared_document_commit_configuration_for_owner(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         final_url: &Url,
     ) -> Result<PreparedDocumentPageCommitConfiguration, String> {
-        let idle_override = self.idle_override_for_navigation(session_id, final_url);
-        let load_inputs = self.navigation_load_inputs_for_session_owner(session_id);
+        let idle_override = self.idle_override_for_navigation(owner, final_url);
+        let load_inputs = self.navigation_load_inputs_for_owner(owner);
         // The renderer runtime is shared by the BrowserContext, but each Page
         // target owns its NavigationEngine and may have a different transport
         // identity. Resolve through that target's engine at the commit
@@ -1576,16 +1548,15 @@ impl CdpConnection {
             .clone()
             .or_else(|| self.global_browser_identity_override.clone())
             .unwrap_or_else(|| self.base_browser_identity.clone());
-        let runtime_isolated_worlds = self
-            .prepare_loaded_navigation_commit_for_session_owner(session_id)
-            .map(|commit_state| commit_state.isolated_worlds)
-            .unwrap_or_default();
         Ok(PreparedDocumentPageCommitConfiguration {
             document_start_scripts: load_inputs.document_start_scripts,
             runtime_bindings: load_inputs.runtime_bindings,
             runtime_inspector_session_restore_snapshots: load_inputs
                 .runtime_inspector_session_restore_snapshots,
-            runtime_isolated_worlds,
+            // `Page.createIsolatedWorld` is Document-scoped. Only renderer
+            // inspector restore snapshots recreate persistent utility worlds;
+            // bare worlds must not cross a navigation.
+            runtime_isolated_worlds: Vec::new(),
             permission_overrides: load_inputs.permission_overrides,
             extra_http_headers: load_inputs.extra_http_headers,
             locale_override: load_inputs.locale_override,
@@ -1608,7 +1579,7 @@ impl CdpConnection {
 
     fn idle_override_for_navigation(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         final_url: &Url,
     ) -> Option<moli_core::page::EmulatedIdleOverride> {
         // Chromium stores this override on RenderFrameHostImpl's IdleManager,
@@ -1616,7 +1587,7 @@ impl CdpConnection {
         // navigation can retain that frame-host state; a cross-site renderer
         // replacement must start with the actual idle state.
         let page = self
-            .runtime_session_owner_slot(session_id)
+            .runtime_session_owner_slot_for_owner(owner)
             .ok()?
             .loaded_page()?;
         moli_site::same_site_urls(page.final_url(), final_url, true)
@@ -1683,7 +1654,7 @@ impl CdpConnection {
         );
         let shared_resource_runtime =
             self.shared_resource_runtime_for_navigation_load_inputs(&load_inputs);
-        let mut engine = self.background_navigation_engine_for_load_inputs(&load_inputs);
+        let mut engine = self.navigation_engine_handle_for_load_inputs(&load_inputs);
         if let Some(resource_runtime) = shared_resource_runtime {
             engine
                 .adopt_registered_resource_runtime(resource_runtime)
@@ -1695,11 +1666,8 @@ impl CdpConnection {
         let main_document_commit = load_inputs
             .main_document_commit_for_final_url(&final_url, None)
             .map(Arc::new);
-        let page_reservation = self.reserve_renderer_page_for_session_owner(
-            navigation.navigate_session_id.as_deref(),
-            &load_inputs,
-            &engine,
-        );
+        let page_reservation =
+            self.reserve_renderer_page_for_owner(&navigation.owner, &load_inputs, &engine);
         let prepared_page = engine
             .prepare_streaming_raw_page_from_external_body_with_storage_and_inspector_session_restores_async(
                 page_reservation,
@@ -1766,24 +1734,23 @@ impl CdpConnection {
             response_from_cache,
             negotiated_http_version,
             network_observation_journal: network_observation_journal.clone(),
-            engine,
             timing_started,
             main_document_commit,
         }))
     }
 
-    pub(crate) fn start_initial_document_page_ensure_for_session_owner(
+    pub(crate) fn start_initial_document_page_ensure_for_owner(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
     ) -> Result<Option<PendingInitialDocumentPageBuild>, String> {
-        let runtime_slot = match self.runtime_session_owner_slot(session_id) {
+        let runtime_slot = match self.runtime_session_owner_slot_for_owner(owner) {
             Ok(slot) => slot,
             Err(_) => return Ok(None),
         };
         if runtime_slot.has_loaded_page() {
             return Ok(None);
         }
-        if !self.runtime_session_owner_target_is_initial_about_blank(session_id) {
+        if !self.runtime_session_owner_target_is_initial_about_blank_for_owner(owner) {
             return Ok(None);
         }
         // Session attachment is a target operation, not a Document command.
@@ -1794,23 +1761,31 @@ impl CdpConnection {
         // it, while rejecting the ensure would incorrectly reject attachment.
         // Treat this as an already-satisfied ensure and let the exact
         // target-owned navigation install the replacement Document.
-        if self.has_pending_document_navigation_for_session_owner(session_id) {
+        if self.has_pending_document_navigation_for_owner(owner) {
             return Ok(None);
         }
 
-        self.start_initial_empty_document_page_build_for_session_owner(session_id)
+        self.start_initial_empty_document_page_build_for_owner(owner)
     }
 
     pub(crate) fn runtime_session_owner_target_is_initial_about_blank(
         &self,
         session_id: Option<&str>,
     ) -> bool {
+        let owner = CommandOwnerScope::capture(self, session_id);
+        self.runtime_session_owner_target_is_initial_about_blank_for_owner(&owner)
+    }
+
+    fn runtime_session_owner_target_is_initial_about_blank_for_owner(
+        &self,
+        owner: &CommandOwnerScope,
+    ) -> bool {
         if let Some(is_on_initial_empty_document) =
-            self.runtime_session_owner_record_is_on_initial_empty_document(session_id)
+            self.runtime_session_owner_record_is_on_initial_empty_document_for_owner(owner)
         {
             return is_on_initial_empty_document;
         }
-        self.runtime_session_owner_target_url(session_id)
+        self.runtime_session_owner_target_url_for_owner(owner)
             .as_deref()
             .and_then(|raw_url| Url::parse(raw_url).ok())
             .as_ref()
@@ -1823,16 +1798,16 @@ impl CdpConnection {
     /// This is a structural lifecycle query.  It deliberately does not look
     /// at `waitForDebuggerOnStart`: the explicit debugger-resume path uses it
     /// after the paused session has been released.
-    pub(crate) fn runtime_session_owner_needs_initial_document_navigation(
+    pub(crate) fn runtime_session_owner_needs_initial_document_navigation_for_owner(
         &self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
     ) -> bool {
-        if !self.runtime_session_owner_initial_empty_document_has_replacement_url(session_id) {
+        if !self.runtime_session_owner_initial_empty_document_has_replacement_url_for_owner(owner) {
             return false;
         }
-        if self.runtime_session_owner_initial_empty_document_has_pending_cross_document_navigation(
-            session_id,
-        ) {
+        if self
+            .runtime_session_owner_initial_empty_document_has_pending_cross_document_navigation_for_owner(owner)
+        {
             return false;
         }
         true
@@ -1850,33 +1825,49 @@ impl CdpConnection {
         &self,
         session_id: Option<&str>,
     ) -> bool {
-        !self.session_owner_target_has_waiting_for_debugger_session(session_id)
-            && self.runtime_session_owner_needs_initial_document_navigation(session_id)
+        let owner = CommandOwnerScope::capture(self, session_id);
+        self.runtime_session_owner_can_start_initial_document_navigation_for_owner(&owner)
+    }
+
+    pub(crate) fn runtime_session_owner_can_start_initial_document_navigation_for_owner(
+        &self,
+        owner: &CommandOwnerScope,
+    ) -> bool {
+        !self.owner_target_has_waiting_for_debugger_session(owner)
+            && self.runtime_session_owner_needs_initial_document_navigation_for_owner(owner)
     }
 
     pub(crate) fn runtime_session_owner_initial_empty_document_has_replacement_url(
         &self,
         session_id: Option<&str>,
     ) -> bool {
-        if !self.runtime_session_owner_target_is_initial_about_blank(session_id) {
+        let owner = CommandOwnerScope::capture(self, session_id);
+        self.runtime_session_owner_initial_empty_document_has_replacement_url_for_owner(&owner)
+    }
+
+    pub(crate) fn runtime_session_owner_initial_empty_document_has_replacement_url_for_owner(
+        &self,
+        owner: &CommandOwnerScope,
+    ) -> bool {
+        if !self.runtime_session_owner_target_is_initial_about_blank_for_owner(owner) {
             return false;
         }
-        let Some(target_url) = self.runtime_session_owner_target_url(session_id) else {
+        let Some(target_url) = self.runtime_session_owner_target_url_for_owner(owner) else {
             return false;
         };
         let Some(initial_url) =
-            self.runtime_session_owner_record_initial_empty_document_url(session_id)
+            self.runtime_session_owner_record_initial_empty_document_url_for_owner(owner)
         else {
             return false;
         };
         target_url != initial_url
     }
 
-    fn start_initial_empty_document_page_build_for_session_owner(
+    fn start_initial_empty_document_page_build_for_owner(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
     ) -> Result<Option<PendingInitialDocumentPageBuild>, String> {
-        let runtime_slot = match self.runtime_session_owner_slot(session_id) {
+        let runtime_slot = match self.runtime_session_owner_slot_for_owner(owner) {
             Ok(slot) => slot,
             Err(_) => return Ok(None),
         };
@@ -1892,20 +1883,20 @@ impl CdpConnection {
             }));
         }
 
-        let owner = self
-            .initial_document_page_owner_for_session(session_id)
+        let page_owner = self
+            .initial_document_page_owner_for_owner(owner)
             .ok_or_else(|| "TargetNotLoaded".to_owned())?;
-        let load_inputs = self.navigation_load_inputs_for_session_owner(session_id);
+        let load_inputs = self.navigation_load_inputs_for_owner(owner);
         let requested_url = self
-            .runtime_session_owner_initial_empty_document_url(session_id)
+            .runtime_session_owner_initial_empty_document_url_for_owner(owner)
             .unwrap_or_else(|| Url::parse("about:blank").expect("about:blank should be valid"));
         let (fetch_subresource_interception_enabled, fetch_subresource_interception_resource_type) =
             load_inputs.fetch_subresource_interception;
-        let mut engine = self.background_navigation_engine_for_load_inputs(&load_inputs);
+        let mut engine = self.navigation_engine_handle_for_load_inputs(&load_inputs);
         let page_storage = load_inputs.page_storage_handles();
         let top_level_storage_key =
-            self.runtime_session_owner_initial_empty_document_storage_key(session_id);
-        self.runtime_session_owner_slot_mut(session_id)?
+            self.runtime_session_owner_initial_empty_document_storage_key_for_owner(owner);
+        self.runtime_session_owner_slot_mut_for_owner(owner)?
             .start_initial_document_page_build();
         let page_reservation = engine.reserve_page_for_creation();
         let renderer_page = RendererPageResidenceIdentity::from_parts(
@@ -1913,17 +1904,19 @@ impl CdpConnection {
             page_reservation.page_id(),
         );
         if !self
-            .runtime_session_owner_slot_mut(session_id)?
+            .runtime_session_owner_slot_mut_for_owner(owner)?
             .bind_initial_document_page_build_renderer_page(renderer_page)
         {
             let message =
                 "initial document Page reservation no longer matches its target build".to_owned();
-            let _ = self.runtime_session_owner_slot_mut(session_id).map(|slot| {
-                slot.fail_initial_document_page_build(message.clone());
-                slot.mark_loaded_page_absent(
-                    TargetPageAbsenceReason::InitialDocumentPageBuildPending,
-                );
-            });
+            let _ = self
+                .runtime_session_owner_slot_mut_for_owner(owner)
+                .map(|slot| {
+                    slot.fail_initial_document_page_build(message.clone());
+                    slot.mark_loaded_page_absent(
+                        TargetPageAbsenceReason::InitialDocumentPageBuildPending,
+                    );
+                });
             return Err(message);
         }
         // The renderer command below can open the Page output stream and
@@ -1931,10 +1924,10 @@ impl CdpConnection {
         // control. Bind the reserved Page to its target before enqueueing that
         // command; binding after `start_*` would leave a real cross-thread race
         // where the concrete FIFO receives its first publication ownerless.
-        let page_owner = self
-            .pending_target_page_residence_identity_for_session(session_id)
+        let renderer_page_owner = self
+            .pending_target_page_residence_identity_for_owner(owner)
             .ok_or_else(|| "initial document Page reservation lost its target owner".to_owned())?;
-        self.bind_renderer_page_output_owner(renderer_page, page_owner);
+        self.bind_renderer_page_output_owner(renderer_page, renderer_page_owner);
         let pending = engine
             .start_build_html_page_from_response_with_storage_and_inspector_session_restores(
                 page_reservation,
@@ -1970,20 +1963,21 @@ impl CdpConnection {
             )
             .map_err(|error| {
                 let message = format!("failed to start initial document page build: {error}");
-                let _ = self.runtime_session_owner_slot_mut(session_id).map(|slot| {
-                    slot.fail_initial_document_page_build(message.clone());
-                    slot.mark_loaded_page_absent(
-                        TargetPageAbsenceReason::InitialDocumentPageBuildPending,
-                    );
-                });
+                let _ = self
+                    .runtime_session_owner_slot_mut_for_owner(owner)
+                    .map(|slot| {
+                        slot.fail_initial_document_page_build(message.clone());
+                        slot.mark_loaded_page_absent(
+                            TargetPageAbsenceReason::InitialDocumentPageBuildPending,
+                        );
+                    });
                 message
             })?;
         Ok(Some(PendingInitialDocumentPageBuild {
             kind: PendingInitialDocumentPageBuildKind::Build {
-                owner,
+                owner: page_owner,
                 load_inputs: Box::new(load_inputs),
                 override_mode: NavigationLoadInputOverrideMode::FreshlyBuiltPage,
-                engine: Box::new(Some(engine)),
                 pending,
             },
         }))
@@ -1999,16 +1993,16 @@ impl CdpConnection {
         {
             if browser_context.active_target_id() == Some(owner.target_id.as_str()) {
                 if browser_context
-                    .active_target
+                    .active_page_target()
                     .runtime_slot
                     .has_initial_document_page_build_in_progress()
                 {
                     browser_context
-                        .active_target
+                        .active_page_target_mut()
                         .runtime_slot
                         .fail_initial_document_page_build(message.clone());
                     browser_context
-                        .active_target
+                        .active_page_target_mut()
                         .runtime_slot
                         .mark_loaded_page_absent(
                             TargetPageAbsenceReason::InitialDocumentPageBuildPending,
@@ -2030,16 +2024,16 @@ impl CdpConnection {
         failed.into_message()
     }
 
-    fn runtime_session_owner_initial_empty_document_url(
+    fn runtime_session_owner_initial_empty_document_url_for_owner(
         &self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
     ) -> Option<Url> {
         if let Some(raw_url) =
-            self.runtime_session_owner_record_initial_empty_document_url(session_id)
+            self.runtime_session_owner_record_initial_empty_document_url_for_owner(owner)
         {
             return Url::parse(&raw_url).ok().filter(moli_url::is_about_blank);
         }
-        self.runtime_session_owner_target_url(session_id)
+        self.runtime_session_owner_target_url_for_owner(owner)
             .as_deref()
             .and_then(|raw_url| Url::parse(raw_url).ok())
             .filter(moli_url::is_about_blank)
@@ -2052,7 +2046,7 @@ impl CdpConnection {
         if let Some(browser_context) = self.browser_context_by_id_mut(&owner.browser_context_id) {
             if browser_context.active_target_id() == Some(owner.target_id.as_str()) {
                 browser_context
-                    .active_target
+                    .active_page_target_mut()
                     .runtime_slot
                     .complete_initial_document_page_build();
             } else if let Some(target) = browser_context.background_target_mut(&owner.target_id) {
@@ -2085,7 +2079,7 @@ impl CdpConnection {
     ) {
         if let Some(browser_context) = self.browser_context_by_id_mut(&owner.browser_context_id) {
             if browser_context.active_target_id() == Some(owner.target_id.as_str()) {
-                let runtime_slot = &mut browser_context.active_target.runtime_slot;
+                let runtime_slot = &mut browser_context.active_page_target_mut().runtime_slot;
                 if runtime_slot.has_initial_document_page_build_in_progress() {
                     runtime_slot.fail_initial_document_page_build(message);
                     runtime_slot.mark_loaded_page_absent(
@@ -2121,14 +2115,12 @@ impl CdpConnection {
             owner,
             load_inputs,
             override_mode,
-            engine,
             built,
         } = completed
         else {
             return Ok(LoadedPageCreationDiagnosticsParts::default());
         };
         let load_inputs = *load_inputs;
-        let engine = *engine;
         let built = *built;
         let diagnostics = loaded_page_creation_diagnostics_parts(built.page_creation_diagnostics);
         let page_creation_artifacts = built.page_creation_artifacts;
@@ -2153,9 +2145,6 @@ impl CdpConnection {
             self.complete_stale_initial_document_page_build_for_page_owner(&owner);
             return Ok(LoadedPageCreationDiagnosticsParts::default());
         }
-        if let Some(engine) = engine {
-            self.adopt_loaded_navigation_engine_for_page_owner(&owner, engine);
-        }
         self.complete_initial_document_page_build_for_page_owner(&owner);
         Ok(diagnostics)
     }
@@ -2164,8 +2153,9 @@ impl CdpConnection {
         &mut self,
         raw_url: &str,
     ) -> Result<LoadedNavigation, String> {
-        let load_inputs = self.navigation_load_inputs_for_session_owner(None);
-        self.load_navigation_via_runtime_with_load_inputs_async(None, raw_url, load_inputs)
+        let owner = CommandOwnerScope::capture(self, None);
+        let load_inputs = self.navigation_load_inputs_for_owner(&owner);
+        self.load_navigation_via_runtime_with_load_inputs_async(&owner, raw_url, load_inputs)
             .await
     }
 
@@ -2182,21 +2172,22 @@ impl CdpConnection {
         session_id: Option<&str>,
         raw_url: &str,
     ) -> Result<LoadedNavigation, String> {
+        let owner = CommandOwnerScope::capture(self, session_id);
         let load_inputs = self.navigation_fixture_load_inputs_for_session_owner(session_id)?;
-        self.load_navigation_via_runtime_with_load_inputs_async(session_id, raw_url, load_inputs)
+        self.load_navigation_via_runtime_with_load_inputs_async(&owner, raw_url, load_inputs)
             .await
     }
 
     async fn load_navigation_via_runtime_with_load_inputs_async(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         raw_url: &str,
         load_inputs: TargetNavigationLoadInputs,
     ) -> Result<LoadedNavigation, String> {
         let request_headers = load_inputs.extra_http_headers.clone();
         let navigation = self
             .load_navigation_request_via_runtime_with_network_events_and_load_inputs_async(
-                session_id,
+                owner,
                 load_inputs,
                 "GET",
                 raw_url,
@@ -2205,20 +2196,20 @@ impl CdpConnection {
                 MainDocumentBodyProgressSource::default(),
             )
             .await?;
-        self.commit_navigation_load_outcome_for_session_owner_async(session_id, navigation)
+        self.commit_navigation_load_outcome_for_owner_async(owner, navigation)
             .await
     }
 
-    async fn commit_navigation_load_outcome_for_session_owner_async(
+    async fn commit_navigation_load_outcome_for_owner_async(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         navigation: NavigationLoadOutcome,
     ) -> Result<LoadedNavigation, String> {
         match navigation {
             NavigationLoadOutcome::ResponseCommitReady(navigation) => {
                 let navigation = *navigation;
-                let configuration = self.prepared_document_commit_configuration_for_session_owner(
-                    session_id,
+                let configuration = self.prepared_document_commit_configuration_for_owner(
+                    owner,
                     navigation.final_url(),
                 )?;
                 navigation
@@ -2264,12 +2255,13 @@ impl CdpConnection {
         body_progress_source: MainDocumentBodyProgressSource,
         request_load_policy: NavigationRequestLoadPolicy,
     ) -> Result<NavigationLoadOutcome, String> {
+        let owner = CommandOwnerScope::capture(self, session_id);
         let load_inputs = apply_navigation_request_load_policy(
-            self.navigation_load_inputs_for_session_owner(session_id),
+            self.navigation_load_inputs_for_owner(&owner),
             request_load_policy,
         );
         self.load_navigation_request_via_runtime_with_network_events_and_load_inputs_async(
-            session_id,
+            &owner,
             load_inputs,
             method,
             raw_url,
@@ -2286,7 +2278,7 @@ impl CdpConnection {
         body_progress_source: MainDocumentBodyProgressSource,
     ) -> Result<NavigationLoadOutcome, String> {
         self.load_navigation_request_via_runtime_with_network_events_and_load_inputs_async(
-            navigation.navigate_session_id.as_deref(),
+            &navigation.owner,
             self.navigation_load_inputs_for_navigation(navigation),
             &navigation.request_method,
             navigation.requested_url.as_str(),
@@ -2300,7 +2292,7 @@ impl CdpConnection {
     #[allow(clippy::too_many_arguments)]
     async fn load_navigation_request_via_runtime_with_network_events_and_load_inputs_async(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         load_inputs: TargetNavigationLoadInputs,
         method: &str,
         raw_url: &str,
@@ -2339,12 +2331,9 @@ impl CdpConnection {
                 return navigation;
             }
         } else {
-            let mut inline_engine = self.background_navigation_engine_for_load_inputs(&load_inputs);
-            let page_reservation = self.reserve_renderer_page_for_session_owner(
-                session_id,
-                &load_inputs,
-                &inline_engine,
-            );
+            let mut inline_engine = self.navigation_engine_handle_for_load_inputs(&load_inputs);
+            let page_reservation =
+                self.reserve_renderer_page_for_owner(owner, &load_inputs, &inline_engine);
             if let Some(navigation) = self
                 .load_inline_html_navigation_with_engine_async(
                     &mut inline_engine,
@@ -2357,8 +2346,7 @@ impl CdpConnection {
                 )
                 .await
             {
-                return navigation
-                    .map(|navigation| navigation.with_navigation_engine(inline_engine));
+                return navigation;
             }
             if let Some(navigation) = load_data_url_navigation_with_engine_async(
                 &mut inline_engine,
@@ -2371,8 +2359,7 @@ impl CdpConnection {
             )
             .await
             {
-                return navigation
-                    .map(|navigation| navigation.with_navigation_engine(inline_engine));
+                return navigation;
             }
         }
 
@@ -2394,7 +2381,7 @@ impl CdpConnection {
             )
             .await?;
         self.build_navigation_from_streaming_raw_response_with_load_inputs_async(
-            session_id,
+            owner,
             &load_inputs,
             requested_url,
             method.to_owned(),
@@ -2416,17 +2403,14 @@ impl CdpConnection {
     ) -> Option<BackgroundNavigationLoadJob> {
         let cancellation = self.document_navigation_cancellation_handle(token)?;
         let load_inputs = self.navigation_load_inputs_for_navigation(navigation);
-        // Ensure the connection's resident browser resource runtime exists,
-        // then share only that transport/cache owner with the background job.
-        // Page policy remains owned by the job's NavigationEngine.
+        // Ensure the target's resident browser resource runtime exists before
+        // cloning its engine handle. The job shares the target Page policy and
+        // retains this exact transport/cache owner for the captured navigation.
         let shared_resource_runtime =
             self.shared_resource_runtime_for_navigation_load_inputs(&load_inputs);
-        let engine = self.background_navigation_engine_for_load_inputs(&load_inputs);
-        let page_reservation = self.reserve_renderer_page_for_session_owner(
-            navigation.navigate_session_id.as_deref(),
-            &load_inputs,
-            &engine,
-        );
+        let engine = self.navigation_engine_handle_for_load_inputs(&load_inputs);
+        let page_reservation =
+            self.reserve_renderer_page_for_owner(&navigation.owner, &load_inputs, &engine);
         Some(BackgroundNavigationLoadJob {
             engine,
             page_reservation,
@@ -2471,12 +2455,9 @@ impl CdpConnection {
         let load_inputs = self.navigation_load_inputs_for_navigation(navigation);
         let shared_resource_runtime =
             self.shared_resource_runtime_for_navigation_load_inputs(&load_inputs);
-        let engine = self.background_navigation_engine_for_load_inputs(&load_inputs);
-        let page_reservation = self.reserve_renderer_page_for_session_owner(
-            navigation.navigate_session_id.as_deref(),
-            &load_inputs,
-            &engine,
-        );
+        let engine = self.navigation_engine_handle_for_load_inputs(&load_inputs);
+        let page_reservation =
+            self.reserve_renderer_page_for_owner(&navigation.owner, &load_inputs, &engine);
         BackgroundStreamingResponseNavigationLoadJob {
             engine,
             page_reservation,
@@ -2500,24 +2481,20 @@ impl CdpConnection {
     /// navigation future is still running. The protocol target therefore must
     /// own the reservation at job construction time rather than trying to infer
     /// it from `ResponseCommitReady` after the future completes.
-    fn reserve_renderer_page_for_session_owner(
+    fn reserve_renderer_page_for_owner(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         load_inputs: &TargetNavigationLoadInputs,
         engine: &NavigationEngine,
     ) -> RendererPageReservationToken {
         let page_reservation = engine.reserve_page_for_creation();
-        self.bind_renderer_page_reservation_for_session_owner(
-            session_id,
-            load_inputs,
-            page_reservation,
-        );
+        self.bind_renderer_page_reservation_for_owner(owner, load_inputs, page_reservation);
         page_reservation
     }
 
-    fn bind_renderer_page_reservation_for_session_owner(
+    fn bind_renderer_page_reservation_for_owner(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         load_inputs: &TargetNavigationLoadInputs,
         page_reservation: RendererPageReservationToken,
     ) {
@@ -2529,7 +2506,7 @@ impl CdpConnection {
         // reservation; recording `target_id: None` here would conflict with
         // that exact owner when the stream-open control is later consumed.
         if let Some((browser_context_id, Some(_target_id))) =
-            self.target_owner_identity_for_session(session_id)
+            self.target_owner_identity_for_owner(owner)
         {
             assert_eq!(
                 load_inputs.browser_context_id.as_deref(),
@@ -2541,44 +2518,26 @@ impl CdpConnection {
                 page_reservation.page_id(),
             );
             let page_owner = self
-                .reserve_target_page_residence_identity_for_session(session_id, renderer_page)
+                .reserve_target_page_residence_identity_for_owner(owner, renderer_page)
                 .expect("navigation Page reservation must retain its target owner");
             self.bind_renderer_page_output_owner(renderer_page, page_owner);
         }
     }
 
-    pub(super) fn background_navigation_engine_for_load_inputs(
-        &self,
+    /// Returns a task-local handle to the NavigationEngine retained by the
+    /// target owner. `NavigationEngine::clone` shares the target's Page policy
+    /// and renderer owner, so a background load never has to return or replace
+    /// the resident engine when it completes.
+    pub(super) fn navigation_engine_handle_for_load_inputs(
+        &mut self,
         load_inputs: &TargetNavigationLoadInputs,
     ) -> NavigationEngine {
-        let mut engine =
-            if let Some(source) = self.page_navigation_engine_for_load_inputs(load_inputs) {
-                NavigationEngine::new_for_target_navigation_with_shared_renderer_owner(
-                    self.navigation_runtime_config_for_load_inputs(load_inputs),
-                    source,
-                )
-                .expect("target Page renderer owner must be live")
-            } else {
-                NavigationEngine::new_with_runtime_config_and_browser_context_access(
-                    self.navigation_runtime_config_for_load_inputs(load_inputs),
-                    load_inputs.renderer_runtime.clone(),
-                )
-                .expect("navigation load BrowserContext owner must be live")
-            };
-        self.apply_fetch_overrides_to_background_navigation_engine(&mut engine, load_inputs);
-        if !self.page_resource_runtime_matches_navigation_load_inputs(load_inputs) {
-            // Sharing the renderer owner must not implicitly share a transport
-            // runtime that was rejected above for a different target policy.
-            // The next request rebuilds from this engine's effective fetch
-            // configuration and the target's storage partition.
-            engine.reset_resource_runtime_without_loaded_page();
-        }
-        engine.set_bypass_service_worker(load_inputs.bypass_service_worker);
-        engine.set_cache_disabled(load_inputs.cache_disabled);
-        // The engine may publish lifecycle or resource activity before the
-        // DCL-bound navigation result is adopted into a target slot. Bind its
-        // scheduler sender at construction time so that early tail work queues
-        // a wake instead of disappearing in the handoff window.
+        let engine = self
+            .configured_navigation_engine_for_load_inputs_mut(load_inputs)
+            .expect("navigation load target must retain its resident NavigationEngine")
+            .clone();
+        // The handle may publish lifecycle or resource activity before the
+        // DCL-bound navigation result is committed into a target slot.
         self.apply_scheduler_senders_to_navigation_engine(&engine);
         engine
     }
@@ -2591,46 +2550,6 @@ impl CdpConnection {
         let target_id = load_inputs.root_frame_id.as_deref()?;
         self.browser_context_by_id(browser_context_id)?
             .page_navigation_engine(target_id)
-    }
-
-    fn navigation_runtime_config_for_load_inputs(
-        &self,
-        load_inputs: &TargetNavigationLoadInputs,
-    ) -> moli_core::runtime::NavigationRuntimeConfig {
-        let mut config = self.standalone_navigation_engine.runtime_config();
-        *config.fetch_config_mut() = self.fetch_config_for_load_inputs(load_inputs);
-        config
-    }
-
-    fn apply_fetch_overrides_to_background_navigation_engine(
-        &self,
-        engine: &mut NavigationEngine,
-        load_inputs: &TargetNavigationLoadInputs,
-    ) {
-        engine.set_browser_identity_override(
-            load_inputs
-                .browser_identity_override
-                .clone()
-                .or_else(|| self.global_browser_identity_override.clone())
-                .unwrap_or_else(|| self.base_browser_identity.clone()),
-        );
-        engine.set_http_proxy_override(
-            load_inputs
-                .http_proxy_override
-                .clone()
-                .or_else(|| self.base_http_proxy.clone()),
-        );
-        engine.set_http_no_proxy_override(
-            load_inputs
-                .http_no_proxy_override
-                .clone()
-                .or_else(|| self.base_http_no_proxy.clone()),
-        );
-        engine.set_tls_verify_host(
-            load_inputs
-                .tls_verify_host_override
-                .unwrap_or(self.base_tls_verify_host),
-        );
     }
 
     fn shared_resource_runtime_for_navigation_load_inputs(
@@ -2710,17 +2629,6 @@ impl CdpConnection {
 
     pub async fn load_page_via_runtime_async(&mut self, raw_url: &str) -> Result<Page, String> {
         let navigation = self.load_navigation_via_runtime_async(raw_url).await?;
-        if let Some(engine) = navigation.navigation_engine {
-            let page_owner = self.browser_context.as_ref().and_then(|context| {
-                Some((context.id.clone(), context.active_target_id()?.to_owned()))
-            });
-            if let Some((browser_context_id, target_id)) = page_owner {
-                self.install_page_navigation_engine(&browser_context_id, &target_id, engine)
-                    .expect("loaded page must retain its exact PageTargetHost engine");
-            } else {
-                self.replace_standalone_navigation_engine(engine);
-            }
-        }
         Ok(navigation.page)
     }
 
@@ -2809,12 +2717,13 @@ impl CdpConnection {
         response_headers: Vec<(String, String)>,
         response_body: String,
     ) -> Result<LoadedNavigation, String> {
+        let owner = CommandOwnerScope::capture(self, session_id);
         let load_inputs = self.navigation_fixture_load_inputs_for_session_owner(session_id)?;
         let initial_request_cookie_report =
             load_inputs.request_cookie_report_for_navigation(&requested_url, &request_method, true);
         let navigation = self
             .build_navigation_from_buffered_body_source_with_load_inputs_async(
-                session_id,
+                &owner,
                 &load_inputs,
                 requested_url.clone(),
                 requested_url,
@@ -2828,7 +2737,7 @@ impl CdpConnection {
                 MainDocumentBodyProgressSource::default(),
             )
             .await?;
-        self.commit_navigation_load_outcome_for_session_owner_async(session_id, navigation)
+        self.commit_navigation_load_outcome_for_owner_async(&owner, navigation)
             .await
     }
 
@@ -2896,7 +2805,7 @@ impl CdpConnection {
     ) -> Result<NavigationLoadOutcome, String> {
         let load_inputs = self.navigation_load_inputs_for_navigation(navigation);
         self.build_navigation_from_buffered_body_source_with_load_inputs_async(
-            navigation.navigate_session_id.as_deref(),
+            &navigation.owner,
             &load_inputs,
             navigation.requested_url.clone(),
             final_url,
@@ -2915,7 +2824,7 @@ impl CdpConnection {
     #[allow(clippy::too_many_arguments)]
     async fn build_navigation_from_buffered_body_source_with_load_inputs_async(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         load_inputs: &TargetNavigationLoadInputs,
         requested_url: Url,
         final_url: Url,
@@ -2942,7 +2851,7 @@ impl CdpConnection {
             negotiated_http_version: None,
         };
         self.build_navigation_from_captured_raw_response_with_load_inputs_async(
-            session_id,
+            owner,
             load_inputs,
             requested_url,
             request_method,
@@ -3057,7 +2966,6 @@ impl CdpConnection {
                 false,
                 network_progress,
             ),
-            navigation_engine: None,
             network_error_page: None,
         })
     }
@@ -3097,9 +3005,9 @@ impl CdpConnection {
             .map_err(|error| format!("failed to fetch page `{raw_url}`: {error}"))
     }
 
-    pub(crate) async fn fetch_navigation_auth_raw_response_for_session_owner_async(
+    pub(crate) async fn fetch_navigation_auth_raw_response_for_owner_async(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         request_load_policy: NavigationRequestLoadPolicy,
         method: &str,
         raw_url: &str,
@@ -3108,7 +3016,7 @@ impl CdpConnection {
         auth: SubresourceAuthCredentials,
     ) -> Result<NetworkFetchResult<RawResponse>, String> {
         let load_inputs = apply_navigation_request_load_policy(
-            self.navigation_load_inputs_for_session_owner(session_id),
+            self.navigation_load_inputs_for_owner(owner),
             request_load_policy,
         );
         ensure_url_not_blocked_for_load_inputs(&load_inputs, raw_url)?;
@@ -3158,9 +3066,9 @@ impl CdpConnection {
         .await
     }
 
-    pub(crate) async fn fetch_navigation_streaming_raw_response_for_session_owner_async(
+    pub(crate) async fn fetch_navigation_streaming_raw_response_for_owner_async(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         request_load_policy: NavigationRequestLoadPolicy,
         method: &str,
         raw_url: &str,
@@ -3169,7 +3077,7 @@ impl CdpConnection {
         auth: Option<SubresourceAuthCredentials>,
     ) -> Result<NetworkFetchResult<StreamingRawResponse>, String> {
         let load_inputs = apply_navigation_request_load_policy(
-            self.navigation_load_inputs_for_session_owner(session_id),
+            self.navigation_load_inputs_for_owner(owner),
             request_load_policy,
         );
         self.fetch_navigation_streaming_raw_response_with_load_inputs_async(
@@ -3353,7 +3261,6 @@ impl CdpConnection {
                 false,
                 network_progress,
             ),
-            navigation_engine: None,
             network_error_page: None,
         })
     }
@@ -3388,9 +3295,10 @@ impl CdpConnection {
         request_headers: Vec<(String, String)>,
         response: NetworkFetchResult<RawResponse>,
     ) -> Result<NavigationLoadOutcome, String> {
-        let load_inputs = self.navigation_load_inputs_for_session_owner(session_id);
+        let owner = CommandOwnerScope::capture(self, session_id);
+        let load_inputs = self.navigation_load_inputs_for_owner(&owner);
         self.build_navigation_from_buffered_raw_response_with_load_inputs_async(
-            session_id,
+            &owner,
             &load_inputs,
             requested_url,
             request_method,
@@ -3407,7 +3315,7 @@ impl CdpConnection {
     ) -> Result<NavigationLoadOutcome, String> {
         let load_inputs = self.navigation_load_inputs_for_navigation(navigation);
         self.build_navigation_from_buffered_raw_response_with_load_inputs_async(
-            navigation.navigate_session_id.as_deref(),
+            &navigation.owner,
             &load_inputs,
             navigation.requested_url.clone(),
             navigation.request_method.clone(),
@@ -3419,7 +3327,7 @@ impl CdpConnection {
 
     async fn build_navigation_from_buffered_raw_response_with_load_inputs_async(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         load_inputs: &TargetNavigationLoadInputs,
         requested_url: Url,
         request_method: String,
@@ -3442,7 +3350,7 @@ impl CdpConnection {
         let head = response.head();
         let body = CapturedBody::from_bytes(response.clone_body_bytes());
         self.build_navigation_from_captured_raw_response_with_load_inputs_async(
-            session_id,
+            owner,
             load_inputs,
             requested_url,
             request_method,
@@ -3465,7 +3373,7 @@ impl CdpConnection {
     ) -> Result<NavigationLoadOutcome, String> {
         let load_inputs = self.navigation_load_inputs_for_navigation(navigation);
         self.build_navigation_from_captured_raw_response_with_load_inputs_async(
-            navigation.navigate_session_id.as_deref(),
+            &navigation.owner,
             &load_inputs,
             navigation.requested_url.clone(),
             navigation.request_method.clone(),
@@ -3481,7 +3389,7 @@ impl CdpConnection {
     #[allow(clippy::too_many_arguments)]
     async fn build_navigation_from_captured_raw_response_with_load_inputs_async(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         load_inputs: &TargetNavigationLoadInputs,
         requested_url: Url,
         request_method: String,
@@ -3529,9 +3437,8 @@ impl CdpConnection {
             .map(NavigationLoadOutcome::response_commit_ready);
         }
 
-        let mut engine = self.background_navigation_engine_for_load_inputs(load_inputs);
-        let page_reservation =
-            self.reserve_renderer_page_for_session_owner(session_id, load_inputs, &engine);
+        let mut engine = self.navigation_engine_handle_for_load_inputs(load_inputs);
+        let page_reservation = self.reserve_renderer_page_for_owner(owner, load_inputs, &engine);
         let navigation = prepare_navigation_from_captured_raw_response_with_engine_async(
             &mut engine,
             page_reservation,
@@ -3548,9 +3455,7 @@ impl CdpConnection {
             RendererReplyBoundary::Stage,
         )
         .await?;
-        Ok(NavigationLoadOutcome::response_commit_ready(
-            navigation.with_navigation_engine(engine),
-        ))
+        Ok(NavigationLoadOutcome::response_commit_ready(navigation))
     }
 
     pub async fn build_navigation_from_streaming_raw_response_async(
@@ -3581,9 +3486,10 @@ impl CdpConnection {
         response: NetworkFetchResult<StreamingRawResponse>,
         body_progress_source: MainDocumentBodyProgressSource,
     ) -> Result<NavigationLoadOutcome, String> {
-        let load_inputs = self.navigation_load_inputs_for_session_owner(session_id);
+        let owner = CommandOwnerScope::capture(self, session_id);
+        let load_inputs = self.navigation_load_inputs_for_owner(&owner);
         self.build_navigation_from_streaming_raw_response_with_load_inputs_async(
-            session_id,
+            &owner,
             &load_inputs,
             requested_url,
             request_method,
@@ -3604,7 +3510,7 @@ impl CdpConnection {
     ) -> Result<NavigationLoadOutcome, String> {
         let load_inputs = self.navigation_load_inputs_for_navigation(navigation);
         self.build_navigation_from_streaming_raw_response_with_load_inputs_async(
-            navigation.navigate_session_id.as_deref(),
+            &navigation.owner,
             &load_inputs,
             navigation.requested_url.clone(),
             navigation.request_method.clone(),
@@ -3627,7 +3533,7 @@ impl CdpConnection {
     ) -> Result<NavigationLoadOutcome, String> {
         let load_inputs = self.navigation_load_inputs_for_navigation(navigation);
         self.build_navigation_from_streaming_raw_response_with_load_inputs_async(
-            navigation.navigate_session_id.as_deref(),
+            &navigation.owner,
             &load_inputs,
             navigation.requested_url.clone(),
             navigation.request_method.clone(),
@@ -3643,7 +3549,7 @@ impl CdpConnection {
     #[allow(clippy::too_many_arguments)]
     async fn build_navigation_from_streaming_raw_response_with_load_inputs_async(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         load_inputs: &TargetNavigationLoadInputs,
         requested_url: Url,
         request_method: String,
@@ -3680,9 +3586,8 @@ impl CdpConnection {
             .await;
         }
 
-        let mut engine = self.background_navigation_engine_for_load_inputs(load_inputs);
-        let page_reservation =
-            self.reserve_renderer_page_for_session_owner(session_id, load_inputs, &engine);
+        let mut engine = self.navigation_engine_handle_for_load_inputs(load_inputs);
+        let page_reservation = self.reserve_renderer_page_for_owner(owner, load_inputs, &engine);
         let navigation = build_navigation_from_streaming_raw_response_with_engine_async(
             &mut engine,
             page_reservation,
@@ -3701,7 +3606,7 @@ impl CdpConnection {
             RendererReplyBoundary::Stage,
         )
         .await?;
-        Ok(navigation.with_navigation_engine(engine))
+        Ok(navigation)
     }
 
     pub(crate) async fn collect_navigation_streaming_raw_response_async(
@@ -3970,7 +3875,6 @@ async fn prepare_captured_document_response_with_engine_async(
         response_status,
         response_headers,
         response_from_cache,
-        navigation_engine: None,
         timing_started: None,
         main_document_commit,
         network_error_page,

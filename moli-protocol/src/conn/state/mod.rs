@@ -17,7 +17,6 @@ mod page_residence_token;
 mod page_resource;
 mod page_slot;
 mod page_target_host;
-mod parking;
 mod pending_renderer_command;
 mod profiler;
 mod runtime_slot;
@@ -27,6 +26,7 @@ mod session;
 mod session_storage;
 mod shared_worker_attachment;
 mod shared_worker_target;
+mod target_state;
 #[cfg(test)]
 mod tests;
 
@@ -51,8 +51,9 @@ pub(crate) use dedicated_worker_target::{
 };
 pub(crate) use devtools_session::{
     DevToolsBrowserIdentityOverride, DevToolsConsoleOutputSessionState,
-    DevToolsLogViolationThreshold, DevToolsNetworkSessionState, DevToolsSessionState,
-    PreparedRendererCallReplacements, SessionRendererCallReplay, SessionRendererCallTermination,
+    DevToolsEmulationSessionState, DevToolsLogViolationThreshold, DevToolsNetworkSessionState,
+    DevToolsSessionState, PreparedRendererCallReplacements, SessionRendererCallReplay,
+    SessionRendererCallTermination,
 };
 pub(crate) use document_lifecycle_observer::{
     RendererDocumentLifecycleObservation, RendererDocumentLifecycleObserver,
@@ -73,8 +74,6 @@ pub use page_slot::{DocumentStartScript, IsolatedWorldDefinition, RuntimeBinding
 pub(crate) use runtime_slot::{FinishedRendererDocumentNavigation, TargetRuntimeSlot};
 
 pub use fetch::TargetFetchConfig;
-#[cfg(test)]
-pub(crate) use fetch::TargetFetchState;
 pub(crate) use fetch::{TargetFetchOwner, TargetFetchSubresourceInterceptionSnapshot};
 
 pub(crate) use inspector::InspectorCommandDispatch;
@@ -102,8 +101,8 @@ pub(crate) use service_worker_target::{
 #[cfg(test)]
 pub(crate) use session::TargetPerformanceSessionState;
 pub(crate) use session::{
-    PageScreencastConfig, PageScreencastFormat, PerformanceTimeDomain, TargetNetworkPolicyState,
-    TargetPageSessionState, TargetRuntimeSessionState,
+    EffectiveTargetPolicy, PageScreencastConfig, PageScreencastFormat, PerformanceTimeDomain,
+    TargetNetworkPolicyState, TargetPageSessionState, TargetRuntimeSessionState,
 };
 pub(crate) use session_storage::TargetSessionStorageNamespace;
 pub(crate) use shared_worker_attachment::{
@@ -119,19 +118,18 @@ pub(crate) use browser_context::{
 
 pub use navigation::{PageNavigationHistoryEntry, PendingNavigationHistoryUpdate};
 
-pub use page_target_host::PageTargetHost;
-pub(crate) use parking::{
-    ParkedTargetOwnerState, PendingBidiChannelListener, PendingInspectorAwait,
-    TargetInitialEmptyDocumentCreator, TargetOwnerState, TargetWindowSurfaceState,
+pub(crate) use emulation::{
+    EffectiveTargetEmulationState, EffectiveTargetEmulationStateDelta, EmulatedNetworkConditions,
+    EmulatedViewportSurface, viewport_surface_install_script,
 };
-pub use session::TargetPageState;
-
 pub use emulation::{
     EmulatedDeviceMetrics, EmulatedGeolocationOverride, EmulatedGeolocationOverrideState,
     EmulatedMediaOverrides,
 };
-pub(crate) use emulation::{
-    EmulatedNetworkConditions, EmulatedViewportSurface, viewport_surface_install_script,
+pub use page_target_host::PageTargetHost;
+pub(crate) use target_state::{
+    PendingBidiChannelListener, PendingInspectorAwait, TargetInitialEmptyDocumentCreator,
+    TargetOwnerState, TargetWindowSurfaceState,
 };
 
 pub(crate) use navigation_outcome::{CompletedDownloadBody, CompletedDownloadBodyArtifact};

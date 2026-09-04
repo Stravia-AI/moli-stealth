@@ -116,7 +116,8 @@ async fn loaded_dom_storage_context() -> (TestContext, String, String, tokio::ta
     browser_context.set_target_url(page_url.clone());
     browser_context.set_target_security_origin(origin.clone());
     browser_context.set_target_secure_context_type("Secure".to_owned());
-    ctx.conn.browser_context = Some(browser_context);
+    ctx.conn
+        .install_browser_context_fixture_for_test(browser_context);
 
     let page = ctx
         .conn
@@ -127,7 +128,7 @@ async fn loaded_dom_storage_context() -> (TestContext, String, String, tokio::ta
         .browser_context
         .as_mut()
         .expect("browser context should exist")
-        .active_target
+        .active_page_target_mut()
         .runtime_slot
         .set_loaded_page_for_test(page);
     (ctx, page_url, origin, server)
@@ -452,7 +453,8 @@ async fn dom_storage_resolves_child_frame_storage_ids_without_collapsing_to_top_
     browser_context.set_target_url(page_url.clone());
     browser_context.set_target_security_origin(top_origin.clone());
     browser_context.set_target_secure_context_type("Secure".to_owned());
-    ctx.conn.browser_context = Some(browser_context);
+    ctx.conn
+        .install_browser_context_fixture_for_test(browser_context);
     let page = ctx
         .conn
         .load_page_via_runtime_async(&page_url)
@@ -462,7 +464,7 @@ async fn dom_storage_resolves_child_frame_storage_ids_without_collapsing_to_top_
         .browser_context
         .as_mut()
         .expect("browser context")
-        .active_target
+        .active_page_target_mut()
         .runtime_slot
         .set_loaded_page_for_test(page);
 
@@ -543,7 +545,7 @@ async fn dom_storage_resolves_child_frame_storage_ids_without_collapsing_to_top_
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn dom_storage_mutations_fan_out_to_enabled_primary_and_auxiliary_sessions() {
+async fn dom_storage_mutations_fan_out_to_enabled_primary_and_attached_sessions() {
     let (mut ctx, _page_url, _origin, server) = loaded_dom_storage_context().await;
 
     ctx.process_async(json!({
@@ -562,16 +564,16 @@ async fn dom_storage_mutations_fan_out_to_enabled_primary_and_auxiliary_sessions
         "params": { "targetId": "TID-DOM-STORAGE" }
     }))
     .await;
-    let auxiliary_session_id = take_result_by_id(&mut ctx, 31)["sessionId"]
+    let attached_session_id = take_result_by_id(&mut ctx, 31)["sessionId"]
         .as_str()
-        .expect("auxiliary target session id")
+        .expect("attached target session id")
         .to_owned();
-    assert_ne!(primary_session_id, auxiliary_session_id);
+    assert_ne!(primary_session_id, attached_session_id);
     ctx.sent.clear();
 
     for (id, session_id) in [
         (32, primary_session_id.as_str()),
-        (33, auxiliary_session_id.as_str()),
+        (33, attached_session_id.as_str()),
     ] {
         ctx.process_async(json!({
             "id": id,
@@ -603,7 +605,7 @@ async fn dom_storage_mutations_fan_out_to_enabled_primary_and_auxiliary_sessions
         .filter_map(|message| message["sessionId"].as_str().map(str::to_owned))
         .collect::<Vec<_>>();
     event_session_ids.sort();
-    let mut expected_session_ids = vec![primary_session_id, auxiliary_session_id];
+    let mut expected_session_ids = vec![primary_session_id, attached_session_id];
     expected_session_ids.sort();
     assert_eq!(event_session_ids, expected_session_ids);
 

@@ -38,26 +38,30 @@ async fn close_target_success() {
     let mut ctx = TestContext::new();
     load_bc_with_target(&mut ctx, "BID-9", "TID-000000000A");
     let bc = ctx.conn.browser_context.as_mut().unwrap();
-    bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+    bc.active_page_target_mut().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
         .page_session_state
         .page_lifecycle_events = true;
-    bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+    bc.active_page_target_mut().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
         .runtime_session_state
         .runtime_frontend_enabled = true;
-    bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+    bc.active_page_target_mut().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
         .runtime_session_state
         .inspector_enabled = true;
-    bc.active_target
+    bc.active_page_target_mut()
         .runtime_slot
         .enable_primary_network_events();
-    bc.mutate_devtools_network_session_state(false, None, |network| {
-        network.network_enabled = true;
-        network.cache_disabled = true;
-        network.bypass_service_worker = true;
-        network.extra_headers = vec![("X-Test".into(), "1".into())];
-    });
-    bc.css_enabled = true;
-    bc.active_target.fetch_owner.configure(
+    bc.active_page_target_mut()
+        .mutate_devtools_network_session_state(
+            &moli_page_types::DevToolsSessionKey::Primary,
+            |network| {
+                network.network_enabled = true;
+                network.cache_disabled = true;
+                network.bypass_service_worker = true;
+                network.extra_headers = vec![("X-Test".into(), "1".into())];
+            },
+        );
+    bc.active_page_target_mut().css_enabled = true;
+    bc.active_page_target_mut().fetch_owner.configure(
         None,
         true,
         vec![crate::conn::FetchInterceptionPattern {
@@ -71,10 +75,10 @@ async fn close_target_success() {
     bc.set_next_network_request_sequence_for_test(41);
     bc.set_subresource_network_emitted_record_count_for_test(12);
     bc.set_next_io_stream_sequence_for_test(7);
-    bc.active_target
+    bc.active_page_target_mut()
         .runtime_slot
         .set_next_subresource_fetch_request_id_for_test(5);
-    bc.active_target
+    bc.active_page_target_mut()
         .owner_state
         .target_crash_state
         .mark_crashed();
@@ -297,8 +301,8 @@ async fn close_target_emits_detached_events() {
     let session_id = "SID-000000000A".to_owned();
     let bc = ctx.conn.browser_context.as_mut().unwrap();
     bc.attach_active_session(session_id.clone());
-    assert!(bc.assign_auxiliary_session_to_target("TID-000000000A", "SID-aux".into()));
-    bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+    assert!(bc.assign_attached_session_to_target("TID-000000000A", "SID-attached".into()));
+    bc.active_page_target_mut().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
         .runtime_session_state
         .inspector_enabled = true;
 
@@ -314,11 +318,11 @@ async fn close_target_emits_detached_events() {
         primary_inspector["params"]["reason"],
         "Render process gone."
     );
-    let auxiliary_inspector = ctx.take_one();
-    assert_eq!(auxiliary_inspector["method"], "Inspector.detached");
-    assert_eq!(auxiliary_inspector["sessionId"], "SID-aux");
+    let attached_inspector = ctx.take_one();
+    assert_eq!(attached_inspector["method"], "Inspector.detached");
+    assert_eq!(attached_inspector["sessionId"], "SID-attached");
     assert_eq!(
-        auxiliary_inspector["params"]["reason"],
+        attached_inspector["params"]["reason"],
         "Render process gone."
     );
     ctx.expect_event(
@@ -332,11 +336,11 @@ async fn close_target_emits_detached_events() {
         "Target.detachedFromTarget",
         Some(&json!({
             "targetId": "TID-000000000A",
-            "sessionId": "SID-aux"
+            "sessionId": "SID-attached"
         })),
     );
     let bc = ctx.conn.browser_context.as_ref().unwrap();
-    assert!(bc.auxiliary_target_id_for_session("SID-aux").is_none());
+    assert!(bc.attached_target_id_for_session("SID-attached").is_none());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -345,7 +349,7 @@ async fn close_target_without_inspector_enabled_emits_inspector_detached_event()
     let mut bc = BrowserContext::new("BID-9".into());
     bc.set_active_target_id("TID-000000000A");
     bc.attach_active_session("SID-1");
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.install_browser_context_fixture_for_test(bc);
 
     ctx.process_async(json!({
         "id": 29,
@@ -379,7 +383,7 @@ async fn close_target_invalidates_runtime_context_and_object_without_active_page
         "about:blank".to_owned(),
     );
     bc.insert_page_target_host(background_target);
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.install_browser_context_fixture_for_test(bc);
     ctx.install_navigation_fixture_for_session_owner(
         "data:text/html,<html><body><script>globalThis.__lm_closed_target_marker = 'active-clean';</script>active</body></html>",
         Some("SID-active"),
@@ -517,17 +521,17 @@ async fn close_background_target_emits_detached_events_and_clears_attached_sessi
         Some("SID-bg"),
     );
     let bc = ctx.conn.browser_context.as_mut().unwrap();
-    assert!(bc.assign_auxiliary_session_to_target("TID-000000000B", "SID-aux".into()));
-    bc.mutate_parked_page_session_state("TID-000000000B", |state| {
-        state.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary] =
-            crate::conn::DevToolsSessionState {
-                runtime_session_state: crate::conn::TargetRuntimeSessionState {
-                    inspector_enabled: true,
-                    ..Default::default()
-                },
+    assert!(bc.assign_attached_session_to_target("TID-000000000B", "SID-attached".into()));
+    bc.background_target_mut("TID-000000000B")
+        .expect("background target must exist")
+        .devtools_sessions[moli_page_types::DevToolsSessionKey::Primary] =
+        crate::conn::DevToolsSessionState {
+            runtime_session_state: crate::conn::TargetRuntimeSessionState {
+                inspector_enabled: true,
                 ..Default::default()
-            };
-    });
+            },
+            ..Default::default()
+        };
 
     ctx.process_async(json!({
         "id": 121,
@@ -552,14 +556,18 @@ async fn close_background_target_emits_detached_events_and_clears_attached_sessi
         "Target.detachedFromTarget",
         Some(&json!({
             "targetId": "TID-000000000B",
-            "sessionId": "SID-aux"
+            "sessionId": "SID-attached"
         })),
     );
 
     let bc = ctx.conn.browser_context.as_ref().unwrap();
     assert!(bc.background_target("TID-000000000B").is_none());
-    assert!(bc.auxiliary_target_id_for_session("SID-aux").is_none());
-    assert!(bc.parked_page_session_state("TID-000000000B").is_none());
+    assert!(bc.attached_target_id_for_session("SID-attached").is_none());
+    assert!(
+        bc.background_target("TID-000000000B")
+            .filter(|target| target.has_non_default_session_state())
+            .is_none()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -586,13 +594,13 @@ async fn close_target_aborts_paused_request_stage_navigation() {
     let mut bc = BrowserContext::new("BID-9".into());
     bc.set_active_target_id("TID-000000000A");
     bc.attach_active_session("SID-1");
-    bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+    bc.active_page_target_mut().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
         .runtime_session_state
         .inspector_enabled = true;
-    bc.active_target
+    bc.active_page_target_mut()
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.install_browser_context_fixture_for_test(bc);
 
     ctx.process_async(json!({
         "id": 20,
@@ -681,7 +689,7 @@ async fn close_target_aborts_paused_runtime_fetch_subresource() {
     let mut bc = BrowserContext::new("BID-9".into());
     bc.set_active_target_id("TID-000000000A");
     bc.attach_active_session("SID-1");
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.install_browser_context_fixture_for_test(bc);
     ctx.install_navigation_fixture_for_session_owner(&page_url, Some("SID-1"))
         .await;
     ctx.conn
@@ -810,7 +818,7 @@ async fn close_target_aborts_paused_response_stage_runtime_xhr_subresource() {
     let mut bc = BrowserContext::new("BID-9".into());
     bc.set_active_target_id("TID-000000000A");
     bc.attach_active_session("SID-1");
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.install_browser_context_fixture_for_test(bc);
     ctx.install_navigation_fixture_for_session_owner(&page_url, Some("SID-1"))
         .await;
     ctx.conn
@@ -978,7 +986,7 @@ async fn close_target_aborts_paused_runtime_xhr_auth_subresource() {
     let mut bc = BrowserContext::new("BID-9".into());
     bc.set_active_target_id("TID-000000000A");
     bc.attach_active_session("SID-1");
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.install_browser_context_fixture_for_test(bc);
     ctx.install_navigation_fixture_for_session_owner(&page_url, Some("SID-1"))
         .await;
     ctx.conn
@@ -1159,7 +1167,7 @@ async fn activate_target_returns_empty_result_for_known_target() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn activate_target_promotes_background_target_into_active_slot() {
+async fn activate_target_selects_background_target_as_active() {
     let mut ctx = TestContext::new();
     load_bc_with_target(&mut ctx, "BID-9", "TID-000000000A");
     push_background_target(&mut ctx, "TID-000000000B", "about:blank", None);
@@ -1540,6 +1548,7 @@ async fn send_message_to_target_preserves_nested_scheduler_events() {
         .as_mut()
         .unwrap()
         .attach_active_session("SID-9");
+    ctx.conn.commit_declared_session_fixtures_for_test();
 
     let raw = json!({
         "id": 1402,

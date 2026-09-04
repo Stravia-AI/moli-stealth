@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
-use crate::conn::CdpConnection;
+use crate::conn::{CdpConnection, CommandOwnerScope};
 
+#[cfg(test)]
 use super::TargetRuntimeObservableSourceOutput;
 use super::items::ObservableRuntimeEmissionCursor;
 #[cfg(test)]
@@ -11,11 +12,18 @@ pub(in crate::domains) fn advance_runtime_observable_cursors_to_current_for_sess
     conn: &mut CdpConnection,
     session_id: Option<&str>,
 ) {
-    let owner_session_id = runtime_observable_owner_session_id(conn, session_id);
+    let owner = CommandOwnerScope::capture(conn, session_id);
+    advance_runtime_observable_cursors_to_current_for_owner(conn, &owner);
+}
+
+pub(in crate::domains) fn advance_runtime_observable_cursors_to_current_for_owner(
+    conn: &mut CdpConnection,
+    owner: &CommandOwnerScope,
+) {
     if let Some((context_console_counts, exception_entries)) =
-        runtime_observable_cursor_end_from_owner_queue(conn, owner_session_id)
+        runtime_observable_cursor_end_from_owner_queue_for_owner(conn, owner)
     {
-        let _ = conn.with_target_owner_state_for_session_mut(owner_session_id, |owner_state| {
+        let _ = conn.with_target_owner_state_for_owner_mut(owner, |owner_state| {
             owner_state.runtime_observable_state.advance_to_current(
                 context_console_counts,
                 0,
@@ -25,11 +33,11 @@ pub(in crate::domains) fn advance_runtime_observable_cursors_to_current_for_sess
         return;
     }
     let Some((owner_queue_console_entries, exception_entries)) =
-        runtime_observable_cursor_end_from_owner_observable_queue(conn, owner_session_id)
+        runtime_observable_cursor_end_from_owner_observable_queue_for_owner(conn, owner)
     else {
         return;
     };
-    let _ = conn.with_target_owner_state_for_session_mut(owner_session_id, |owner_state| {
+    let _ = conn.with_target_owner_state_for_owner_mut(owner, |owner_state| {
         owner_state.runtime_observable_state.advance_to_current(
             HashMap::new(),
             owner_queue_console_entries,
@@ -38,30 +46,23 @@ pub(in crate::domains) fn advance_runtime_observable_cursors_to_current_for_sess
     });
 }
 
-fn runtime_observable_cursor_end_from_owner_queue(
+fn runtime_observable_cursor_end_from_owner_queue_for_owner(
     conn: &CdpConnection,
-    owner_session_id: Option<&str>,
+    owner: &CommandOwnerScope,
 ) -> Option<(HashMap<i64, usize>, usize)> {
-    let source = runtime_observable_source_tail_for_session_owner(conn, owner_session_id)?;
-    source.cursor_end()
-}
-
-fn runtime_observable_source_tail_for_session_owner(
-    conn: &CdpConnection,
-    owner_session_id: Option<&str>,
-) -> Option<TargetRuntimeObservableSourceOutput> {
-    let runtime_slot = conn.runtime_session_owner_slot(owner_session_id).ok()?;
+    let runtime_slot = conn.runtime_session_owner_slot_for_owner(owner).ok()?;
     let source = runtime_slot.observable_output_latest_source_tail()?;
-    let url = conn.runtime_session_owner_target_url(owner_session_id)?;
+    let url = conn.runtime_session_owner_target_url_for_owner(owner)?;
     (source.url() == url && runtime_slot.page_attachment_id() == Some(source.page_attachment_id()))
-        .then_some(source)
+        .then_some(source)?
+        .cursor_end()
 }
 
-fn runtime_observable_cursor_end_from_owner_observable_queue(
+fn runtime_observable_cursor_end_from_owner_observable_queue_for_owner(
     conn: &CdpConnection,
-    owner_session_id: Option<&str>,
+    owner: &CommandOwnerScope,
 ) -> Option<(usize, usize)> {
-    conn.runtime_session_owner_slot(owner_session_id)
+    conn.runtime_session_owner_slot_for_owner(owner)
         .ok()?
         .observable_output_cursor_end()
 }
@@ -229,7 +230,8 @@ mod tests {
                 .browser_context
                 .as_mut()
                 .expect("browser context should exist");
-            bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+            bc.active_page_target_mut().devtools_sessions
+                [moli_page_types::DevToolsSessionKey::Primary]
                 .runtime_session_state
                 .runtime_frontend_enabled = true;
         }
@@ -243,11 +245,11 @@ mod tests {
                 .browser_context
                 .as_mut()
                 .expect("browser context should exist");
-            bc.active_target
+            bc.active_page_target_mut()
                 .owner_state
                 .runtime_observable_state
                 .mark_emitted_console_counts(HashMap::from([(7, 1)]));
-            bc.active_target
+            bc.active_page_target_mut()
                 .owner_state
                 .runtime_observable_state
                 .mark_emitted_exception_entries(1);
@@ -280,10 +282,10 @@ mod tests {
                 .as_mut()
                 .expect("browser context should exist");
             bc.set_target_url("http://example.test/runtime-source".to_owned());
-            bc.active_target
+            bc.active_page_target_mut()
                 .runtime_slot
                 .set_page_attachment_id_for_test(3);
-            bc.active_target
+            bc.active_page_target_mut()
                 .runtime_slot
                 .sync_observable_output_source_from_renderer_snapshot(
                     "http://example.test/runtime-source".to_owned(),
@@ -297,7 +299,7 @@ mod tests {
             .browser_context
             .as_ref()
             .expect("browser context should exist")
-            .active_target
+            .active_page_target()
             .owner_state
             .runtime_observable_state;
         assert_eq!(
@@ -313,44 +315,47 @@ mod tests {
     }
 
     #[test]
-    fn runtime_observable_auxiliary_session_uses_own_browser_context() {
+    fn runtime_observable_attached_session_uses_own_browser_context() {
         let mut conn = crate::conn::CdpConnection::default();
         conn.browser_context = Some(BrowserContext::new("BID-active".to_owned()));
 
         let mut inactive = BrowserContext::new("BID-inactive".to_owned());
         inactive.set_active_target_id("TID-inactive".to_owned());
         inactive
+            .active_page_target_mut()
             .devtools_sessions
-            .ensure_attached("SID-aux")
+            .ensure_attached("SID-attached")
             .runtime_session_state
             .runtime_frontend_enabled = true;
-        assert!(inactive.assign_auxiliary_session_to_target("TID-inactive", "SID-aux".to_owned()));
-        conn.inactive_browser_contexts.push(inactive);
+        assert!(
+            inactive.assign_attached_session_to_target("TID-inactive", "SID-attached".to_owned())
+        );
+        conn.push_inactive_browser_context_fixture_for_test(inactive);
 
         assert!(
             retain_unemitted_runtime_observable_prepared_source_for_session_owner(
                 &conn,
-                Some("SID-aux"),
+                Some("SID-attached"),
                 prepared_source(),
             )
             .is_some(),
-            "auxiliary runtime observable presence should read the inactive owner context"
+            "attached runtime observable presence should read the inactive owner context"
         );
 
         mark_runtime_observable_activity_emitted_for_session_owner(
             &mut conn,
-            Some("SID-aux"),
+            Some("SID-attached"),
             HashMap::from([(7, 1)]),
             1,
         );
         assert!(
             retain_unemitted_runtime_observable_prepared_source_for_session_owner(
                 &conn,
-                Some("SID-aux"),
+                Some("SID-attached"),
                 prepared_source(),
             )
             .is_none(),
-            "auxiliary runtime observable mark should write the inactive owner context"
+            "attached runtime observable mark should write the inactive owner context"
         );
     }
 }

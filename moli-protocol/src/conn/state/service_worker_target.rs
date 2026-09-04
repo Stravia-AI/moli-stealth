@@ -9,7 +9,6 @@ use serde_json::Value;
 
 use crate::devtools_runtime::RuntimeExecutionContextEvent;
 
-use super::parking::PendingInspectorAwait;
 use super::service_worker_lifetime::{
     TargetServiceWorkerProtocolAttachmentIdentity, TargetServiceWorkerProtocolAttachmentRetirement,
     TargetServiceWorkerProtocolAttachmentScope, TargetServiceWorkerRunIdentity,
@@ -17,6 +16,7 @@ use super::service_worker_lifetime::{
     TargetServiceWorkerRuntimeAttachmentIdentity, TargetServiceWorkerVersionIdentity,
     TargetServiceWorkerVersionRetirement, TargetServiceWorkerVersionScope,
 };
+use super::target_state::PendingInspectorAwait;
 use super::{
     DevToolsSessionState, DuplicatePendingRendererCommand, PreparedRendererCallDispatch,
     RegisterRendererCallError, RendererCommandCorrelation, RendererCommandDescriptor,
@@ -491,6 +491,16 @@ impl ServiceWorkerTargetState {
             return;
         };
         state.clear_runtime_remote_object_tracking();
+    }
+
+    pub(crate) fn take_runtime_remote_object_cleanup_plan(
+        &mut self,
+        session_id: &str,
+    ) -> (Vec<String>, Vec<String>) {
+        let Some(state) = self.session_state_mut(session_id) else {
+            return (Vec::new(), Vec::new());
+        };
+        state.take_runtime_remote_object_cleanup_plan()
     }
 
     pub(crate) fn record_runtime_contexts_reported_to_frontend(&mut self, session_id: &str) {
@@ -1011,6 +1021,19 @@ impl ServiceWorkerTargetState {
     ) -> Option<RendererCommandCorrelation> {
         self.session_state_mut(owner_session_id)?
             .take_frontend_command_for_renderer_if_attachment_matches(
+                renderer_call_id,
+                dispatched_attachment_id,
+            )
+    }
+
+    pub(crate) fn renderer_command_descriptor_for_renderer_if_attachment_matches(
+        &self,
+        owner_session_id: &str,
+        renderer_call_id: moli_page_types::RendererCallId,
+        dispatched_attachment_id: Option<moli_page_types::RendererAgentAttachmentId>,
+    ) -> Option<RendererCommandDescriptor> {
+        self.session_state(owner_session_id)?
+            .renderer_command_descriptor_for_renderer_if_attachment_matches(
                 renderer_call_id,
                 dispatched_attachment_id,
             )

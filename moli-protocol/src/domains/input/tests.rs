@@ -9,7 +9,7 @@ const INPUT_HIT_Y: u32 = 20;
 async fn with_loaded_document(ctx: &mut TestContext, html: &str) {
     let mut bc = BrowserContext::new("BID-I".into());
     bc.set_active_target_id("TID-1");
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.install_browser_context_fixture_for_test(bc);
     let data_url = format!("data:text/html,{html}");
     // Input commands can execute JS and therefore publish concrete renderer
     // output. Install the fixture through the same Page-owner transaction as
@@ -272,7 +272,9 @@ async fn completed_mouse_event_does_not_restore_replaced_page_state() {
         .conn
         .target_page_residence_identity_for_session(None)
         .expect("the original Page should have a residence identity");
-    let pending = loaded_page_mut(&mut ctx.conn, None)
+    let pending = ctx
+        .conn
+        .loaded_page_mut_for_protocol_access(None)
         .expect("the original Page should be loaded")
         .start_dispatch_mouse_event_at_point_with_outcome(
             INPUT_HIT_X.into(),
@@ -316,7 +318,7 @@ async fn completed_mouse_event_does_not_restore_replaced_page_state() {
         ctx.conn
             .browser_context
             .as_ref()
-            .and_then(|context| context.active_target.runtime_slot.loaded_page())
+            .and_then(|context| context.active_page_target().runtime_slot.loaded_page())
             .is_some_and(|page| page.final_url().as_str() == replacement_url),
         "settling the original input command must not install its Page state into the replacement"
     );
@@ -331,9 +333,10 @@ async fn pending_mouse_event_acknowledges_when_page_is_replaced_before_renderer_
         .conn
         .target_page_residence_identity_for_session(None)
         .expect("the original Page should have a residence identity");
+    let command_owner = CommandOwnerScope::capture(&ctx.conn, None);
     let page_residence_token = ctx
         .conn
-        .capture_target_page_residence_token_for_session(None)
+        .capture_target_page_residence_token_for_owner(&command_owner)
         .expect("the original Page should expose its attachment lifetime");
 
     let replacement_url = "data:text/html,<body>replacement-before-completion</body>";
@@ -373,9 +376,10 @@ async fn completed_renderer_ack_wins_when_page_replacement_is_already_observable
     let mut ctx = TestContext::new();
     with_loaded_document(&mut ctx, "<body>origin</body>").await;
 
+    let command_owner = CommandOwnerScope::capture(&ctx.conn, None);
     let page_residence_token = ctx
         .conn
-        .capture_target_page_residence_token_for_session(None)
+        .capture_target_page_residence_token_for_owner(&command_owner)
         .expect("the original Page should expose its attachment lifetime");
     ctx.install_navigation_fixture_for_session_owner(
         "data:text/html,<body>replacement-after-ack</body>",
@@ -418,7 +422,7 @@ async fn coordinate_mouse_event_without_document_still_reports_no_document_loade
     let mut ctx = TestContext::new();
     let mut bc = BrowserContext::new("BID-I".into());
     bc.set_active_target_id("TID-1");
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.install_browser_context_fixture_for_test(bc);
 
     ctx.process_async(json!({
         "id": 103,
@@ -606,7 +610,7 @@ async fn coordinate_input_invalid_params_keep_session_id() {
     let mut bc = BrowserContext::new("BID-I".into());
     bc.set_active_target_id("TID-1");
     bc.attach_active_session("SID-1");
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.install_browser_context_fixture_for_test(bc);
 
     for (id, method) in [
         (9001, "Input.dispatchMouseEvent"),
@@ -783,6 +787,7 @@ async fn cancel_dragging_clears_reachable_drag_state_and_succeeds_when_idle() {
         .browser_context
         .as_mut()
         .expect("browser context")
+        .active_page_target_mut()
         .input_drag_intercepted = true;
 
     ctx.process_async(json!({
@@ -796,6 +801,7 @@ async fn cancel_dragging_clears_reachable_drag_state_and_succeeds_when_idle() {
             .browser_context
             .as_ref()
             .expect("browser context")
+            .active_page_target()
             .input_drag_intercepted
     );
 
@@ -850,19 +856,19 @@ async fn ignore_input_events_is_target_aggregated_and_does_not_block_insert_text
     .await;
     let browser_context = ctx.conn.browser_context.as_mut().expect("browser context");
     browser_context.attach_active_session("SID-primary");
-    assert!(browser_context.assign_auxiliary_session_to_target("TID-1", "SID-aux".to_owned()));
+    assert!(browser_context.assign_attached_session_to_target("TID-1", "SID-attached".to_owned()));
 
     ctx.process_async(json!({
         "id": 30,
         "method": "Input.setIgnoreInputEvents",
-        "sessionId": "SID-aux",
+        "sessionId": "SID-attached",
         "params": { "ignore": true }
     }))
     .await;
-    ctx.expect_result(30, json!({}), Some("SID-aux"));
+    ctx.expect_result(30, json!({}), Some("SID-attached"));
     assert!(
         ctx.conn
-            .target_page_session_state_for_session(Some("SID-aux"))
+            .target_page_session_state_for_session(Some("SID-attached"))
             .is_some_and(|state| state.input_events_ignored)
     );
     assert!(
@@ -944,11 +950,11 @@ async fn ignore_input_events_is_target_aggregated_and_does_not_block_insert_text
     ctx.process_async(json!({
         "id": 36,
         "method": "Input.setIgnoreInputEvents",
-        "sessionId": "SID-aux",
+        "sessionId": "SID-attached",
         "params": { "ignore": false }
     }))
     .await;
-    ctx.expect_result(36, json!({}), Some("SID-aux"));
+    ctx.expect_result(36, json!({}), Some("SID-attached"));
     ctx.process_async(json!({
         "id": 37,
         "method": "Input.dispatchKeyEvent",
@@ -962,18 +968,21 @@ async fn ignore_input_events_is_target_aggregated_and_does_not_block_insert_text
     ctx.process_async(json!({
         "id": 38,
         "method": "Input.setIgnoreInputEvents",
-        "sessionId": "SID-aux",
+        "sessionId": "SID-attached",
         "params": { "ignore": true }
     }))
     .await;
-    ctx.expect_result(38, json!({}), Some("SID-aux"));
-    assert_eq!(
+    ctx.expect_result(38, json!({}), Some("SID-attached"));
+    assert!(
         ctx.conn
             .browser_context
             .as_mut()
             .expect("browser context")
-            .remove_auxiliary_session("SID-aux"),
-        Some("TID-1".to_owned())
+            .remove_page_session_binding(
+                "TID-1",
+                "SID-attached",
+                &moli_page_types::DevToolsSessionKey::Attached("SID-attached".to_owned()),
+            )
     );
     ctx.process_async(json!({
         "id": 39,
@@ -1682,6 +1691,8 @@ async fn coordinate_touch_commands_complete_through_pending_layout_dispatch() {
         .browser_context
         .as_mut()
         .expect("loaded browser context")
+        .active_page_target_mut()
+        .effective_emulation_state
         .emit_touch_events_for_mouse = true;
     for (id, event_type, buttons) in [(4107, "mousePressed", 1), (4108, "mouseReleased", 0)] {
         ctx.process_async(json!({

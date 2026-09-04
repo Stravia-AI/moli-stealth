@@ -85,7 +85,7 @@ pub(super) async fn execute_devtools_close_target_command_async(
         crate::DEFAULT_CDP_PAGE_TARGET_ID | crate::DEFAULT_CDP_TAB_TARGET_ID
     );
     let target_id = command.target_id.into_string();
-    if let Some(plan) = conn.close_default_target_placeholder(&target_id) {
+    if let Some(plan) = conn.close_default_target_placeholder(&target_id).await {
         out.extend_background_events(plan.into_background_events());
         return Ok(DevToolsCloseTargetResult { success: true });
     }
@@ -172,10 +172,10 @@ async fn close_target_inner_async(
             .as_ref()
             .and_then(|browser_context| browser_context.background_target(&target_id))
             .and_then(|target| target.session_id().map(str::to_owned));
-        let owner_scope = crate::conn::CommandOwnerScope::from_session_and_owner_route(
-            session_id.as_deref(),
-            session_id.is_none().then_some(target_route),
-        );
+        let owner_scope = session_id
+            .as_deref()
+            .map(crate::conn::CommandOwnerScope::for_session)
+            .unwrap_or_else(|| crate::conn::CommandOwnerScope::for_route(target_route));
         let renderer_output_predecessor =
             events::fail_pending_fetch_state_for_target_background_events_async(
                 conn,
@@ -266,11 +266,8 @@ async fn settle_target_close_after_pending_fetches_async(
     owner_scope: crate::conn::CommandOwnerScope,
     target_id: String,
 ) {
-    let action = crate::domains::page::PageTargetTerminationOwnerAction::new(
-        owner_scope,
-        target_id,
-        crate::domains::page::PageTargetTerminationKind::TargetClose,
-    );
+    let action =
+        crate::domains::page::PageTargetTerminationOwnerAction::new(owner_scope, target_id);
     if let Some(predecessor) = renderer_output_predecessor {
         command_context.set_renderer_output_predecessor(predecessor);
         conn.publish_page_target_termination_owner_action(action);

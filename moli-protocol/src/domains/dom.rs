@@ -2,8 +2,7 @@
 
 use serde_json::Value;
 
-use crate::conn::CdpConnection;
-use crate::conn::Cmd;
+use crate::conn::{CdpConnection, Cmd, CommandOwnerScope};
 use crate::domains::actions::DomAction;
 use crate::domains::command_output::CommandOutputPlan;
 use chromiumoxide_cdp::cdp::browser_protocol::dom::{EnableIncludeWhitespace, EnableParams};
@@ -146,7 +145,12 @@ pub(crate) fn dom_agent_enabled_for_session(
     conn: &CdpConnection,
     session_id: Option<&str>,
 ) -> bool {
-    conn.target_devtools_session_state_for_session(session_id)
+    let owner = CommandOwnerScope::capture(conn, session_id);
+    dom_agent_enabled_for_owner(conn, &owner)
+}
+
+pub(crate) fn dom_agent_enabled_for_owner(conn: &CdpConnection, owner: &CommandOwnerScope) -> bool {
+    conn.target_devtools_session_state_for_owner(owner)
         .is_some_and(|state| state.dom_session_state.enabled)
 }
 
@@ -172,56 +176,69 @@ fn disable_dom_agent_for_session(conn: &mut CdpConnection, session_id: Option<&s
     .is_some()
 }
 
-pub(crate) fn dom_agent_includes_whitespace_for_session(
+pub(crate) fn dom_agent_includes_whitespace_for_owner(
     conn: &CdpConnection,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
 ) -> bool {
-    conn.target_devtools_session_state_for_session(session_id)
+    conn.target_devtools_session_state_for_owner(owner)
         .is_some_and(|state| {
             state.dom_session_state.enabled && state.dom_session_state.include_whitespace
         })
 }
 
-fn loaded_page_mut_for_session<'a>(
+fn loaded_page_mut_for_owner<'a>(
     conn: &'a mut CdpConnection,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
 ) -> Option<&'a mut Page> {
-    conn.loaded_page_mut_for_protocol_access(session_id).ok()
+    conn.loaded_page_mut_for_protocol_access_for_owner(owner)
+        .ok()
 }
 
-fn target_owner_exists_for_session(conn: &CdpConnection, session_id: Option<&str>) -> bool {
-    conn.target_owner_identity_for_session(session_id).is_some()
+fn target_owner_exists_for_owner(conn: &CdpConnection, owner: &CommandOwnerScope) -> bool {
+    conn.target_owner_identity_for_owner(owner)
+        .and_then(|(_, target_id)| target_id)
+        .is_some()
 }
 
-fn top_frame_id_for_session(conn: &CdpConnection, session_id: Option<&str>) -> Option<String> {
-    conn.target_session_owner_frame_tree_identity(session_id)
+fn top_frame_id_for_owner(conn: &CdpConnection, owner: &CommandOwnerScope) -> Option<String> {
+    conn.target_session_owner_frame_tree_identity_for_owner(owner)
         .map(|(frame_id, _, _, _)| frame_id)
 }
 
-fn cached_dom_remote_object_node_for_session(
+fn cached_dom_remote_object_node_for_owner(
     conn: &CdpConnection,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     object_id: &str,
 ) -> Option<Value> {
-    let (browser_context_id, _) = conn.target_owner_identity_for_session(session_id)?;
-    conn.browser_context_by_id(&browser_context_id)?
+    let (browser_context_id, target_id) = conn.target_owner_identity_for_owner(owner)?;
+    let browser_context = conn.browser_context_by_id(&browser_context_id)?;
+    let target_id = target_id
+        .as_deref()
+        .or_else(|| browser_context.active_target_id())?;
+    browser_context
+        .page_target(target_id)?
         .dom_remote_object_node_cache
         .get(object_id)
         .cloned()
 }
 
-fn cache_dom_remote_object_node_for_session(
+fn cache_dom_remote_object_node_for_owner(
     conn: &mut CdpConnection,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     object_id: String,
     node: Value,
 ) {
-    let Some((browser_context_id, _)) = conn.target_owner_identity_for_session(session_id) else {
+    let Some((browser_context_id, target_id)) = conn.target_owner_identity_for_owner(owner) else {
         return;
     };
     if let Some(browser_context) = conn.browser_context_by_id_mut(&browser_context_id) {
-        browser_context
-            .dom_remote_object_node_cache
-            .insert(object_id, node);
+        let target_id = target_id.or_else(|| browser_context.active_target_id_owned());
+        let Some(target) = target_id
+            .as_deref()
+            .and_then(|target_id| browser_context.page_target_mut(target_id))
+        else {
+            return;
+        };
+        target.dom_remote_object_node_cache.insert(object_id, node);
     }
 }

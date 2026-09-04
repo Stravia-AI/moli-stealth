@@ -42,7 +42,6 @@ pub(super) async fn commit_loaded_navigation_async(
         renderer_output_predecessor,
         main_document_commit,
         progress_gate,
-        navigation_engine,
         network_error_page,
     } = navigation;
     let target_url = network_error_page
@@ -55,7 +54,7 @@ pub(super) async fn commit_loaded_navigation_async(
             out.push_error_after_messages(-32000, error);
         } else {
             tracing::warn!(
-                session_id = state.navigate_session_id.as_deref(),
+                session_id = state.owner.session_id(),
                 loader_id = state.loader_id,
                 "{error} after early Page.navigate result"
             );
@@ -63,7 +62,6 @@ pub(super) async fn commit_loaded_navigation_async(
         return;
     };
     let is_network_error_page = network_error_page.is_some();
-    let navigation_session_id = state.navigate_session_id.clone();
     let (page_creation_artifacts, mut deferred_initial_renderer_document_lifecycle_events) =
         split_renderer_page_creation_lifecycle_at_load_boundary(page_creation_artifacts);
     let mut navigation_activity = MainDocumentNavigationActivity::new(
@@ -94,8 +92,8 @@ pub(super) async fn commit_loaded_navigation_async(
         return;
     };
     if !is_network_error_page {
-        let _ = conn.commit_main_document_resource_for_session_owner(
-            navigation_session_id.as_deref(),
+        let _ = conn.commit_main_document_resource_for_owner(
+            &navigation_activity.state().owner,
             navigation_activity.state().frame_id.clone(),
             navigation_activity.state().loader_id.clone(),
             final_url.clone(),
@@ -109,16 +107,16 @@ pub(super) async fn commit_loaded_navigation_async(
         preload_channel_execution_context_ids: _,
     } = commit;
     let (renderer_document_binding, mut initial_renderer_document_lifecycle_events) = conn
-        .bind_renderer_document_lifecycle_for_session_owner(
-            navigation_activity.state().navigate_session_id.as_deref(),
+        .bind_renderer_document_lifecycle_for_owner(
+            &navigation_activity.state().owner,
             page_creation_artifacts,
             token.cloned(),
             navigation_activity.state().frame_id.clone(),
             navigation_activity.state().loader_id.clone(),
         );
     let load_visibility_barrier_armed = renderer_document_binding.is_some()
-        && conn.begin_renderer_document_load_visibility_barrier_for_session_owner(
-            navigation_activity.state().navigate_session_id.as_deref(),
+        && conn.begin_renderer_document_load_visibility_barrier_for_owner(
+            &navigation_activity.state().owner,
             &navigation_activity.state().loader_id,
         );
     if load_visibility_barrier_armed {
@@ -127,8 +125,8 @@ pub(super) async fn commit_loaded_navigation_async(
         // into the Page output FIFO, even if it is produced before protocol
         // finishes installing this binding. Never read the Page back here:
         // ordered ingress and the commit cursor preserve that handoff.
-        let (_, visible_events) = conn.ingest_renderer_document_lifecycle_events_for_session_owner(
-            navigation_activity.state().navigate_session_id.as_deref(),
+        let (_, visible_events) = conn.ingest_renderer_document_lifecycle_events_for_owner(
+            &navigation_activity.state().owner,
             std::mem::take(&mut deferred_initial_renderer_document_lifecycle_events),
         );
         initial_renderer_document_lifecycle_events.extend(visible_events);
@@ -136,13 +134,6 @@ pub(super) async fn commit_loaded_navigation_async(
     navigation_activity.defer_initial_renderer_document_lifecycle_events_until_load_boundary(
         deferred_initial_renderer_document_lifecycle_events,
     );
-    if let Some(engine) = navigation_engine {
-        conn.adopt_loaded_navigation_engine_for_session_owner(
-            navigation_session_id.as_deref(),
-            engine,
-        );
-    }
-
     // Keep the loaded commit tail boxed: the target/Patchright CDP test thread
     // has historically hit stack limits when this future is inlined.
     Box::pin(async move {
@@ -266,12 +257,11 @@ async fn restore_and_commit_loaded_navigation_page_async(
     if let Some(transaction) = committed_renderer_attachment.as_ref() {
         if token != Some(transaction.navigation())
             || transaction.current().agent_token() != page_agent_token
-            || conn.current_renderer_agent_attachment_id_for_session_owner(
-                state.navigate_session_id.as_deref(),
-            ) != Some(transaction.current().id())
+            || conn.current_renderer_agent_attachment_id_for_owner(&state.owner)
+                != Some(transaction.current().id())
         {
             tracing::warn!(
-                session_id = state.navigate_session_id.as_deref(),
+                session_id = state.owner.session_id(),
                 "prepared navigation Page does not match its committed renderer attachment"
             );
             return None;
@@ -280,16 +270,12 @@ async fn restore_and_commit_loaded_navigation_page_async(
     }
     let renderer_agent_candidate = match (token, committed_renderer_attachment.as_ref()) {
         (Some(token), None) => {
-            match conn.prepare_renderer_agent_candidate_for_session_owner(
-                state.navigate_session_id.as_deref(),
-                token,
-                &mut page,
-            ) {
+            match conn.prepare_renderer_agent_candidate_for_owner(&state.owner, token, &mut page) {
                 Ok(candidate) => Some(candidate),
                 Err(error) => {
                     tracing::debug!(
                         %error,
-                        session_id = state.navigate_session_id.as_deref(),
+                        session_id = state.owner.session_id(),
                         loader_id = token.loader_id,
                         "dropping superseded renderer navigation candidate before commit"
                     );
@@ -299,9 +285,7 @@ async fn restore_and_commit_loaded_navigation_page_async(
         }
         _ => None,
     };
-    let Some(commit_state) = conn
-        .prepare_loaded_navigation_commit_for_session_owner(state.navigate_session_id.as_deref())
-    else {
+    let Some(commit_state) = conn.prepare_loaded_navigation_commit_for_owner(&state.owner) else {
         return Some(outcome);
     };
     let permission_overrides = conn
@@ -314,7 +298,7 @@ async fn restore_and_commit_loaded_navigation_page_async(
         page.restore_runtime_protocol_state_async(
             commit_state.renderer_runtime_inspector_session_id.clone(),
             &commit_state.runtime_inspector_session_restore_snapshots,
-            &commit_state.isolated_worlds,
+            &[],
             &commit_state.stored_runtime_bindings,
             &commit_state.session_runtime_bindings,
             commit_state.runtime_frontend_enabled,
@@ -353,7 +337,7 @@ async fn restore_and_commit_loaded_navigation_page_async(
                 // lifecycle events that will never arrive.
                 tracing::warn!(
                     %error,
-                    session_id = state.navigate_session_id.as_deref(),
+                    session_id = state.owner.session_id(),
                     "navigation commit failed after early Page.navigate result: runtime protocol state restore"
                 );
             }
@@ -393,7 +377,7 @@ async fn restore_and_commit_loaded_navigation_page_async(
         } else {
             tracing::warn!(
                 %error,
-                session_id = state.navigate_session_id.as_deref(),
+                session_id = state.owner.session_id(),
                 "navigation commit failed after early Page.navigate result: fetch interception state restore"
             );
         }
@@ -427,7 +411,7 @@ async fn restore_and_commit_loaded_navigation_page_async(
         } else {
             tracing::warn!(
                 %error,
-                session_id = state.navigate_session_id.as_deref(),
+                session_id = state.owner.session_id(),
                 "navigation commit failed after early Page.navigate result: permission overrides apply"
             );
         }
@@ -448,8 +432,8 @@ async fn restore_and_commit_loaded_navigation_page_async(
     }
     let page_commit_started = timing_enabled.then(std::time::Instant::now);
     let page_commit = match conn
-        .commit_loaded_navigation_page_for_session_owner_async(
-            state.navigate_session_id.as_deref(),
+        .commit_loaded_navigation_page_for_owner_async(
+            &state.owner,
             page,
             match committed_renderer_attachment {
                 Some(transaction) => {
@@ -471,7 +455,7 @@ async fn restore_and_commit_loaded_navigation_page_async(
             } else {
                 tracing::warn!(
                     %error,
-                    session_id = state.navigate_session_id.as_deref(),
+                    session_id = state.owner.session_id(),
                     "navigation commit failed after early Page.navigate result: Inspector output collection"
                 );
             }
@@ -493,22 +477,17 @@ async fn restore_and_commit_loaded_navigation_page_async(
             .response_flush()
             .defer_until_response_flush(move || continuation.release());
     }
-    let _ = conn.commit_loaded_navigation_target_identity_for_session_owner(
-        state.navigate_session_id.as_deref(),
+    let _ = conn.commit_loaded_navigation_target_identity_for_owner(
+        &state.owner,
         main_document_commit,
         target_url,
     );
     if commit_state.runtime_frontend_enabled {
-        let _ = conn.set_renderer_runtime_agent_owns_page_console_api_events_for_session_owner(
-            state.navigate_session_id.as_deref(),
-            true,
-        );
+        let _ = conn
+            .set_renderer_runtime_agent_owns_page_console_api_events_for_owner(&state.owner, true);
     }
     if let Some(token) = token {
-        conn.commit_document_navigation_for_session_owner_if_matches(
-            state.navigate_session_id.as_deref(),
-            token,
-        );
+        conn.commit_document_navigation_for_owner_if_matches(&state.owner, token);
     }
     if let Some(started) = page_commit_started {
         tracing::info!(
@@ -523,22 +502,20 @@ async fn restore_and_commit_loaded_navigation_page_async(
                 .unwrap_or_default(),
         );
     }
-    let preload_channel_execution_context_ids = if conn
-        .target_owner_has_bidi_channel_preload_script_for_session(
-            state.navigate_session_id.as_deref(),
-        ) {
-        dedupe_preload_channel_execution_context_ids(std::mem::take(
-            &mut outcome.preload_channel_execution_context_ids,
-        ))
-    } else {
-        Vec::new()
-    };
+    let preload_channel_execution_context_ids =
+        if conn.target_owner_has_bidi_channel_preload_script_for_owner(&state.owner) {
+            dedupe_preload_channel_execution_context_ids(std::mem::take(
+                &mut outcome.preload_channel_execution_context_ids,
+            ))
+        } else {
+            Vec::new()
+        };
     let mut preload_channel_listener_events = Vec::new();
     for execution_context_id in preload_channel_execution_context_ids {
         Box::pin(
             crate::domains::runtime::start_bidi_preload_channel_listeners_for_execution_context_background_events_async(
                 conn,
-                state.navigate_session_id.as_deref(),
+                &state.owner,
                 execution_context_id,
                 &mut preload_channel_listener_events,
             ),

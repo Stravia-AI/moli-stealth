@@ -20,7 +20,10 @@ use taffy::{
     TraverseTree, WritingMode, compute_grid_layout, style_helpers,
 };
 
-use crate::{LayoutBoxId, LayoutBoxKind, LayoutWorld, style::resolve_stylo_calc_value};
+use crate::{
+    LayoutBoxId, LayoutBoxKind, LayoutWorld,
+    style::{LayoutInlineAlignment, resolve_stylo_calc_value},
+};
 
 mod collapsed_borders;
 mod columns;
@@ -685,8 +688,19 @@ fn collect_rows<N>(
                 let data = table_data(world, cell);
                 let column_span = usize::from(data.column_span.max(1));
                 let row_span = usize::from(data.row_span.max(1));
-                let mut cell_style = world.boxes[cell.index()].style.taffy.clone();
+                let authored_style = &world.boxes[cell.index()].style;
+                let mut cell_style = authored_style.taffy.clone();
                 cell_style.margin = Rect::ZERO.map(style_helpers::length);
+                if cell_style.align_content.is_none() {
+                    cell_style.align_content = match authored_style.vertical_align().kind {
+                        LayoutInlineAlignment::Middle => Some(taffy::AlignContent::CENTER),
+                        LayoutInlineAlignment::Bottom => Some(taffy::AlignContent::END),
+                        LayoutInlineAlignment::Top => Some(taffy::AlignContent::START),
+                        LayoutInlineAlignment::Baseline
+                        | LayoutInlineAlignment::TextTop
+                        | LayoutInlineAlignment::TextBottom => None,
+                    };
+                }
                 cells.push(TableCell {
                     id: cell,
                     style: cell_style,

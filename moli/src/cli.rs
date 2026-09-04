@@ -37,10 +37,12 @@ pub enum Commands {
 
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 pub struct FetchArgs {
-    /// Select the fetch output format. `screenshot` writes a viewport PNG,
-    /// `screenshot_full` writes a full-document PNG, and `pdf` writes a
-    /// paginated PDF directly to stdout; all three require layout. Dump output
-    /// is quiet by default; pass `--log-level` to opt into diagnostic logs.
+    /// Select the fetch output format. When omitted, rendered HTML documents
+    /// are serialized and raw responses such as PDFs or videos are written
+    /// verbatim. `screenshot` writes a viewport PNG, `screenshot_full` writes a
+    /// full-document PNG, and `pdf` writes a paginated PDF directly to stdout;
+    /// all three require layout. Dump output is quiet by default; pass
+    /// `--log-level` to opt into diagnostic logs.
     #[arg(short, long, value_enum)]
     pub dump: Option<DumpFormat>,
 
@@ -80,6 +82,12 @@ pub struct FetchArgs {
         conflicts_with_all = ["document_start_script", "document_start_script_file"]
     )]
     pub disable_js: bool,
+
+    /// Disable page-authored CSS before the Document starts parsing. External
+    /// stylesheets and `@import` resources are not fetched; style/link nodes
+    /// and style attributes remain in the DOM.
+    #[arg(long)]
+    pub disable_css: bool,
 
     #[arg(long)]
     pub with_base: bool,

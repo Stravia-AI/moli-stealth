@@ -1,5 +1,5 @@
 use crate::conn::{
-    BackgroundProtocolEvent, CdpConnection, Cmd, CommandDispatchContext,
+    BackgroundProtocolEvent, CdpConnection, Cmd, CommandDispatchContext, CommandOwnerScope,
     TargetPageResidenceIdentity, TargetPageResidenceObservation, TargetPageResidenceToken,
 };
 use crate::devtools_runtime::{
@@ -165,10 +165,6 @@ async fn wait_for_renderer_input_or_page_replacement<T>(
 }
 
 impl PendingInputCommandDispatch {
-    pub(crate) fn session_id(&self) -> Option<&str> {
-        self.session_id.as_deref()
-    }
-
     pub(crate) async fn wait(self) -> CompletedInputCommandDispatch {
         let completed = match self.pending {
             PendingInputOperation::Page(pending) => {
@@ -346,8 +342,8 @@ fn set_ignore_input_events_command_output_plan(
     CommandOutputPlan::success()
 }
 
-fn input_events_ignored_for_session_owner(conn: &CdpConnection, session_id: Option<&str>) -> bool {
-    conn.page_event_session_ids_for_session_owner(session_id)
+fn input_events_ignored_for_owner(conn: &CdpConnection, owner: &CommandOwnerScope) -> bool {
+    conn.page_event_session_ids_for_owner(owner)
         .into_iter()
         .any(|event_session_id| {
             conn.target_page_session_state_for_session(event_session_id.as_deref())
@@ -574,8 +570,9 @@ fn start_pending_input_command(
     cmd: &Cmd<'_>,
     action: InputAction,
 ) -> Result<Option<PendingInputCommandDispatch>, PendingInputCommandStartError> {
+    let owner = CommandOwnerScope::capture(conn, cmd.session_id);
     if action.requires_document_access()
-        && let Err(message) = conn.ensure_document_accessible_for_session_owner(cmd.session_id)
+        && let Err(message) = conn.ensure_document_accessible_for_owner(&owner)
     {
         return Err(PendingInputCommandStartError {
             code: -32000,
@@ -587,14 +584,14 @@ fn start_pending_input_command(
         InputAction::DispatchKeyEvent => {
             let parsed = key::parse_dispatch_key_event(cmd)
                 .map_err(|_| PendingInputCommandStartError::invalid_params())?;
-            if input_events_ignored_for_session_owner(conn, cmd.session_id) {
+            if input_events_ignored_for_owner(conn, &owner) {
                 return Ok(None);
             }
             let command = build_cdp_dispatch_key_event_command(conn, cmd, parsed);
-            start_devtools_input_command(
+            start_devtools_input_command_for_owner(
                 conn,
                 cmd.id,
-                cmd.session_id,
+                &owner,
                 DevToolsCommand::DispatchKeyEvent(command),
             )
         }
@@ -608,11 +605,11 @@ fn start_pending_input_command(
                     coordinate_input_unsupported_message(action),
                 ));
             }
-            if input_events_ignored_for_session_owner(conn, cmd.session_id) {
+            if input_events_ignored_for_owner(conn, &owner) {
                 return Ok(None);
             }
             let command = build_cdp_coordinate_input_command(conn, cmd, action)?;
-            start_devtools_input_command(conn, cmd.id, cmd.session_id, command)
+            start_devtools_input_command_for_owner(conn, cmd.id, &owner, command)
         }
         InputAction::InsertText => {
             let text = key::parse_insert_text(cmd)
@@ -620,7 +617,7 @@ fn start_pending_input_command(
             start_page_input_command(
                 conn,
                 cmd.id,
-                cmd.session_id,
+                &owner,
                 PendingInputCommandKind::InsertText,
                 |page| page.start_insert_text_into_active_control(&text),
             )
@@ -903,21 +900,15 @@ pub(crate) async fn execute_devtools_input_command_async_with_protocol_events(
             Ok(route) => route,
             Err(error) => return (Err(error), Vec::new()),
         };
-        let mut route_scope = conn.scoped_none_session_owner_route_override(route);
-        return execute_devtools_input_command_on_current_route_with_protocol_events(
-            route_scope.conn_mut(),
-            None,
-            command,
+        let owner = CommandOwnerScope::for_route(route);
+        return execute_devtools_input_command_for_owner_with_protocol_events(
+            conn, &owner, command,
         )
         .await;
     }
 
-    execute_devtools_input_command_on_current_route_with_protocol_events(
-        conn,
-        command_session_id.as_deref(),
-        command,
-    )
-    .await
+    let owner = CommandOwnerScope::capture(conn, command_session_id.as_deref());
+    execute_devtools_input_command_for_owner_with_protocol_events(conn, &owner, command).await
 }
 
 fn devtools_input_command_route(
@@ -948,15 +939,15 @@ fn devtools_input_command_route(
     ))
 }
 
-async fn execute_devtools_input_command_on_current_route_with_protocol_events(
+async fn execute_devtools_input_command_for_owner_with_protocol_events(
     conn: &mut CdpConnection,
-    command_session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     command: DevToolsCommand,
 ) -> (
     Result<DevToolsCommandResult, DevToolsError>,
     Vec<crate::conn::BackgroundProtocolEvent>,
 ) {
-    let pending = match start_devtools_input_command(conn, None, command_session_id, command) {
+    let pending = match start_devtools_input_command_for_owner(conn, None, owner, command) {
         Ok(Some(pending)) => pending,
         Ok(None) => return (Ok(DevToolsCommandResult::Empty), Vec::new()),
         Err(error) => {
@@ -983,13 +974,13 @@ fn devtools_error_from_input_start_error(error: PendingInputCommandStartError) -
 fn start_devtools_dispatch_key_event_command(
     conn: &mut CdpConnection,
     command_id: Option<u64>,
-    command_session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     command: DevToolsDispatchKeyEventCommand,
 ) -> Result<Option<PendingInputCommandDispatch>, PendingInputCommandStartError> {
     start_page_input_command(
         conn,
         command_id,
-        command_session_id,
+        owner,
         PendingInputCommandKind::DispatchKeyEvent,
         |page| {
             page.start_dispatch_key_event_with_outcome(
@@ -1008,28 +999,30 @@ fn start_devtools_dispatch_key_event_command(
 fn start_page_input_command(
     conn: &mut CdpConnection,
     command_id: Option<u64>,
-    command_session_id: Option<&str>,
+    command_owner: &CommandOwnerScope,
     kind: PendingInputCommandKind,
     start: impl FnOnce(&Page) -> anyhow::Result<PendingPageCommand>,
 ) -> Result<Option<PendingInputCommandDispatch>, PendingInputCommandStartError> {
-    let owner = conn
-        .target_page_residence_identity_for_session(command_session_id)
+    let page_owner = conn
+        .target_page_residence_identity_for_owner(command_owner)
         .ok_or_else(PendingInputCommandStartError::no_document_loaded)?;
     let page_residence_token = if kind.uses_renderer_host_ack_cleanup() {
         Some(
-            conn.capture_target_page_residence_token_for_session(command_session_id)
+            conn.capture_target_page_residence_token_for_owner(command_owner)
                 .ok_or_else(PendingInputCommandStartError::no_document_loaded)?,
         )
     } else {
         None
     };
-    let page = loaded_page_mut(conn, command_session_id)
+    let page = conn
+        .loaded_page_mut_for_protocol_access_for_owner(command_owner)
+        .ok()
         .ok_or_else(PendingInputCommandStartError::no_document_loaded)?;
     let pending = start(page).map_err(PendingInputCommandStartError::renderer_error)?;
     Ok(Some(PendingInputCommandDispatch {
         command_id,
-        session_id: command_session_id.map(str::to_owned),
-        owner,
+        session_id: command_owner.session_id().map(str::to_owned),
+        owner: page_owner,
         page_residence_token,
         kind,
         pending: PendingInputOperation::Page(pending),
@@ -1066,7 +1059,7 @@ fn drag_event_name(event_type: DevToolsDragEventType) -> &'static str {
 fn start_devtools_dispatch_mouse_event_command(
     conn: &mut CdpConnection,
     command_id: Option<u64>,
-    command_session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     command: DevToolsDispatchMouseEventCommand,
 ) -> Result<Option<PendingInputCommandDispatch>, PendingInputCommandStartError> {
     let event_name = mouse_event_name(command.event_type);
@@ -1086,7 +1079,7 @@ fn start_devtools_dispatch_mouse_event_command(
     start_page_input_command(
         conn,
         command_id,
-        command_session_id,
+        owner,
         PendingInputCommandKind::DispatchMouseEvent,
         |page| {
             page.start_dispatch_mouse_event_at_point_with_pointer_outcome(
@@ -1108,7 +1101,7 @@ fn start_devtools_dispatch_mouse_event_command(
 fn start_devtools_dispatch_touch_event_command(
     conn: &mut CdpConnection,
     command_id: Option<u64>,
-    command_session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     command: DevToolsDispatchTouchEventCommand,
 ) -> Result<Option<PendingInputCommandDispatch>, PendingInputCommandStartError> {
     let event_name = touch_event_name(command.event_type);
@@ -1124,7 +1117,7 @@ fn start_devtools_dispatch_touch_event_command(
     start_page_input_command(
         conn,
         command_id,
-        command_session_id,
+        owner,
         PendingInputCommandKind::DispatchTouchEvent,
         |page| page.start_dispatch_touch_event_at_points_with_outcome(points, event_name, false),
     )
@@ -1196,7 +1189,7 @@ fn renderer_drag_data(
 fn start_devtools_dispatch_drag_event_command(
     conn: &mut CdpConnection,
     command_id: Option<u64>,
-    command_session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     command: DevToolsDispatchDragEventCommand,
 ) -> Result<Option<PendingInputCommandDispatch>, PendingInputCommandStartError> {
     let event_name = drag_event_name(command.event_type);
@@ -1204,7 +1197,7 @@ fn start_devtools_dispatch_drag_event_command(
     start_page_input_command(
         conn,
         command_id,
-        command_session_id,
+        owner,
         PendingInputCommandKind::DispatchDragEvent,
         |page| {
             page.start_dispatch_drag_event_at_point_with_outcome(
@@ -1221,13 +1214,13 @@ fn start_devtools_dispatch_drag_event_command(
 fn start_devtools_synthesize_tap_gesture_command(
     conn: &mut CdpConnection,
     command_id: Option<u64>,
-    command_session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     command: DevToolsSynthesizeTapGestureCommand,
 ) -> Result<Option<PendingInputCommandDispatch>, PendingInputCommandStartError> {
     start_page_input_command(
         conn,
         command_id,
-        command_session_id,
+        owner,
         PendingInputCommandKind::SynthesizeTapGesture,
         |page| {
             page.start_dispatch_touch_event_at_point_with_outcome(
@@ -1237,10 +1230,10 @@ fn start_devtools_synthesize_tap_gesture_command(
     )
 }
 
-fn start_devtools_input_command(
+fn start_devtools_input_command_for_owner(
     conn: &mut CdpConnection,
     command_id: Option<u64>,
-    command_session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     command: DevToolsCommand,
 ) -> Result<Option<PendingInputCommandDispatch>, PendingInputCommandStartError> {
     let coordinate_unsupported = match &command {
@@ -1256,43 +1249,25 @@ fn start_devtools_input_command(
         if conn.layout_policy() == moli_core::LayoutPolicy::Mock {
             return Err(PendingInputCommandStartError::unsupported(message));
         }
-        if input_events_ignored_for_session_owner(conn, command_session_id) {
+        if input_events_ignored_for_owner(conn, owner) {
             return Ok(None);
         }
     }
     match command {
         DevToolsCommand::DispatchMouseEvent(command) => {
-            start_devtools_dispatch_mouse_event_command(
-                conn,
-                command_id,
-                command_session_id,
-                command,
-            )
+            start_devtools_dispatch_mouse_event_command(conn, command_id, owner, command)
         }
         DevToolsCommand::DispatchTouchEvent(command) => {
-            start_devtools_dispatch_touch_event_command(
-                conn,
-                command_id,
-                command_session_id,
-                command,
-            )
+            start_devtools_dispatch_touch_event_command(conn, command_id, owner, command)
         }
-        DevToolsCommand::DispatchDragEvent(command) => start_devtools_dispatch_drag_event_command(
-            conn,
-            command_id,
-            command_session_id,
-            command,
-        ),
+        DevToolsCommand::DispatchDragEvent(command) => {
+            start_devtools_dispatch_drag_event_command(conn, command_id, owner, command)
+        }
         DevToolsCommand::SynthesizeTapGesture(command) => {
-            start_devtools_synthesize_tap_gesture_command(
-                conn,
-                command_id,
-                command_session_id,
-                command,
-            )
+            start_devtools_synthesize_tap_gesture_command(conn, command_id, owner, command)
         }
         DevToolsCommand::DispatchKeyEvent(command) => {
-            start_devtools_dispatch_key_event_command(conn, command_id, command_session_id, command)
+            start_devtools_dispatch_key_event_command(conn, command_id, owner, command)
         }
         _ => Err(PendingInputCommandStartError {
             code: -32000,
@@ -1508,26 +1483,6 @@ fn completed_page_command_result(
     }
 }
 
-pub(super) fn loaded_page_mut<'a>(
-    conn: &'a mut CdpConnection,
-    session_id: Option<&str>,
-) -> Option<&'a mut Page> {
-    conn.loaded_page_mut_for_protocol_access(session_id).ok()
-}
-
-pub(super) fn browser_context_mut_for_session_owner<'a>(
-    conn: &'a mut CdpConnection,
-    session_id: Option<&str>,
-) -> Option<&'a mut crate::conn::BrowserContext> {
-    let browser_context_id = conn
-        .session_route(session_id)
-        .and_then(|route| route.browser_context_id().map(str::to_owned));
-    if let Some(browser_context_id) = browser_context_id {
-        return conn.browser_context_by_id_mut(&browser_context_id);
-    }
-    conn.browser_context.as_mut()
-}
-
 #[derive(Debug, Default, Eq, PartialEq)]
 pub(crate) struct InputPreparedOutputs {
     download_activations: Vec<RendererPendingDownloadActivation>,
@@ -1551,14 +1506,14 @@ impl InputPreparedOutputs {
 
     pub(crate) fn from_renderer_file_chooser_activation(
         conn: &CdpConnection,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         activation: RendererPendingFileChooserActivation,
     ) -> Self {
-        let Some(page_owner) = conn.target_page_residence_identity_for_session(session_id) else {
+        let Some(page_owner) = conn.target_page_residence_identity_for_owner(owner) else {
             return Self::default();
         };
         let Some(activation) = file_chooser::PreparedFileChooserActivation::capture(
-            conn, session_id, page_owner, activation,
+            conn, owner, page_owner, activation,
         ) else {
             return Self::default();
         };
@@ -1655,11 +1610,14 @@ async fn handle_input_dispatch_outcome_async(
     outcome: RendererInputDispatchOutcome,
     command_context: &mut CommandDispatchContext,
 ) -> Result<(), String> {
+    let action_owner = session_id
+        .map(CommandOwnerScope::for_session)
+        .unwrap_or_else(|| CommandOwnerScope::for_page_residence(owner));
     if let Some(download) = outcome.pending_download {
         let mut events = Vec::new();
         conn.handle_pending_download_activation_background_events_async(
             &mut events,
-            session_id,
+            &action_owner,
             download,
             command_context,
         )
@@ -1669,7 +1627,7 @@ async fn handle_input_dispatch_outcome_async(
     if let Some(file_chooser) = outcome.pending_file_chooser
         && let Some(file_chooser) = file_chooser::PreparedFileChooserActivation::capture(
             conn,
-            session_id,
+            &action_owner,
             owner.clone(),
             file_chooser,
         )
@@ -1677,7 +1635,7 @@ async fn handle_input_dispatch_outcome_async(
         file_chooser::emit_prepared_activation_async(
             conn,
             out.events_mut(),
-            session_id,
+            &action_owner,
             file_chooser,
         )
         .await;
@@ -1692,7 +1650,7 @@ async fn handle_input_dispatch_outcome_async(
 pub(in crate::domains) async fn emit_download_activity_background_events_async(
     conn: &mut CdpConnection,
     out: &mut Vec<BackgroundProtocolEvent>,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     prepared_outputs: Option<&mut ProtocolOutputPayloads>,
     command_context: &mut CommandDispatchContext,
 ) {
@@ -1700,14 +1658,14 @@ pub(in crate::domains) async fn emit_download_activity_background_events_async(
         .and_then(ProtocolOutputPayloads::input_mut)
         .and_then(InputPreparedOutputSlot::take_download_activations)
     {
-        emit_download_activations(conn, out, session_id, activations, command_context).await;
+        emit_download_activations(conn, out, owner, activations, command_context).await;
     }
 }
 
 async fn emit_download_activations(
     conn: &mut CdpConnection,
     out: &mut Vec<BackgroundProtocolEvent>,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     activations: Vec<RendererPendingDownloadActivation>,
     command_context: &mut CommandDispatchContext,
 ) {
@@ -1715,7 +1673,7 @@ async fn emit_download_activations(
         if let Err(error) = conn
             .handle_pending_download_activation_background_events_async(
                 out,
-                session_id,
+                owner,
                 activation,
                 command_context,
             )
@@ -1732,14 +1690,14 @@ async fn emit_download_activations(
 pub(in crate::domains) async fn emit_file_chooser_activity_background_events_async(
     conn: &mut CdpConnection,
     out: &mut Vec<BackgroundProtocolEvent>,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     prepared_outputs: Option<&mut ProtocolOutputPayloads>,
 ) {
     if let Some(activations) = prepared_outputs
         .and_then(ProtocolOutputPayloads::input_mut)
         .and_then(InputPreparedOutputSlot::take_file_chooser_activations)
     {
-        file_chooser::emit_prepared_activations_async(conn, out, session_id, activations).await;
+        file_chooser::emit_prepared_activations_async(conn, out, owner, activations).await;
     }
 }
 
@@ -1754,7 +1712,7 @@ mod protocol_neutral_tests {
     };
     use serde_json::Value;
 
-    use crate::conn::{CdpConnection, Cmd};
+    use crate::conn::{CdpConnection, Cmd, CommandOwnerScope};
     use crate::testing::real_layout_test_connection;
 
     fn assert_coordinate_routes_to_document_owner(
@@ -1769,6 +1727,17 @@ mod protocol_neutral_tests {
         assert_eq!(error.code, -32000);
         assert_eq!(error.kind, DevToolsErrorKind::Internal);
         assert_eq!(error.message, "NoDocumentLoaded");
+    }
+
+    fn start_input_command(
+        conn: &mut CdpConnection,
+        command_id: Option<u64>,
+        session_id: Option<&str>,
+        command: DevToolsCommand,
+    ) -> Result<Option<super::PendingInputCommandDispatch>, super::PendingInputCommandStartError>
+    {
+        let owner = CommandOwnerScope::capture(conn, session_id);
+        super::start_devtools_input_command_for_owner(conn, command_id, &owner, command)
     }
 
     fn cdp_context(session_id: &str) -> DevToolsCommandContext {
@@ -1834,7 +1803,7 @@ mod protocol_neutral_tests {
     #[test]
     fn devtools_input_entry_routes_coordinate_mouse_command_to_document_owner() {
         let mut conn = real_layout_test_connection();
-        let result = super::start_devtools_input_command(
+        let result = start_input_command(
             &mut conn,
             Some(42),
             Some("SID-mouse"),
@@ -1905,7 +1874,7 @@ mod protocol_neutral_tests {
         };
         let command = super::build_cdp_dispatch_key_event_command(&conn, &cmd, parsed);
 
-        let result = super::start_devtools_input_command(
+        let result = start_input_command(
             &mut conn,
             cmd.id,
             cmd.session_id,
@@ -1922,7 +1891,7 @@ mod protocol_neutral_tests {
     #[test]
     fn devtools_input_entry_routes_coordinate_touch_command_to_document_owner() {
         let mut conn = real_layout_test_connection();
-        let result = super::start_devtools_input_command(
+        let result = start_input_command(
             &mut conn,
             Some(46),
             Some("SID-touch"),
@@ -1935,7 +1904,7 @@ mod protocol_neutral_tests {
     #[test]
     fn devtools_input_entry_routes_coordinate_drag_command_to_document_owner() {
         let mut conn = real_layout_test_connection();
-        let result = super::start_devtools_input_command(
+        let result = start_input_command(
             &mut conn,
             Some(48),
             Some("SID-drag"),
@@ -1948,7 +1917,7 @@ mod protocol_neutral_tests {
     #[test]
     fn devtools_input_entry_routes_zero_mask_coordinate_drag_drop_to_document_owner() {
         let mut conn = real_layout_test_connection();
-        let result = super::start_devtools_input_command(
+        let result = start_input_command(
             &mut conn,
             Some(49),
             Some("SID-drag"),
@@ -1961,7 +1930,7 @@ mod protocol_neutral_tests {
     #[test]
     fn devtools_input_entry_routes_coordinate_tap_command_to_document_owner() {
         let mut conn = real_layout_test_connection();
-        let result = super::start_devtools_input_command(
+        let result = start_input_command(
             &mut conn,
             Some(51),
             Some("SID-tap"),
@@ -1988,7 +1957,7 @@ mod producer_tests {
 
     use crate::conn::{
         BackgroundProtocolEvent, BrowserContext, CdpConnection, CommandDispatchContext,
-        TargetPageResidenceIdentity, build_event,
+        CommandOwnerScope, TargetPageResidenceIdentity, build_event,
     };
     use crate::devtools_runtime::{
         AutomationEvent, BrowserDownloadProgressEvent, BrowserDownloadWillBeginEvent,
@@ -2032,8 +2001,8 @@ mod producer_tests {
             load: None,
             terminated: None,
         };
-        let (binding, initial_events) = conn.bind_renderer_document_lifecycle_for_session_owner(
-            Some(session_id),
+        let (binding, initial_events) = conn.bind_renderer_document_lifecycle_for_owner(
+            &crate::conn::CommandOwnerScope::for_session(session_id),
             RendererPageCreationArtifacts {
                 active_document: identity.document,
                 active_epoch: identity.epoch,
@@ -2198,10 +2167,11 @@ mod producer_tests {
         let mut conn = CdpConnection::default();
         let mut bc = BrowserContext::new_with_page_for_test("BID-typed", "TID-typed");
         bc.attach_active_session("SID-typed");
-        bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+        bc.active_page_target_mut().devtools_sessions
+            [moli_page_types::DevToolsSessionKey::Primary]
             .page_session_state
             .page_file_chooser_opened_event_enabled = true;
-        conn.browser_context = Some(bc);
+        conn.install_browser_context_fixture_for_test(bc);
         let source_document = renderer_document_identity_for_test(1, 1);
         bind_renderer_document_for_test(&mut conn, "SID-typed", "ROOT-typed", source_document);
         let owner = page_residence_identity_for_test(&conn, "SID-typed");
@@ -2209,7 +2179,7 @@ mod producer_tests {
 
         let prepared = super::file_chooser::PreparedFileChooserActivation::capture(
             &conn,
-            Some("SID-typed"),
+            &CommandOwnerScope::for_session("SID-typed"),
             owner,
             renderer_file_chooser_for_test(source_document, Some("FRAME-typed"), 77, false),
         )
@@ -2217,7 +2187,7 @@ mod producer_tests {
         super::file_chooser::emit_prepared_activation_async(
             &mut conn,
             &mut out,
-            Some("SID-typed"),
+            &CommandOwnerScope::for_session("SID-typed"),
             prepared,
         )
         .await;
@@ -2253,7 +2223,7 @@ mod producer_tests {
         let mut bc = BrowserContext::new("BID-root-capture".into());
         bc.set_active_target_id("TID-root-capture");
         bc.attach_active_session("SID-root-capture");
-        conn.browser_context = Some(bc);
+        conn.install_browser_context_fixture_for_test(bc);
         let source_document = renderer_document_identity_for_test(1, 1);
         bind_renderer_document_for_test(
             &mut conn,
@@ -2265,7 +2235,7 @@ mod producer_tests {
 
         let prepared = super::file_chooser::PreparedFileChooserActivation::capture(
             &conn,
-            Some("SID-root-capture"),
+            &CommandOwnerScope::for_session("SID-root-capture"),
             owner,
             renderer_file_chooser_for_test(source_document, None, 41, false),
         )
@@ -2281,10 +2251,11 @@ mod producer_tests {
         let mut bc = BrowserContext::new("BID-document-collision".into());
         bc.set_active_target_id("TID-document-collision");
         bc.attach_active_session("SID-document-collision");
-        bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+        bc.active_page_target_mut().devtools_sessions
+            [moli_page_types::DevToolsSessionKey::Primary]
             .page_session_state
             .page_file_chooser_opened_event_enabled = true;
-        conn.browser_context = Some(bc);
+        conn.install_browser_context_fixture_for_test(bc);
         let source_document = renderer_document_identity_for_test(1, 1);
         bind_renderer_document_for_test(
             &mut conn,
@@ -2295,7 +2266,7 @@ mod producer_tests {
         let owner = page_residence_identity_for_test(&conn, "SID-document-collision");
         let prepared = super::file_chooser::PreparedFileChooserActivation::capture(
             &conn,
-            Some("SID-document-collision"),
+            &CommandOwnerScope::for_session("SID-document-collision"),
             owner,
             renderer_file_chooser_for_test(source_document, None, 42, false),
         )
@@ -2313,7 +2284,7 @@ mod producer_tests {
         super::file_chooser::emit_prepared_activation_async(
             &mut conn,
             &mut out,
-            Some("SID-document-collision"),
+            &CommandOwnerScope::for_session("SID-document-collision"),
             prepared,
         )
         .await;
@@ -2351,10 +2322,11 @@ mod producer_tests {
         let mut bc = BrowserContext::new("BID-page-replacement".into());
         bc.set_active_target_id("TID-page-replacement");
         bc.attach_active_session("SID-page-replacement");
-        bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+        bc.active_page_target_mut().devtools_sessions
+            [moli_page_types::DevToolsSessionKey::Primary]
             .page_session_state
             .page_file_chooser_opened_event_enabled = true;
-        conn.browser_context = Some(bc);
+        conn.install_browser_context_fixture_for_test(bc);
         let source_document = renderer_document_identity_for_test(1, 1);
         bind_renderer_document_for_test(
             &mut conn,
@@ -2365,7 +2337,7 @@ mod producer_tests {
         let owner = page_residence_identity_for_test(&conn, "SID-page-replacement");
         let stale = super::file_chooser::PreparedFileChooserActivation::capture(
             &conn,
-            Some("SID-page-replacement"),
+            &CommandOwnerScope::for_session("SID-page-replacement"),
             owner.clone(),
             renderer_file_chooser_for_test(source_document, None, 43, false),
         )
@@ -2383,7 +2355,7 @@ mod producer_tests {
         let replacement_owner = page_residence_identity_for_test(&conn, "SID-page-replacement");
         let current = super::file_chooser::PreparedFileChooserActivation::capture(
             &conn,
-            Some("SID-page-replacement"),
+            &CommandOwnerScope::for_session("SID-page-replacement"),
             replacement_owner,
             renderer_file_chooser_for_test(replacement_document, None, 43, true),
         )
@@ -2393,7 +2365,7 @@ mod producer_tests {
         super::file_chooser::emit_prepared_activations_async(
             &mut conn,
             &mut out,
-            Some("SID-page-replacement"),
+            &CommandOwnerScope::for_session("SID-page-replacement"),
             vec![stale, current],
         )
         .await;
@@ -2417,7 +2389,7 @@ mod producer_tests {
         let mut bc = BrowserContext::new("BID-download".into());
         bc.set_active_target_id("FRAME-download");
         bc.attach_active_session("SID-download");
-        conn.browser_context = Some(bc);
+        conn.install_browser_context_fixture_for_test(bc);
         conn.download_behavior
             .set_global("deny".to_owned(), None, true);
         let mut out: Vec<BackgroundProtocolEvent> = Vec::new();
@@ -2436,7 +2408,7 @@ mod producer_tests {
         super::emit_download_activity_background_events_async(
             &mut conn,
             &mut out,
-            Some("SID-download"),
+            &CommandOwnerScope::for_session("SID-download"),
             Some(&mut prepared),
             &mut command_context,
         )
@@ -2465,10 +2437,11 @@ mod producer_tests {
         let mut conn = CdpConnection::default();
         let mut bc = BrowserContext::new_with_page_for_test("BID-1", "TID-1");
         bc.attach_active_session("SID-1");
-        bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+        bc.active_page_target_mut().devtools_sessions
+            [moli_page_types::DevToolsSessionKey::Primary]
             .page_session_state
             .page_file_chooser_opened_event_enabled = true;
-        conn.browser_context = Some(bc);
+        conn.install_browser_context_fixture_for_test(bc);
         let source_document = renderer_document_identity_for_test(1, 1);
         bind_renderer_document_for_test(&mut conn, "SID-1", "ROOT-1", source_document);
         let owner = page_residence_identity_for_test(&conn, "SID-1");
@@ -2490,7 +2463,7 @@ mod producer_tests {
         super::emit_file_chooser_activity_background_events_async(
             &mut conn,
             &mut out,
-            Some("SID-1"),
+            &CommandOwnerScope::for_session("SID-1"),
             Some(&mut prepared),
         )
         .await;
@@ -2512,10 +2485,11 @@ mod producer_tests {
         let mut conn = CdpConnection::default();
         let mut bc = BrowserContext::new_with_page_for_test("BID-context", "TID-context");
         bc.attach_active_session("SID-context");
-        bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+        bc.active_page_target_mut().devtools_sessions
+            [moli_page_types::DevToolsSessionKey::Primary]
             .page_session_state
             .page_file_chooser_opened_event_enabled = true;
-        conn.browser_context = Some(bc);
+        conn.install_browser_context_fixture_for_test(bc);
         let source_document = renderer_document_identity_for_test(1, 1);
         bind_renderer_document_for_test(&mut conn, "SID-context", "ROOT-context", source_document);
         let owner = page_residence_identity_for_test(&conn, "SID-context");
@@ -2537,7 +2511,7 @@ mod producer_tests {
         super::emit_file_chooser_activity_background_events_async(
             &mut conn,
             &mut out,
-            Some("SID-context"),
+            &CommandOwnerScope::for_session("SID-context"),
             Some(&mut prepared),
         )
         .await;

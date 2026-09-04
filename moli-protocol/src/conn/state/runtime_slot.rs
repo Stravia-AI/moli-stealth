@@ -70,16 +70,6 @@ pub(crate) struct TargetNetworkRequestIdAllocator<'a> {
 }
 
 impl TargetNetworkRequestIdAllocator<'_> {
-    pub(crate) fn reset_fetch_navigation_request_counter(&mut self) {
-        self.runtime_slot.request_counters.next_fetch_request_id = 0;
-    }
-
-    pub(crate) fn reset_subresource_fetch_request_counter(&mut self) {
-        self.runtime_slot
-            .request_counters
-            .next_subresource_fetch_request_id = 0;
-    }
-
     pub(crate) fn allocate_fetch_navigation_request_id(&mut self) -> String {
         self.runtime_slot.request_counters.next_fetch_request_id += 1;
         format!(
@@ -923,6 +913,7 @@ impl TargetRuntimeSlot {
         self.network_agent.set_primary_events_enabled(enabled);
     }
 
+    #[cfg(test)]
     pub(crate) fn enable_primary_network_events(&mut self) {
         self.network_agent.enable_primary_events();
     }
@@ -935,21 +926,21 @@ impl TargetRuntimeSlot {
         self.network_agent.has_event_listeners()
     }
 
-    pub(crate) fn enable_auxiliary_network_events(&mut self, session_id: &str) {
-        self.network_agent.enable_auxiliary_events(session_id);
+    pub(crate) fn enable_attached_network_events(&mut self, session_id: &str) {
+        self.network_agent.enable_attached_events(session_id);
     }
 
-    pub(crate) fn disable_auxiliary_network_events(&mut self, session_id: &str) -> bool {
-        self.network_agent.disable_auxiliary_events(session_id)
+    pub(crate) fn disable_attached_network_events(&mut self, session_id: &str) -> bool {
+        self.network_agent.disable_attached_events(session_id)
     }
 
-    pub(crate) fn remove_auxiliary_network_session(&mut self, session_id: &str) {
-        self.network_agent.remove_auxiliary_session(session_id);
+    pub(crate) fn remove_attached_network_session(&mut self, session_id: &str) {
+        self.network_agent.remove_attached_session(session_id);
     }
 
-    pub(crate) fn auxiliary_network_events_enabled_for_session(&self, session_id: &str) -> bool {
+    pub(crate) fn attached_network_events_enabled_for_session(&self, session_id: &str) -> bool {
         self.network_agent
-            .auxiliary_events_enabled_for_session(session_id)
+            .attached_events_enabled_for_session(session_id)
     }
 
     pub(crate) fn network_event_session_ids(
@@ -1237,19 +1228,14 @@ impl TargetRuntimeSlot {
             .synthetic_websocket_socket_id_for_request(request_id)
     }
 
-    pub(crate) fn clear_session_scoped_network_observation_artifacts(&mut self) {
-        self.network_agent
-            .clear_session_scoped_observation_artifacts();
-    }
-
     pub(crate) fn reset_all_target_scoped_network_artifacts(&mut self) {
         self.network_agent.reset_all_target_scoped_artifacts();
     }
 
     #[cfg(test)]
-    pub(crate) fn has_auxiliary_network_events_for_session(&self, session_id: &str) -> bool {
+    pub(crate) fn has_attached_network_events_for_session(&self, session_id: &str) -> bool {
         self.network_agent
-            .has_auxiliary_events_for_session(session_id)
+            .has_attached_events_for_session(session_id)
     }
 
     #[cfg(test)]

@@ -32,10 +32,9 @@ use super::{
     javascript_dialog::TargetPreparedJavaScriptDialog,
     page_slot::{DocumentNavigationToken, DocumentStartScript},
     page_target_host::{PageTargetHost, PageTargetRegistry},
-    parking::TargetOwnerState,
     service_worker_target::ServiceWorkerTargetState,
-    session::TargetPageState,
     shared_worker_target::SharedWorkerTargetState,
+    target_state::TargetOwnerState,
 };
 
 pub struct BrowserContext {
@@ -45,7 +44,6 @@ pub struct BrowserContext {
     /// Policy retained while the context has no page target yet. The first
     /// target inherits it; once targets exist, each target owns its surface.
     pub(crate) default_document_cookie_manager_surface: BrowserContextCookieManagerSurface,
-    pub auxiliary_target_sessions: HashMap<String, String>,
     // Chromium exposes the live creator target, immutable creator frame, and
     // window.opener access as three independent TargetInfo properties.
     pub target_opener_ids: HashMap<String, String>,
@@ -358,37 +356,21 @@ impl std::fmt::Debug for BrowserContext {
     }
 }
 
-impl std::ops::Deref for BrowserContext {
-    type Target = TargetPageState;
-
-    fn deref(&self) -> &Self::Target {
-        self.active_page_state()
-    }
-}
-
-impl std::ops::DerefMut for BrowserContext {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.active_page_state_mut()
-    }
-}
-
 fn usize_to_u64_saturating(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
 
 impl BrowserContext {
-    pub(crate) fn active_page_state(&self) -> &TargetPageState {
+    pub(crate) fn active_page_target(&self) -> &PageTargetHost {
         self.page_targets
             .active()
             .expect("BrowserContext has no active page target")
-            .state()
     }
 
-    pub(crate) fn active_page_state_mut(&mut self) -> &mut TargetPageState {
+    pub(crate) fn active_page_target_mut(&mut self) -> &mut PageTargetHost {
         self.page_targets
             .active_mut()
             .expect("BrowserContext has no active page target")
-            .state_mut()
     }
 
     /// Parks a dialog only until the matching lightweight-popup target obtains
@@ -521,7 +503,6 @@ impl BrowserContext {
             storage_partition,
             page_targets: PageTargetRegistry::default(),
             default_document_cookie_manager_surface: BrowserContextCookieManagerSurface::default(),
-            auxiliary_target_sessions: HashMap::new(),
             target_opener_ids: HashMap::new(),
             target_opener_frame_ids: HashMap::new(),
             target_can_access_opener: HashSet::new(),
@@ -596,8 +577,7 @@ impl BrowserContext {
             if let Some(sender) = sender.clone() {
                 engine.set_renderer_output_transport_sender(sender);
             }
-            let replaced = host.replace_navigation_engine(engine);
-            debug_assert!(replaced.is_none());
+            host.install_navigation_engine(engine);
         }
     }
 
@@ -663,10 +643,7 @@ impl BrowserContext {
         &self,
         target_id: &str,
     ) -> Option<BrowserContextPageStorageHandles> {
-        if self.is_active_target(target_id) {
-            return Some(self.page_storage_handles());
-        }
-        let target = self.background_target(target_id)?;
+        let target = self.page_target(target_id)?;
         Some(
             self.storage_partition
                 .handles
@@ -848,7 +825,7 @@ impl BrowserContext {
         let runtime_session_diagnostics = active_target
             .map(|target| {
                 let primary = target.devtools_sessions.primary();
-                let auxiliary_pending_inspector_await_count: usize = target
+                let attached_pending_inspector_await_count: usize = target
                     .devtools_sessions
                     .attached_states()
                     .map(DevToolsSessionState::pending_inspector_await_count)
@@ -859,10 +836,10 @@ impl BrowserContext {
                     "inspectorTargetCrashedDelivered": primary.runtime_session_state.inspector_target_crashed_delivered(),
                     "profilerCommandStateSource": "renderer-v8-inspector-agent",
                     "v8InspectorStateBytes": primary.inspector_session_state.v8_state.as_ref().map_or(0, |state| state.len()),
-                    "auxiliaryDevToolsSessionStateCount": target.devtools_sessions.attached_len(),
+                    "attachedDevToolsSessionStateCount": target.devtools_sessions.attached_len(),
                     "pendingInspectorAwaitCount": target.devtools_sessions.pending_inspector_await_count(),
                     "primaryPendingInspectorAwaitCount": primary.pending_inspector_await_count(),
-                    "auxiliaryPendingInspectorAwaitCount": auxiliary_pending_inspector_await_count,
+                    "attachedPendingInspectorAwaitCount": attached_pending_inspector_await_count,
                 })
             })
             .unwrap_or(Value::Null);
@@ -887,20 +864,20 @@ impl BrowserContext {
             })
             .unwrap_or(Value::Null);
         let target_host_state_diagnostics = json!({
-            "targetHostCount": self.background_target_count(),
-            "pageSessionStateCount": self.background_targets()
-                .filter(|target| target.state().has_non_default_session_state())
+            "targetHostCount": self.page_targets.len(),
+            "pageSessionStateCount": self.page_targets.iter()
+                .filter(|target| target.has_non_default_session_state())
                 .count(),
-            "targetOwnerStateWithPendingInspectorAwaitCount": self.background_targets()
+            "targetOwnerStateWithPendingInspectorAwaitCount": self.page_targets.iter()
                 .filter(|target| target.has_pending_inspector_awaits())
                 .count(),
-            "pendingInspectorAwaitCount": self.background_targets()
+            "pendingInspectorAwaitCount": self.page_targets.iter()
                 .map(|target| target.pending_inspector_await_count())
                 .sum::<usize>(),
-            "nonEmptyFetchStateCount": self.background_targets()
+            "nonEmptyFetchStateCount": self.page_targets.iter()
                 .filter(|target| !target.fetch_owner.pending_state().is_empty())
                 .count(),
-            "ownerStates": self.background_targets().map(|target| json!({
+            "ownerStates": self.page_targets.iter().map(|target| json!({
                 "targetId": target.target_id(),
                 "ownerState": target.owner_state.moli_memory_diagnostics(),
             })).collect::<Vec<_>>(),
@@ -929,7 +906,11 @@ impl BrowserContext {
                 .iter()
                 .filter(|info| info.attached)
                 .count(),
-            "auxiliaryTargetSessionCount": self.auxiliary_target_sessions.len(),
+            "attachedTargetSessionCount": self
+                .page_targets
+                .iter()
+                .map(|target| target.devtools_sessions.attached_len())
+                .sum::<usize>(),
             "targetOpenerCount": self.target_opener_ids.len(),
             "targetOpenerFrameCount": self.target_opener_frame_ids.len(),
             "targetCanAccessOpenerCount": self.target_can_access_opener.len(),
@@ -974,22 +955,15 @@ impl BrowserContext {
     }
 
     pub(crate) fn loaded_document_page_count(&self) -> usize {
-        usize::from(self.has_loaded_page())
-            + self
-                .background_targets()
-                .filter(|target| target.has_loaded_page())
-                .count()
+        self.page_targets
+            .iter()
+            .filter(|target| target.has_loaded_page())
+            .count()
     }
 
     pub(crate) fn pending_document_page_build_count(&self) -> usize {
-        usize::from(
-            self.has_active_target()
-                && self
-                    .active_target
-                    .runtime_slot
-                    .has_pending_initial_document_page_build(),
-        ) + self
-            .background_targets()
+        self.page_targets
+            .iter()
             .filter(|target| {
                 target
                     .runtime_slot()
@@ -999,13 +973,7 @@ impl BrowserContext {
     }
 
     pub(crate) fn target_has_pending_initial_document_page_build(&self, target_id: &str) -> bool {
-        if self.active_target_id() == Some(target_id) {
-            return self
-                .active_target
-                .runtime_slot
-                .has_pending_initial_document_page_build();
-        }
-        self.background_target(target_id).is_some_and(|target| {
+        self.page_target(target_id).is_some_and(|target| {
             target
                 .runtime_slot()
                 .has_pending_initial_document_page_build()
@@ -1016,13 +984,7 @@ impl BrowserContext {
         &self,
         target_id: &str,
     ) -> Option<&'static str> {
-        if self.active_target_id() == Some(target_id) {
-            return self
-                .active_target
-                .runtime_slot
-                .transient_no_page_reason_for_protocol_output();
-        }
-        self.background_target(target_id).and_then(|target| {
+        self.page_target(target_id).and_then(|target| {
             target
                 .runtime_slot()
                 .transient_no_page_reason_for_protocol_output()
@@ -1033,46 +995,25 @@ impl BrowserContext {
         &self,
         target_id: &str,
     ) -> Result<(), String> {
-        if self.active_target_id() == Some(target_id) {
-            return materialized_initial_empty_document_missing_page_error(
-                target_id,
-                &self.active_target.owner_state,
-                self.has_loaded_page(),
-            )
-            .map_or(Ok(()), Err);
-        }
-
-        let Some(target) = self.background_target(target_id) else {
-            return Ok(());
-        };
-        let Some(owner_state) = self.parked_target_owner_state(target_id) else {
+        let Some(target) = self.page_target(target_id) else {
             return Ok(());
         };
         materialized_initial_empty_document_missing_page_error(
             target_id,
-            owner_state,
+            &target.owner_state,
             target.has_loaded_page(),
         )
         .map_or(Ok(()), Err)
     }
 
     pub(crate) fn can_install_current_initial_empty_document_page(&self, target_id: &str) -> bool {
-        if self.active_target_id() == Some(target_id) {
-            return !self.has_loaded_page()
-                && self
-                    .active_target
-                    .owner_state
-                    .can_install_current_initial_empty_document_page();
-        }
-
-        let Some(target) = self.background_target(target_id) else {
+        let Some(target) = self.page_target(target_id) else {
             return false;
         };
-        if target.has_loaded_page() {
-            return false;
-        }
-        self.parked_target_owner_state(target_id)
-            .is_none_or(TargetOwnerState::can_install_current_initial_empty_document_page)
+        !target.has_loaded_page()
+            && target
+                .owner_state
+                .can_install_current_initial_empty_document_page()
     }
 
     /// Reports whether one exact Page target is still on its materialized
@@ -1200,12 +1141,7 @@ impl BrowserContext {
         loader_id: String,
     ) -> Option<DocumentNavigationToken> {
         let target_id = self.active_target_id()?.to_owned();
-        let token = self
-            .active_target
-            .runtime_slot
-            .start_document_navigation(target_id.clone(), loader_id);
-        self.mark_target_initial_empty_document_pending_cross_document_navigation(&target_id);
-        Some(token)
+        self.start_document_navigation_for_target(&target_id, loader_id)
     }
 
     pub(crate) fn start_document_navigation_for_target(
@@ -1213,16 +1149,7 @@ impl BrowserContext {
         target_id: &str,
         loader_id: String,
     ) -> Option<DocumentNavigationToken> {
-        if self.active_target_id() == Some(target_id) {
-            let target_id = target_id.to_owned();
-            let token = self
-                .active_target
-                .runtime_slot
-                .start_document_navigation(target_id.clone(), loader_id);
-            self.mark_target_initial_empty_document_pending_cross_document_navigation(&target_id);
-            return Some(token);
-        }
-        let target = self.background_target_mut(target_id)?;
+        let target = self.page_target_mut(target_id)?;
         let token = target
             .runtime_slot
             .start_document_navigation(target_id.to_owned(), loader_id);
@@ -1234,31 +1161,18 @@ impl BrowserContext {
         &self,
         token: &DocumentNavigationToken,
     ) -> bool {
-        if self.active_target_id() == Some(token.target_id.as_str()) {
-            return self
-                .active_target
-                .runtime_slot
-                .accepts_pending_document_navigation_event(token);
-        }
-        self.background_target(&token.target_id)
-            .is_some_and(|target| {
-                target
-                    .runtime_slot()
-                    .accepts_pending_document_navigation_event(token)
-            })
+        self.page_target(&token.target_id).is_some_and(|target| {
+            target
+                .runtime_slot()
+                .accepts_pending_document_navigation_event(token)
+        })
     }
 
     pub(crate) fn document_navigation_cancellation_handle(
         &self,
         token: &DocumentNavigationToken,
     ) -> Option<moli_fetch::FetchCancelHandle> {
-        if self.active_target_id() == Some(token.target_id.as_str()) {
-            return self
-                .active_target
-                .runtime_slot
-                .document_navigation_cancellation_handle(token);
-        }
-        self.background_target(&token.target_id).and_then(|target| {
+        self.page_target(&token.target_id).and_then(|target| {
             target
                 .runtime_slot()
                 .document_navigation_cancellation_handle(token)
@@ -1270,13 +1184,7 @@ impl BrowserContext {
         token: &DocumentNavigationToken,
         additional_cancellation: Option<moli_fetch::FetchCancelHandle>,
     ) -> bool {
-        if self.active_target_id() == Some(token.target_id.as_str()) {
-            return self
-                .active_target
-                .runtime_slot
-                .arm_background_navigation_completion(token, additional_cancellation);
-        }
-        let Some(target) = self.background_target_mut(&token.target_id) else {
+        let Some(target) = self.page_target_mut(&token.target_id) else {
             if let Some(cancellation) = additional_cancellation {
                 cancellation.cancel();
             }
@@ -1291,13 +1199,7 @@ impl BrowserContext {
         &mut self,
         token: &DocumentNavigationToken,
     ) -> bool {
-        if self.active_target_id() == Some(token.target_id.as_str()) {
-            return self
-                .active_target
-                .runtime_slot
-                .settle_background_navigation_completion(token);
-        }
-        self.background_target_mut(&token.target_id)
+        self.page_target_mut(&token.target_id)
             .is_some_and(|target| {
                 target
                     .runtime_slot
@@ -1312,13 +1214,7 @@ impl BrowserContext {
     }
 
     pub(crate) fn has_inflight_background_navigation_for_target(&self, target_id: &str) -> bool {
-        if self.active_target_id() == Some(target_id) {
-            return self
-                .active_target
-                .runtime_slot
-                .has_inflight_background_navigation();
-        }
-        self.background_target(target_id)
+        self.page_target(target_id)
             .is_some_and(|target| target.runtime_slot().has_inflight_background_navigation())
     }
 
@@ -1326,18 +1222,11 @@ impl BrowserContext {
         &self,
         token: &DocumentNavigationToken,
     ) -> bool {
-        if self.active_target_id() == Some(token.target_id.as_str()) {
-            return self
-                .active_target
-                .runtime_slot
-                .accepts_document_body_completion_event(token);
-        }
-        self.background_target(&token.target_id)
-            .is_some_and(|target| {
-                target
-                    .runtime_slot()
-                    .accepts_document_body_completion_event(token)
-            })
+        self.page_target(&token.target_id).is_some_and(|target| {
+            target
+                .runtime_slot()
+                .accepts_document_body_completion_event(token)
+        })
     }
 
     pub(crate) fn has_pending_document_navigation_for_target(
@@ -1347,13 +1236,7 @@ impl BrowserContext {
         let Some(target_id) = target_id else {
             return false;
         };
-        if self.active_target_id() == Some(target_id) {
-            return self
-                .active_target
-                .runtime_slot
-                .has_pending_document_navigation();
-        }
-        self.background_target(target_id)
+        self.page_target(target_id)
             .is_some_and(|target| target.runtime_slot().has_pending_document_navigation())
     }
 
@@ -1365,27 +1248,13 @@ impl BrowserContext {
         let Some(target_id) = target_id else {
             return;
         };
-        if self.active_target_id() == Some(target_id) {
-            let cleared = self
-                .active_target
+        let cleared = self.page_target_mut(target_id).is_some_and(|target| {
+            target
                 .runtime_slot
-                .clear_pending_document_navigation_if_loader_matches(loader_id);
-            if cleared {
-                self.clear_target_initial_empty_document_pending_cross_document_navigation(
-                    target_id,
-                );
-            }
-            return;
-        }
-        if let Some(target) = self.background_target_mut(target_id) {
-            let cleared = target
-                .runtime_slot
-                .clear_pending_document_navigation_if_loader_matches(loader_id);
-            if cleared {
-                self.clear_target_initial_empty_document_pending_cross_document_navigation(
-                    target_id,
-                );
-            }
+                .clear_pending_document_navigation_if_loader_matches(loader_id)
+        });
+        if cleared {
+            self.clear_target_initial_empty_document_pending_cross_document_navigation(target_id);
         }
     }
 
@@ -1393,28 +1262,21 @@ impl BrowserContext {
         &mut self,
         token: &DocumentNavigationToken,
     ) {
-        if self.active_target_id() == Some(token.target_id.as_str()) {
-            let committed = self
-                .active_target
-                .runtime_slot
-                .commit_pending_document_navigation_if_matches(token);
-            if committed {
-                self.mark_target_initial_empty_document_exited(&token.target_id);
-            }
-            return;
-        }
-        if let Some(target) = self.background_target_mut(&token.target_id) {
-            let committed = target
-                .runtime_slot
-                .commit_pending_document_navigation_if_matches(token);
-            if committed {
-                self.mark_target_initial_empty_document_exited(&token.target_id);
-            }
+        let committed = self
+            .page_target_mut(&token.target_id)
+            .is_some_and(|target| {
+                target
+                    .runtime_slot
+                    .commit_pending_document_navigation_if_matches(token)
+            });
+        if committed {
+            self.mark_target_initial_empty_document_exited(&token.target_id);
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn clear_document_navigation_state_for_active_target(&mut self) {
-        self.active_target
+        self.active_page_target_mut()
             .runtime_slot
             .clear_document_navigation_state();
     }
@@ -1560,7 +1422,7 @@ impl BrowserContext {
 
     #[cfg(test)]
     pub(crate) fn session_storage_store_for_test(&self) -> &SharedWebStorageStore {
-        self.active_target.session_storage_namespace.store()
+        self.active_page_target().session_storage_namespace.store()
     }
 
     #[cfg(test)]
@@ -1633,19 +1495,24 @@ impl BrowserContext {
         self.active_target_id().map(str::to_owned)
     }
 
-    pub(crate) fn effective_active_browser_identity_override(
-        &self,
-    ) -> Option<&moli_browser_profile::BrowserIdentityProfile> {
-        self.page_targets
-            .active()
-            .and_then(|host| host.network_policy.browser_identity_override())
-            .or_else(|| self.default_browser_identity.profile())
-    }
-
     pub(crate) fn effective_active_browser_identity_override_owned(
         &self,
     ) -> Option<moli_browser_profile::BrowserIdentityProfile> {
-        self.effective_active_browser_identity_override().cloned()
+        self.page_targets
+            .active()
+            .and_then(|host| host.effective_policy().browser_identity_override().cloned())
+            .or_else(|| self.default_browser_identity.profile_owned())
+    }
+
+    pub(crate) fn effective_active_user_agent_override(&self) -> Option<&str> {
+        self.page_targets
+            .active()
+            .and_then(PageTargetHost::effective_user_agent_override)
+            .or_else(|| {
+                self.default_browser_identity
+                    .profile()
+                    .map(moli_browser_profile::BrowserIdentityProfile::user_agent)
+            })
     }
 
     pub(crate) fn effective_active_renderer_browser_identity_override_owned(
@@ -1699,21 +1566,25 @@ impl BrowserContext {
     pub(crate) fn effective_active_locale_override_owned(&self) -> Option<String> {
         self.page_targets
             .active()
-            .and_then(|host| host.locale_override.clone())
+            .and_then(|host| host.effective_policy().locale_override().map(str::to_owned))
             .or_else(|| self.default_locale_override.clone())
     }
 
     pub(crate) fn effective_active_timezone_override_owned(&self) -> Option<String> {
         self.page_targets
             .active()
-            .and_then(|host| host.timezone_override.clone())
+            .and_then(|host| {
+                host.effective_policy()
+                    .timezone_override()
+                    .map(str::to_owned)
+            })
             .or_else(|| self.default_timezone_override.clone())
     }
 
     pub(crate) fn effective_active_network_conditions(&self) -> Option<EmulatedNetworkConditions> {
         self.page_targets
             .active()
-            .and_then(|host| host.network_conditions)
+            .and_then(|host| host.effective_emulation_state.network_conditions)
             .or(self.default_network_conditions)
             .or(self.global_network_conditions)
     }
@@ -1744,7 +1615,7 @@ impl BrowserContext {
     ) -> Option<EmulatedGeolocationOverrideState> {
         self.page_targets
             .active()
-            .and_then(|host| host.geolocation_override.clone())
+            .and_then(|host| host.effective_emulation_state.geolocation_override.clone())
             .or_else(|| self.default_geolocation_override.clone())
             .or_else(|| self.global_geolocation_override.clone())
     }
@@ -1754,24 +1625,32 @@ impl BrowserContext {
             .is_some_and(|conditions| !conditions.navigator_online())
     }
 
-    pub(crate) fn effective_parked_network_conditions(
+    pub(crate) fn effective_network_conditions_for_target(
         &self,
         target_id: &str,
     ) -> Option<EmulatedNetworkConditions> {
-        self.parked_page_session_state(target_id)
-            .and_then(|state| state.network_conditions)
+        self.page_target(target_id)
+            .and_then(|state| state.effective_emulation_state.network_conditions)
             .or(self.default_network_conditions)
             .or(self.global_network_conditions)
     }
 
-    pub(crate) fn effective_parked_network_offline(&self, target_id: &str) -> bool {
-        self.effective_parked_network_conditions(target_id)
+    pub(crate) fn effective_network_offline_for_target(&self, target_id: &str) -> bool {
+        self.effective_network_conditions_for_target(target_id)
             .is_some_and(|conditions| !conditions.navigator_online())
     }
 
-    pub(crate) fn effective_parked_locale_override_owned(&self, target_id: &str) -> Option<String> {
-        self.parked_page_session_state(target_id)
-            .and_then(|state| state.locale_override.clone())
+    pub(crate) fn effective_locale_override_for_target_owned(
+        &self,
+        target_id: &str,
+    ) -> Option<String> {
+        self.page_target(target_id)
+            .and_then(|state| {
+                state
+                    .effective_policy()
+                    .locale_override()
+                    .map(str::to_owned)
+            })
             .or_else(|| self.default_locale_override.clone())
     }
 
@@ -1795,11 +1674,6 @@ impl BrowserContext {
 
     pub(crate) fn rekey_active_target(&mut self, target_id: impl Into<String>) -> bool {
         self.page_targets.rekey_active(target_id.into())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn clear_active_target_id(&mut self) {
-        self.page_targets.clear_selection();
     }
 
     pub(crate) fn active_session_id(&self) -> Option<&str> {
@@ -1827,39 +1701,36 @@ impl BrowserContext {
             && self.service_worker_targets.is_empty()
     }
 
+    #[cfg(test)]
     pub(crate) fn attach_active_session(&mut self, session_id: impl Into<String>) {
-        self.page_targets
-            .active_mut()
-            .expect("cannot attach a session without an active page target")
+        self.active_page_target_mut()
             .attach_session(session_id.into());
     }
 
+    #[cfg(test)]
     pub(crate) fn detach_active_session(&mut self) -> Option<String> {
         self.page_targets.active_mut()?.detach_session()
     }
 
     pub(crate) fn target_url(&self) -> &str {
-        self.target_identity.url()
-    }
-
-    pub(crate) fn target_security_origin(&self) -> &str {
-        self.target_identity.security_origin()
-    }
-
-    pub(crate) fn target_secure_context_type(&self) -> &str {
-        self.target_identity.secure_context_type()
+        self.active_page_target().target_identity.url()
     }
 
     pub(crate) fn set_target_url(&mut self, url: String) {
-        self.target_identity.set_url(url);
+        self.active_page_target_mut().target_identity.set_url(url);
     }
 
+    #[cfg(test)]
     pub(crate) fn set_target_security_origin(&mut self, security_origin: String) {
-        self.target_identity.set_security_origin(security_origin);
+        self.active_page_target_mut()
+            .target_identity
+            .set_security_origin(security_origin);
     }
 
+    #[cfg(test)]
     pub(crate) fn set_target_secure_context_type(&mut self, secure_context_type: String) {
-        self.target_identity
+        self.active_page_target_mut()
+            .target_identity
             .set_secure_context_type(secure_context_type);
     }
 }

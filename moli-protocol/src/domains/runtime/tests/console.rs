@@ -63,7 +63,8 @@ async fn runtime_discard_console_entries_is_page_target_local() {
     browser_context.set_active_target_id("TID-active");
     browser_context.attach_active_session("SID-active");
     browser_context.insert_page_target_host(background_target);
-    ctx.conn.browser_context = Some(browser_context);
+    ctx.conn
+        .install_browser_context_fixture_for_test(browser_context);
     ctx.install_navigation_fixture_for_session_owner(
         "data:text/html,<script>console.log('active-discard-peer')</script>",
         Some("SID-active"),
@@ -92,7 +93,7 @@ async fn runtime_discard_console_entries_is_page_target_local() {
             .expect("browser context should exist")
             .active_target_id(),
         Some("TID-active"),
-        "background Runtime.discardConsoleEntries must not promote the target"
+        "background Runtime.discardConsoleEntries must not activate the target"
     );
 
     ctx.sent.clear();
@@ -518,6 +519,7 @@ async fn deferred_heap_profiler_state_follows_renderer_owned_document_navigation
         .browser_context
         .as_ref()
         .expect("browser context")
+        .active_page_target()
         .devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
         .inspector_session_state;
     assert!(
@@ -1407,7 +1409,7 @@ async fn runtime_exception_thrown_emits_timer_callback_warning() {
     .await;
 }
 #[tokio::test]
-async fn runtime_discard_console_entries_advances_background_owner_without_promotion() {
+async fn runtime_discard_console_entries_advances_background_owner_without_activation() {
     let mut ctx = TestContext::new();
     with_loaded_runtime_frontend_enabled_background_target_async(
         &mut ctx,
@@ -1459,11 +1461,13 @@ async fn runtime_discard_console_entries_advances_background_owner_without_promo
     assert_eq!(
         browser_context.active_target_id(),
         Some("TID-active"),
-        "background Runtime.discardConsoleEntries should not promote the target"
+        "background Runtime.discardConsoleEntries should not activate the target"
     );
     assert_eq!(
         browser_context
-            .parked_target_owner_state_or_default("TID-background")
+            .background_target("TID-background")
+            .expect("background target must exist")
+            .owner_state
             .runtime_observable_state
             .emitted_console_entries(),
         queue_console_entries,
@@ -1471,7 +1475,7 @@ async fn runtime_discard_console_entries_advances_background_owner_without_promo
     );
 }
 #[tokio::test(flavor = "multi_thread")]
-async fn background_runtime_get_heap_usage_reads_owner_page_without_promotion() {
+async fn background_runtime_get_heap_usage_reads_owner_page_without_activation() {
     let mut ctx = TestContext::new();
     with_loaded_runtime_frontend_enabled_background_target_async(
         &mut ctx,
@@ -1512,6 +1516,6 @@ async fn background_runtime_get_heap_usage_reads_owner_page_without_promotion() 
             .as_ref()
             .and_then(|browser_context| browser_context.active_target_id()),
         Some("TID-active"),
-        "background Runtime.getHeapUsage should not promote the target"
+        "background Runtime.getHeapUsage should not activate the target"
     );
 }

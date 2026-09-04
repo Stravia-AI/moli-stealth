@@ -238,10 +238,11 @@ async fn renderer_navigation_background_events_keep_typed_sidecars() {
     );
     let mut events = Vec::new();
 
-    crate::domains::page::navigate_session_owner_from_renderer_background_events_async(
+    let owner = crate::conn::CommandOwnerScope::for_session("SID-typed");
+    crate::domains::page::navigate_command_owner_from_renderer_background_events_async(
         &mut ctx.conn,
         &mut events,
-        Some("SID-typed"),
+        &owner,
         "data:text/html,<body>typed</body>",
     )
     .await;
@@ -320,10 +321,11 @@ async fn renderer_fragment_navigation_preserves_initial_document_residence() {
         .expect("initial renderer Page residence");
     let mut events = Vec::new();
 
-    crate::domains::page::navigate_session_owner_from_renderer_background_events_async(
+    let owner = crate::conn::CommandOwnerScope::for_session("SID-renderer-fragment");
+    crate::domains::page::navigate_command_owner_from_renderer_background_events_async(
         &mut ctx.conn,
         &mut events,
-        Some("SID-renderer-fragment"),
+        &owner,
         "about:blank#popup",
     )
     .await;
@@ -913,7 +915,7 @@ async fn get_navigation_history_completes_through_command_dispatch() {
         .browser_context
         .as_mut()
         .expect("browser context")
-        .active_target
+        .active_page_target_mut()
         .runtime_slot
         .set_loaded_page_for_test(page);
 
@@ -978,7 +980,7 @@ async fn reset_navigation_history_prunes_browser_and_renderer_history() {
         .browser_context
         .as_mut()
         .expect("browser context")
-        .active_target
+        .active_page_target_mut()
         .runtime_slot
         .set_loaded_page_for_test(page);
 
@@ -1196,7 +1198,7 @@ async fn reset_navigation_history_prunes_browser_and_renderer_history() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn navigation_history_is_preserved_per_parked_target() {
+async fn navigation_history_is_preserved_per_background_target() {
     let mut ctx = TestContext::new();
     load_bc_with_session(&mut ctx, "BID-1", "TID-A", "SID-A", "about:blank");
     let a1_url = "data:text/html,<title>A1</title><main>a1</main>";
@@ -1230,7 +1232,7 @@ async fn navigation_history_is_preserved_per_parked_target() {
     }
     assert!(
         ctx.conn
-            .promote_background_target_to_active_for_connection_async("TID-B")
+            .select_page_target_for_connection_async("TID-B")
             .await
             .unwrap()
             .is_some()
@@ -1261,7 +1263,7 @@ async fn navigation_history_is_preserved_per_parked_target() {
     {
         assert!(
             ctx.conn
-                .promote_background_target_to_active_for_connection_async("TID-A")
+                .select_page_target_for_connection_async("TID-A")
                 .await
                 .unwrap()
                 .is_some()
@@ -1289,7 +1291,7 @@ async fn navigation_history_is_preserved_per_parked_target() {
     );
 }
 #[tokio::test(flavor = "multi_thread")]
-async fn get_navigation_history_targets_loaded_background_owner_without_promotion() {
+async fn get_navigation_history_targets_loaded_background_owner_without_activation() {
     let mut ctx = TestContext::new();
     let background_url = "data:text/html,<title>Background History</title><main>background</main>";
     let background = PageTargetHost::with_url(
@@ -1303,7 +1305,7 @@ async fn get_navigation_history_targets_loaded_background_owner_without_promotio
     bc.attach_active_session("SID-active".to_owned());
     bc.set_target_url("data:text/html,<title>Active</title><main>active</main>".to_owned());
     bc.insert_page_target_host(background);
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.install_browser_context_fixture_for_test(bc);
     ctx.install_navigation_fixture_for_session_owner(background_url, Some("SID-background"))
         .await;
     ctx.sent.clear();
@@ -1328,12 +1330,12 @@ async fn get_navigation_history_targets_loaded_background_owner_without_promotio
             .as_ref()
             .and_then(|browser_context| browser_context.active_target_id()),
         Some("TID-active"),
-        "background Page.getNavigationHistory should not promote the target"
+        "background Page.getNavigationHistory should not activate the target"
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn reset_navigation_history_targets_loaded_background_owner_without_promotion() {
+async fn reset_navigation_history_targets_loaded_background_owner_without_activation() {
     let mut ctx = TestContext::new();
     let background_url =
         "data:text/html,<title>Background Reset History</title><main>background</main>";
@@ -1349,7 +1351,8 @@ async fn reset_navigation_history_targets_loaded_background_owner_without_promot
     browser_context
         .set_target_url("data:text/html,<title>Active</title><main>active</main>".to_owned());
     browser_context.insert_page_target_host(background);
-    ctx.conn.browser_context = Some(browser_context);
+    ctx.conn
+        .install_browser_context_fixture_for_test(browser_context);
     ctx.install_navigation_fixture_for_session_owner(background_url, Some("SID-background-reset"))
         .await;
     ctx.sent.clear();
@@ -1369,7 +1372,7 @@ async fn reset_navigation_history_targets_loaded_background_owner_without_promot
             .as_ref()
             .and_then(|browser_context| browser_context.active_target_id()),
         Some("TID-active"),
-        "background Page.resetNavigationHistory should not promote the target"
+        "background Page.resetNavigationHistory should not activate the target"
     );
 
     ctx.process_async(json!({
@@ -1391,7 +1394,7 @@ async fn reset_navigation_history_targets_loaded_background_owner_without_promot
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn navigate_to_history_entry_targets_background_owner_without_promotion() {
+async fn navigate_to_history_entry_targets_background_owner_without_activation() {
     let mut ctx = TestContext::new();
     let mut bc = BrowserContext::new("BID-1".to_owned());
     bc.set_active_target_id("TID-active".to_owned());
@@ -1402,7 +1405,7 @@ async fn navigate_to_history_entry_targets_background_owner_without_promotion() 
         Some("SID-background".to_owned()),
         "about:blank".to_owned(),
     ));
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.install_browser_context_fixture_for_test(bc);
     let first_url = "data:text/html,<title>Background A</title><main>a</main>";
     let second_url = "data:text/html,<title>Background B</title><main>b</main>";
 
@@ -1445,11 +1448,11 @@ async fn navigate_to_history_entry_targets_background_owner_without_promotion() 
     assert_eq!(
         browser_context.active_target_id(),
         Some("TID-active"),
-        "background Page.navigateToHistoryEntry should not promote the target"
+        "background Page.navigateToHistoryEntry should not activate the target"
     );
     let background = browser_context
         .background_target("TID-background")
-        .expect("background target should remain parked");
+        .expect("background target should remain background");
     assert_eq!(background.target_url(), first_url);
     ctx.sent.clear();
 
@@ -1483,10 +1486,11 @@ async fn get_navigation_history_targets_inactive_loaded_owner_without_activation
     inactive.attach_active_session("SID-inactive".to_owned());
     inactive.set_target_url(page.final_url().as_str().to_owned());
     inactive
-        .active_target
+        .active_page_target_mut()
         .runtime_slot
         .replace_loaded_page(Some(page));
-    ctx.conn.inactive_browser_contexts.push(inactive);
+    ctx.conn
+        .push_inactive_browser_context_fixture_for_test(inactive);
 
     ctx.process_async(json!({
         "id": 16,
@@ -1576,7 +1580,7 @@ async fn navigation_history_marks_reload_as_reload_transition() {
     );
 }
 #[tokio::test(flavor = "multi_thread")]
-async fn navigate_targets_background_owner_without_promotion() {
+async fn navigate_targets_background_owner_without_activation() {
     let mut ctx = TestContext::new();
     let mut bc = BrowserContext::new("BID-1".to_owned());
     bc.set_active_target_id("TID-active".to_owned());
@@ -1587,7 +1591,7 @@ async fn navigate_targets_background_owner_without_promotion() {
         Some("SID-background".to_owned()),
         "about:blank".to_owned(),
     ));
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.install_browser_context_fixture_for_test(bc);
 
     let background_url = "data:text/html,<title>Background</title><main>background</main>";
     ctx.process_async(json!({
@@ -1605,7 +1609,7 @@ async fn navigate_targets_background_owner_without_promotion() {
     assert_eq!(
         browser_context.active_target_id(),
         Some("TID-active"),
-        "background Page.navigate should not promote the target"
+        "background Page.navigate should not activate the target"
     );
     assert_eq!(
         browser_context.target_url(),
@@ -1614,7 +1618,7 @@ async fn navigate_targets_background_owner_without_promotion() {
     );
     let background = browser_context
         .background_target("TID-background")
-        .expect("background target should remain parked");
+        .expect("background target should remain background");
     assert!(background.has_loaded_page());
     assert_eq!(background.target_url(), background_url);
 }
@@ -1625,7 +1629,8 @@ async fn navigate_targets_inactive_owner_without_activation() {
     inactive.set_active_target_id("TID-inactive".to_owned());
     inactive.attach_active_session("SID-inactive".to_owned());
     inactive.set_target_url("about:blank".to_owned());
-    ctx.conn.inactive_browser_contexts.push(inactive);
+    ctx.conn
+        .push_inactive_browser_context_fixture_for_test(inactive);
 
     let inactive_url = "data:text/html,<title>Inactive</title><main>inactive</main>";
     ctx.process_async(json!({
@@ -1647,7 +1652,7 @@ async fn navigate_targets_inactive_owner_without_activation() {
         .inactive_browser_contexts
         .iter()
         .find(|browser_context| browser_context.id == "BID-inactive")
-        .expect("inactive browser context should stay parked");
+        .expect("inactive browser context should stay background");
     assert!(inactive.has_loaded_page());
     assert_eq!(inactive.target_url(), inactive_url);
 }
@@ -1841,8 +1846,12 @@ async fn navigate_with_runtime_frontend_enabled_network_child_playwright_style_u
     let mut ctx = TestContext::new();
     load_bc_with_session(&mut ctx, "BID-1", "TID-1", "SID-1", "about:blank");
     ctx.enable_page_events_for_test(Some("SID-1"));
-    ctx.conn.browser_context.as_mut().unwrap().devtools_sessions
-        [moli_page_types::DevToolsSessionKey::Primary]
+    ctx.conn
+        .browser_context
+        .as_mut()
+        .unwrap()
+        .active_page_target_mut()
+        .devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
         .runtime_session_state
         .runtime_frontend_enabled = true;
     ctx.enable_background_navigation_scheduler_for_test();
@@ -2623,8 +2632,12 @@ async fn navigate_with_lifecycle_events_enabled_emits_lifecycle_markers() {
     load_bc_with_session(&mut ctx, "BID-1", "TID-1", "SID-1", "about:blank");
     ctx.enable_page_events_for_test(Some("SID-1"));
     ctx.enable_dom_events_for_test(Some("SID-1"));
-    ctx.conn.browser_context.as_mut().unwrap().devtools_sessions
-        [moli_page_types::DevToolsSessionKey::Primary]
+    ctx.conn
+        .browser_context
+        .as_mut()
+        .unwrap()
+        .active_page_target_mut()
+        .devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
         .page_session_state
         .page_lifecycle_events = true;
 
@@ -2787,8 +2800,12 @@ async fn navigate_with_child_iframe_emits_child_frame_navigation_and_lifecycle_e
     let mut ctx = TestContext::new();
     load_bc_with_session(&mut ctx, "BID-1", "TID-1", "SID-1", "about:blank");
     ctx.enable_page_events_for_test(Some("SID-1"));
-    ctx.conn.browser_context.as_mut().unwrap().devtools_sessions
-        [moli_page_types::DevToolsSessionKey::Primary]
+    ctx.conn
+        .browser_context
+        .as_mut()
+        .unwrap()
+        .active_page_target_mut()
+        .devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
         .page_session_state
         .page_lifecycle_events = true;
 
@@ -3104,8 +3121,12 @@ async fn navigate_with_nested_child_frame_reports_outer_parent_frame_id() {
     let mut ctx = TestContext::new();
     load_bc_with_session(&mut ctx, "BID-1", "TID-1", "SID-1", "about:blank");
     ctx.enable_page_events_for_test(Some("SID-1"));
-    ctx.conn.browser_context.as_mut().unwrap().devtools_sessions
-        [moli_page_types::DevToolsSessionKey::Primary]
+    ctx.conn
+        .browser_context
+        .as_mut()
+        .unwrap()
+        .active_page_target_mut()
+        .devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
         .page_session_state
         .page_lifecycle_events = true;
     ctx.process_async(json!({
@@ -3192,10 +3213,12 @@ async fn navigate_with_runtime_frontend_enabled_emits_nested_child_default_conte
     load_bc_with_session(&mut ctx, "BID-1", "TID-1", "SID-1", "about:blank");
     ctx.enable_page_events_for_test(Some("SID-1"));
     let browser_context = ctx.conn.browser_context.as_mut().unwrap();
-    browser_context.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+    browser_context.active_page_target_mut().devtools_sessions
+        [moli_page_types::DevToolsSessionKey::Primary]
         .page_session_state
         .page_lifecycle_events = true;
-    browser_context.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+    browser_context.active_page_target_mut().devtools_sessions
+        [moli_page_types::DevToolsSessionKey::Primary]
         .runtime_session_state
         .runtime_frontend_enabled = true;
 
@@ -3274,8 +3297,12 @@ async fn navigate_with_legacy_runtime_frontend_projection_emits_context_creation
     load_bc_with_session(&mut ctx, "BID-1", "TID-1", "SID-1", "about:blank");
     ctx.enable_page_events_for_test(Some("SID-1"));
     ctx.enable_dom_events_for_test(Some("SID-1"));
-    ctx.conn.browser_context.as_mut().unwrap().devtools_sessions
-        [moli_page_types::DevToolsSessionKey::Primary]
+    ctx.conn
+        .browser_context
+        .as_mut()
+        .unwrap()
+        .active_page_target_mut()
+        .devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
         .runtime_session_state
         .runtime_frontend_enabled = true;
     ctx.enable_background_navigation_scheduler_for_test();
@@ -3376,7 +3403,7 @@ async fn navigate_after_real_runtime_enable_resets_before_creating_default_conte
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn navigate_after_real_runtime_enable_fans_out_context_reset_to_auxiliary_session() {
+async fn navigate_after_real_runtime_enable_fans_out_context_reset_to_attached_session() {
     let mut ctx = TestContext::new();
     load_bc_with_session(&mut ctx, "BID-1", "TID-1", "SID-1", "about:blank");
     ensure_initial_document_for_session(&mut ctx, Some("SID-1")).await;
@@ -3385,10 +3412,10 @@ async fn navigate_after_real_runtime_enable_fans_out_context_reset_to_auxiliary_
             .browser_context
             .as_mut()
             .unwrap()
-            .assign_auxiliary_session_to_target("TID-1", "SID-aux".to_owned())
+            .assign_attached_session_to_target("TID-1", "SID-attached".to_owned())
     );
 
-    for (id, session_id) in [(21, "SID-1"), (22, "SID-aux")] {
+    for (id, session_id) in [(21, "SID-1"), (22, "SID-attached")] {
         ctx.process_async(json!({
             "id": id,
             "method": "Runtime.enable",
@@ -3415,13 +3442,13 @@ async fn navigate_after_real_runtime_enable_fans_out_context_reset_to_auxiliary_
     .await;
 
     let sent = ctx.take_all();
-    for session_id in ["SID-1", "SID-aux"] {
+    for session_id in ["SID-1", "SID-attached"] {
         assert_runtime_navigation_context_reset(&sent, session_id, "TID-1");
     }
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn navigate_from_auxiliary_session_keeps_primary_and_auxiliary_runtime_events_separate() {
+async fn navigate_from_attached_session_keeps_primary_and_attached_runtime_events_separate() {
     let mut ctx = TestContext::new();
     load_bc_with_session(&mut ctx, "BID-1", "TID-1", "SID-1", "about:blank");
     ensure_initial_document_for_session(&mut ctx, Some("SID-1")).await;
@@ -3430,10 +3457,10 @@ async fn navigate_from_auxiliary_session_keeps_primary_and_auxiliary_runtime_eve
             .browser_context
             .as_mut()
             .unwrap()
-            .assign_auxiliary_session_to_target("TID-1", "SID-aux".to_owned())
+            .assign_attached_session_to_target("TID-1", "SID-attached".to_owned())
     );
 
-    for (id, session_id) in [(21, "SID-1"), (22, "SID-aux")] {
+    for (id, session_id) in [(21, "SID-1"), (22, "SID-attached")] {
         ctx.process_async(json!({
             "id": id,
             "method": "Runtime.enable",
@@ -3446,19 +3473,19 @@ async fn navigate_from_auxiliary_session_keeps_primary_and_auxiliary_runtime_eve
     ctx.process_async(json!({
         "id": 23,
         "method": "Page.navigate",
-        "sessionId": "SID-aux",
+        "sessionId": "SID-attached",
         "params": { "url": "data:text/html,<body>aux-session-nav</body>" }
     }))
     .await;
 
     let sent = ctx.take_all();
-    for session_id in ["SID-1", "SID-aux"] {
+    for session_id in ["SID-1", "SID-attached"] {
         assert_runtime_navigation_context_reset(&sent, session_id, "TID-1");
     }
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn navigate_after_auxiliary_runtime_disable_keeps_primary_runtime_enabled() {
+async fn navigate_after_attached_runtime_disable_keeps_primary_runtime_enabled() {
     let mut ctx = TestContext::new();
     load_bc_with_session(&mut ctx, "BID-1", "TID-1", "SID-1", "about:blank");
     ensure_initial_document_for_session(&mut ctx, Some("SID-1")).await;
@@ -3467,10 +3494,10 @@ async fn navigate_after_auxiliary_runtime_disable_keeps_primary_runtime_enabled(
             .browser_context
             .as_mut()
             .unwrap()
-            .assign_auxiliary_session_to_target("TID-1", "SID-aux".to_owned())
+            .assign_attached_session_to_target("TID-1", "SID-attached".to_owned())
     );
 
-    for (id, session_id) in [(21, "SID-1"), (22, "SID-aux")] {
+    for (id, session_id) in [(21, "SID-1"), (22, "SID-attached")] {
         ctx.process_async(json!({
             "id": id,
             "method": "Runtime.enable",
@@ -3482,20 +3509,20 @@ async fn navigate_after_auxiliary_runtime_disable_keeps_primary_runtime_enabled(
     ctx.process_async(json!({
         "id": 23,
         "method": "Runtime.disable",
-        "sessionId": "SID-aux"
+        "sessionId": "SID-attached"
     }))
     .await;
     assert_eq!(
         take_response_by_id(&mut ctx, 23)["result"],
         json!({}),
-        "auxiliary Runtime.disable should succeed through its own V8 session"
+        "attached Runtime.disable should succeed through its own V8 session"
     );
     ctx.sent.clear();
 
     ctx.process_async(json!({
         "id": 24,
         "method": "Page.navigate",
-        "sessionId": "SID-aux",
+        "sessionId": "SID-attached",
         "params": { "url": "data:text/html,<body>aux-runtime-disabled</body>" }
     }))
     .await;
@@ -3504,20 +3531,19 @@ async fn navigate_after_auxiliary_runtime_disable_keeps_primary_runtime_enabled(
     assert_runtime_navigation_context_reset(&sent, "SID-1", "TID-1");
     assert!(
         sent.iter().all(|message| {
-            message["sessionId"] != json!("SID-aux")
+            message["sessionId"] != json!("SID-attached")
                 || !matches!(
                     message["method"].as_str(),
                     Some("Runtime.executionContextsCleared")
                         | Some("Runtime.executionContextCreated")
                 )
         }),
-        "Runtime-disabled auxiliary session must stay off context lifecycle surfaces after navigation: {sent:?}"
+        "Runtime-disabled attached session must stay off context lifecycle surfaces after navigation: {sent:?}"
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn navigate_with_staged_auxiliary_runtime_enable_emits_context_created_for_auxiliary_session()
-{
+async fn navigate_with_staged_attached_runtime_enable_emits_context_created_for_attached_session() {
     let mut ctx = TestContext::new();
     load_bc_with_session(&mut ctx, "BID-1", "TID-1", "SID-1", "about:blank");
     assert!(
@@ -3525,14 +3551,15 @@ async fn navigate_with_staged_auxiliary_runtime_enable_emits_context_created_for
             .browser_context
             .as_mut()
             .unwrap()
-            .assign_auxiliary_session_to_target("TID-1", "SID-aux".to_owned())
+            .assign_attached_session_to_target("TID-1", "SID-attached".to_owned())
     );
+    ctx.conn.commit_declared_session_fixtures_for_test();
     ctx.conn
         .with_target_devtools_session_state_for_session_mut(Some("SID-1"), |state| {
             state.runtime_session_state.runtime_frontend_enabled = true;
         });
     ctx.conn
-        .with_target_devtools_session_state_for_session_mut(Some("SID-aux"), |state| {
+        .with_target_devtools_session_state_for_session_mut(Some("SID-attached"), |state| {
             state.runtime_session_state.runtime_frontend_enabled = true;
         });
 
@@ -3545,7 +3572,7 @@ async fn navigate_with_staged_auxiliary_runtime_enable_emits_context_created_for
     .await;
 
     let sent = ctx.take_all();
-    for session_id in ["SID-1", "SID-aux"] {
+    for session_id in ["SID-1", "SID-attached"] {
         assert!(
             sent.iter().any(|message| {
                 message["method"] == json!("Runtime.executionContextCreated")
@@ -3560,8 +3587,12 @@ async fn navigate_with_runtime_frontend_enabled_emits_initial_console_before_dcl
     let mut ctx = TestContext::new();
     load_bc_with_session(&mut ctx, "BID-1", "TID-1", "SID-1", "about:blank");
     ctx.enable_page_events_for_test(Some("SID-1"));
-    ctx.conn.browser_context.as_mut().unwrap().devtools_sessions
-        [moli_page_types::DevToolsSessionKey::Primary]
+    ctx.conn
+        .browser_context
+        .as_mut()
+        .unwrap()
+        .active_page_target_mut()
+        .devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
         .runtime_session_state
         .runtime_frontend_enabled = true;
 
@@ -3627,6 +3658,7 @@ async fn navigate_with_console_enabled_emits_initial_console_without_runtime_ena
             .browser_context
             .as_ref()
             .expect("browser context should exist")
+            .active_page_target()
             .devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
             .inspector_session_state
             .v8_state
@@ -3672,7 +3704,7 @@ async fn navigate_with_console_enabled_emits_initial_console_without_runtime_ena
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn auxiliary_console_enable_survives_navigation_without_enabling_primary_or_runtime() {
+async fn attached_console_enable_survives_navigation_without_enabling_primary_or_runtime() {
     let mut ctx = TestContext::new();
     load_bc_with_session(&mut ctx, "BID-1", "TID-1", "SID-1", "about:blank");
     ensure_initial_document_for_session(&mut ctx, Some("SID-1")).await;
@@ -3681,16 +3713,16 @@ async fn auxiliary_console_enable_survives_navigation_without_enabling_primary_o
             .browser_context
             .as_mut()
             .unwrap()
-            .assign_auxiliary_session_to_target("TID-1", "SID-aux".to_owned())
+            .assign_attached_session_to_target("TID-1", "SID-attached".to_owned())
     );
 
     ctx.process_async(json!({
         "id": 28,
         "method": "Console.enable",
-        "sessionId": "SID-aux"
+        "sessionId": "SID-attached"
     }))
     .await;
-    ctx.expect_result(28, json!({}), Some("SID-aux"));
+    ctx.expect_result(28, json!({}), Some("SID-attached"));
 
     ctx.process_async(json!({
         "id": 29,
@@ -3718,7 +3750,7 @@ async fn auxiliary_console_enable_survives_navigation_without_enabling_primary_o
     ctx.process_async(json!({
         "id": 30,
         "method": "Runtime.evaluate",
-        "sessionId": "SID-aux",
+        "sessionId": "SID-attached",
         "params": {
             "expression": "console.warn('aux console after navigation')"
         }
@@ -3728,17 +3760,17 @@ async fn auxiliary_console_enable_survives_navigation_without_enabling_primary_o
     assert!(
         sent.iter().any(|message| {
             message["method"] == json!("Console.messageAdded")
-                && message["sessionId"] == json!("SID-aux")
+                && message["sessionId"] == json!("SID-attached")
                 && message["params"]["message"]["text"] == json!("aux console after navigation")
         }),
-        "Console-enabled auxiliary session should retain its own V8 Console subscription after navigation: {sent:?}"
+        "Console-enabled attached session should retain its own V8 Console subscription after navigation: {sent:?}"
     );
     assert!(
         sent.iter().all(|message| {
             message["sessionId"] != json!("SID-1")
                 || message["method"] != json!("Console.messageAdded")
         }),
-        "Console-disabled primary session must not receive the auxiliary subscription's events: {sent:?}"
+        "Console-disabled primary session must not receive the attached subscription's events: {sent:?}"
     );
     assert!(
         sent.iter()
@@ -3776,8 +3808,12 @@ async fn navigate_with_runtime_frontend_enabled_emits_child_default_execution_co
     let mut ctx = TestContext::new();
     load_bc_with_session(&mut ctx, "BID-1", "TID-1", "SID-1", "about:blank");
     ctx.enable_page_events_for_test(Some("SID-1"));
-    ctx.conn.browser_context.as_mut().unwrap().devtools_sessions
-        [moli_page_types::DevToolsSessionKey::Primary]
+    ctx.conn
+        .browser_context
+        .as_mut()
+        .unwrap()
+        .active_page_target_mut()
+        .devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
         .runtime_session_state
         .runtime_frontend_enabled = true;
 
@@ -3994,10 +4030,10 @@ async fn navigate_emits_each_child_default_context_identity_once_per_runtime_ses
             .browser_context
             .as_mut()
             .expect("browser context")
-            .assign_auxiliary_session_to_target("TID-1", "SID-auxiliary".to_owned())
+            .assign_attached_session_to_target("TID-1", "SID-attached".to_owned())
     );
 
-    for (command_id, session_id) in [(25_301, "SID-primary"), (25_302, "SID-auxiliary")] {
+    for (command_id, session_id) in [(25_301, "SID-primary"), (25_302, "SID-attached")] {
         ctx.process_async(json!({
             "id": command_id,
             "method": "Runtime.enable",
@@ -4045,9 +4081,9 @@ async fn navigate_emits_each_child_default_context_identity_once_per_runtime_ses
     wait_until_messages(
         &mut ctx,
         "SID-primary",
-        "child default Runtime context fan-out to primary and auxiliary sessions",
+        "child default Runtime context fan-out to primary and attached sessions",
         move |messages| {
-            ["SID-primary", "SID-auxiliary"]
+            ["SID-primary", "SID-attached"]
                 .into_iter()
                 .all(|session_id| {
                     messages.iter().any(|message| {
@@ -4080,9 +4116,9 @@ async fn navigate_emits_each_child_default_context_identity_once_per_runtime_ses
             .collect::<Vec<_>>()
     };
     let primary_identities = child_context_identities("SID-primary");
-    let auxiliary_identities = child_context_identities("SID-auxiliary");
+    let attached_identities = child_context_identities("SID-attached");
     assert!(
-        !primary_identities.is_empty() && !auxiliary_identities.is_empty(),
+        !primary_identities.is_empty() && !attached_identities.is_empty(),
         "both Runtime frontends must observe a child default context: {:?}",
         ctx.sent
     );
@@ -4099,17 +4135,17 @@ async fn navigate_emits_each_child_default_context_identity_once_per_runtime_ses
         "the primary Runtime frontend must receive each child context once: {:?}",
         ctx.sent
     );
-    let mut unique_auxiliary_identities = auxiliary_identities.clone();
-    unique_auxiliary_identities.sort();
-    unique_auxiliary_identities.dedup();
+    let mut unique_attached_identities = attached_identities.clone();
+    unique_attached_identities.sort();
+    unique_attached_identities.dedup();
     assert_eq!(
-        auxiliary_identities.len(),
-        unique_auxiliary_identities.len(),
-        "the auxiliary Runtime frontend must receive each child context once: {:?}",
+        attached_identities.len(),
+        unique_attached_identities.len(),
+        "the attached Runtime frontend must receive each child context once: {:?}",
         ctx.sent
     );
     assert_eq!(
-        unique_primary_identities, unique_auxiliary_identities,
+        unique_primary_identities, unique_attached_identities,
         "both Runtime frontends should observe the same child context identities"
     );
 }
@@ -4304,10 +4340,10 @@ async fn navigate_child_runtime_contexts_fan_out_to_each_runtime_enabled_session
             .browser_context
             .as_mut()
             .expect("browser context")
-            .assign_auxiliary_session_to_target("TID-1", "SID-aux".to_owned())
+            .assign_attached_session_to_target("TID-1", "SID-attached".to_owned())
     );
 
-    for (id, session_id) in [(90_240, "SID-1"), (90_241, "SID-aux")] {
+    for (id, session_id) in [(90_240, "SID-1"), (90_241, "SID-attached")] {
         ctx.process_async(json!({
             "id": id,
             "method": "Runtime.enable",
@@ -4370,7 +4406,7 @@ async fn navigate_child_runtime_contexts_fan_out_to_each_runtime_enabled_session
         "SID-1",
         "default and named child contexts for both Runtime sessions",
         move |messages| {
-            ["SID-1", "SID-aux"].into_iter().all(|session_id| {
+            ["SID-1", "SID-attached"].into_iter().all(|session_id| {
                 let has_default = messages.iter().any(|message| {
                     message["method"] == json!("Runtime.executionContextCreated")
                         && message["sessionId"] == json!(session_id)
@@ -4392,7 +4428,7 @@ async fn navigate_child_runtime_contexts_fan_out_to_each_runtime_enabled_session
     .await;
 
     for (is_default, name) in [(true, None), (false, Some("fanout-child-world"))] {
-        let contexts = ["SID-1", "SID-aux"]
+        let contexts = ["SID-1", "SID-attached"]
             .into_iter()
             .map(|session_id| {
                 ctx.sent
@@ -4419,7 +4455,7 @@ async fn navigate_child_runtime_contexts_fan_out_to_each_runtime_enabled_session
         assert_eq!(
             contexts[1].len(),
             1,
-            "auxiliary context should emit once: {contexts:?}"
+            "attached context should emit once: {contexts:?}"
         );
         assert_eq!(
             contexts[0][0]["params"]["context"]["id"], contexts[1][0]["params"]["context"]["id"],
@@ -5115,10 +5151,10 @@ async fn navigate_failure_creates_runtime_context_and_completes_lifecycle() {
     load_bc_with_session(&mut ctx, "BID-1", "TID-1", "SID-1", "about:blank");
     ctx.enable_page_events_for_test(Some("SID-1"));
     let bc = ctx.conn.browser_context.as_mut().unwrap();
-    bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+    bc.active_page_target_mut().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
         .runtime_session_state
         .runtime_frontend_enabled = true;
-    bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+    bc.active_page_target_mut().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
         .page_session_state
         .page_lifecycle_events = true;
 
@@ -5265,7 +5301,7 @@ async fn continue_request_completes_paused_navigation_before_commit_events() {
         .browser_context
         .as_mut()
         .unwrap()
-        .active_target
+        .active_page_target_mut()
         .runtime_slot
         .enable_primary_network_events();
 
@@ -5350,7 +5386,7 @@ async fn stop_loading_aborts_paused_request_stage_navigation() {
     let mut ctx = TestContext::new();
     load_bc_with_session(&mut ctx, "BID-1", "TID-1", "SID-1", "about:blank");
     let bc = ctx.conn.browser_context.as_mut().unwrap();
-    bc.active_target
+    bc.active_page_target_mut()
         .runtime_slot
         .enable_primary_network_events();
     let committed_document_token = bc
@@ -5467,7 +5503,7 @@ async fn stop_loading_aborts_paused_response_stage_navigation() {
     let mut ctx = TestContext::new();
     load_bc_with_session(&mut ctx, "BID-1", "TID-1", "SID-1", "about:blank");
     let bc = ctx.conn.browser_context.as_mut().unwrap();
-    bc.active_target
+    bc.active_page_target_mut()
         .runtime_slot
         .enable_primary_network_events();
 
@@ -5584,7 +5620,7 @@ async fn stop_loading_aborts_paused_auth_navigation() {
     let mut ctx = TestContext::new();
     load_bc_with_session(&mut ctx, "BID-1", "TID-1", "SID-1", "about:blank");
     let bc = ctx.conn.browser_context.as_mut().unwrap();
-    bc.active_target
+    bc.active_page_target_mut()
         .runtime_slot
         .enable_primary_network_events();
 
@@ -5980,7 +6016,7 @@ allowedScript.nonce = "changed-after-connection";
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn reload_targets_background_owner_without_promotion() {
+async fn reload_targets_background_owner_without_activation() {
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -6024,7 +6060,7 @@ async fn reload_targets_background_owner_without_promotion() {
     bc.attach_active_session("SID-active".to_owned());
     bc.set_target_url("data:text/html,<title>Active</title><main>active</main>".to_owned());
     bc.insert_page_target_host(background);
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.install_browser_context_fixture_for_test(bc);
     ctx.install_navigation_fixture_for_session_owner(&page_url, Some("SID-background"))
         .await;
     let initial_html = ctx
@@ -6060,11 +6096,11 @@ async fn reload_targets_background_owner_without_promotion() {
     assert_eq!(
         browser_context.active_target_id(),
         Some("TID-active"),
-        "background Page.reload should not promote the target"
+        "background Page.reload should not activate the target"
     );
     let background = browser_context
         .background_target_mut("TID-background")
-        .expect("background target should remain parked");
+        .expect("background target should remain background");
     let reloaded_html = background
         .loaded_page_mut()
         .expect("loaded background page after reload")
@@ -6345,10 +6381,10 @@ async fn reload_after_crash_emits_target_reloaded_after_crash() {
         "data:text/html,<body>reload-after-crash</body>",
     );
     let bc = ctx.conn.browser_context.as_mut().unwrap();
-    bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+    bc.active_page_target_mut().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
         .runtime_session_state
         .record_inspector_target_crashed();
-    bc.active_target
+    bc.active_page_target_mut()
         .owner_state
         .target_crash_state
         .mark_crashed();
@@ -6376,7 +6412,7 @@ async fn reload_after_crash_emits_target_reloaded_after_crash() {
             .browser_context
             .as_ref()
             .expect("browser context")
-            .active_target
+            .active_page_target()
             .owner_state
             .target_crash_state
             .is_crashed()
@@ -6393,10 +6429,10 @@ async fn navigate_after_crash_emits_target_reloaded_after_crash() {
         "data:text/html,<body>before-crash</body>",
     );
     let bc = ctx.conn.browser_context.as_mut().unwrap();
-    bc.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+    bc.active_page_target_mut().devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
         .runtime_session_state
         .record_inspector_target_crashed();
-    bc.active_target
+    bc.active_page_target_mut()
         .owner_state
         .target_crash_state
         .mark_crashed();
@@ -6427,7 +6463,7 @@ async fn navigate_after_crash_emits_target_reloaded_after_crash() {
             .browser_context
             .as_ref()
             .expect("browser context")
-            .active_target
+            .active_page_target()
             .owner_state
             .target_crash_state
             .is_crashed()
@@ -6451,7 +6487,7 @@ async fn navigate_after_crash_without_inspector_enabled_clears_crash_without_eve
         .browser_context
         .as_mut()
         .unwrap()
-        .active_target
+        .active_page_target_mut()
         .owner_state
         .target_crash_state
         .mark_crashed();
@@ -6483,7 +6519,7 @@ async fn navigate_after_crash_without_inspector_enabled_clears_crash_without_eve
             .browser_context
             .as_ref()
             .expect("browser context")
-            .active_target
+            .active_page_target()
             .owner_state
             .target_crash_state
             .is_crashed()

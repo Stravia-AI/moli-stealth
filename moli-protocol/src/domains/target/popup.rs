@@ -1,6 +1,6 @@
 use crate::conn::{
-    PopupTargetActivationAction, PopupTargetNavigationKind, PopupTargetNavigationOwnerAction,
-    PreparedTargetAttach,
+    CdpSessionRoute, CommandOwnerScope, PopupTargetActivationAction, PopupTargetNavigationKind,
+    PopupTargetNavigationOwnerAction, PreparedTargetAttach, TargetAttachSessionCommit,
 };
 
 use super::creation::{
@@ -148,7 +148,7 @@ pub(crate) async fn create_popup_target_from_renderer_output_background_events_a
 
     // The renderer has already accepted an auxiliary-context action. Even when
     // noopener blocks script access, Chromium preserves the creator target and
-    // frame as DevTools attribution for the new auxiliary target.
+    // frame as DevTools attribution for the new popup Page target.
     let opener = opener.filter(|opener| {
         conn.browser_context_by_id(&browser_context_id)
             .and_then(|browser_context| browser_context.devtools_target_info(&opener.target_id))
@@ -205,27 +205,39 @@ pub(crate) async fn create_popup_target_from_renderer_output_background_events_a
     }
 
     let tab_target_id = conn.register_top_level_page_target(&target_id);
-    for (owner_session_id, session_id) in &auto_attached_tab_sessions {
-        let assigned = conn.prepare_auto_attached_tab_session_binding(
-            &tab_target_id,
-            session_id.clone(),
-            owner_session_id.as_deref(),
-        );
-        assert!(assigned, "created popup tab target must remain addressable");
-    }
-    for (index, (_, session_id)) in auto_attached_page_sessions.iter().enumerate() {
-        if index != 0 || auto_attached_background_session_id.is_none() {
-            let assigned = conn.prepare_auto_attached_page_session_binding_in_browser_context(
-                &browser_context_id,
-                &target_id,
+    let auto_attached_tab_sessions = auto_attached_tab_sessions
+        .into_iter()
+        .map(|(owner_session_id, session_id)| {
+            let route = conn.prepare_auto_attached_tab_session_binding(
+                &tab_target_id,
                 session_id.clone(),
+                owner_session_id.as_deref(),
             );
-            assert!(
-                assigned,
-                "newly created popup target must remain addressable"
-            );
-        }
-    }
+            let route = route.expect("created popup tab target must remain addressable");
+            (owner_session_id, session_id, route)
+        })
+        .collect::<Vec<_>>();
+    let auto_attached_page_sessions = auto_attached_page_sessions
+        .into_iter()
+        .enumerate()
+        .map(|(index, (owner_session_id, session_id))| {
+            let route = if index == 0 && auto_attached_background_session_id.is_some() {
+                CdpSessionRoute::PageTarget {
+                    browser_context_id: browser_context_id.clone(),
+                    target_id: target_id.clone(),
+                    session_key: moli_page_types::DevToolsSessionKey::Primary,
+                }
+            } else {
+                conn.prepare_auto_attached_page_session_binding_in_browser_context(
+                    &browser_context_id,
+                    &target_id,
+                    session_id.clone(),
+                )
+                .expect("newly created popup target must remain addressable")
+            };
+            (owner_session_id, session_id, route)
+        })
+        .collect::<Vec<_>>();
 
     if !ensure_popup_initial_document_page_async(conn, &target_id).await {
         rollback_incomplete_popup_target_async(conn, Some(&browser_context_id), &target_id).await;
@@ -313,12 +325,9 @@ async fn ensure_popup_initial_document_page_async(
     let Some(route) = conn.target_session_route_for_target_id(target_id) else {
         return false;
     };
+    let owner = CommandOwnerScope::for_route(route);
     {
-        let mut route_scope = conn.scoped_none_session_owner_route_override(route.clone());
-        let pending = match route_scope
-            .conn_mut()
-            .start_initial_document_page_ensure_for_session_owner(None)
-        {
+        let pending = match conn.start_initial_document_page_ensure_for_owner(&owner) {
             Ok(pending) => pending,
             Err(message) => {
                 tracing::debug!(
@@ -333,9 +342,7 @@ async fn ensure_popup_initial_document_page_async(
             let completed = match pending.wait().await {
                 Ok(completed) => completed,
                 Err(failed) => {
-                    let message = route_scope
-                        .conn_mut()
-                        .reset_failed_initial_document_page_build_for_owner(failed);
+                    let message = conn.reset_failed_initial_document_page_build_for_owner(failed);
                     tracing::debug!(
                         target_id,
                         ?message,
@@ -344,8 +351,7 @@ async fn ensure_popup_initial_document_page_async(
                     return false;
                 }
             };
-            if let Err(message) = route_scope
-                .conn_mut()
+            if let Err(message) = conn
                 .complete_initial_document_page_build_for_owner(completed)
                 .await
             {
@@ -364,16 +370,17 @@ async fn ensure_popup_initial_document_page_async(
 fn push_committed_auto_attached_session_events(
     conn: &mut CdpConnection,
     out: &mut impl events::CdpTargetAutomationEventSink,
-    sessions: &[(Option<String>, String)],
+    sessions: &[(Option<String>, String, CdpSessionRoute)],
     target_id: &str,
     target_info: DevToolsTargetInfo,
 ) {
     let sessions = sessions
         .iter()
-        .map(|(owner_session_id, session_id)| {
-            conn.prepare_auto_attach_session_commit(
+        .map(|(owner_session_id, session_id, route)| {
+            TargetAttachSessionCommit::auto_attached(
                 session_id.clone(),
                 owner_session_id.clone(),
+                route.clone(),
                 conn.auto_attach_owner_waits_for_debugger_on_start(owner_session_id.as_deref()),
             )
         })
@@ -408,48 +415,30 @@ pub(super) async fn start_target_url_navigation_if_allowed_background_events_asy
     let Some(route) = conn.target_session_route_for_target_id(target_id) else {
         return;
     };
-    let started_target_url_navigation = {
-        let mut route_scope = conn.scoped_none_session_owner_route_override(route);
-        start_initial_document_target_url_navigation_if_needed_background_events_async(
-            route_scope.conn_mut(),
-            out,
-            None,
-        )
-        .await
+    let Some(browser_context_id) = route.browser_context_id().map(str::to_owned) else {
+        return;
     };
-    if started_target_url_navigation
-        && let Some(browser_context_id) = conn
-            .target_session_route_for_target_id(target_id)
-            .and_then(|route| route.browser_context_id().map(str::to_owned))
-    {
-        emit_target_info_changed_for_target_background_event(
-            conn,
-            out,
-            &browser_context_id,
-            target_id,
-        );
-    }
-}
-
-pub(crate) async fn start_initial_document_target_url_navigation_if_needed_background_events_async(
-    conn: &mut CdpConnection,
-    out: &mut Vec<BackgroundProtocolEvent>,
-    session_id: Option<&str>,
-) -> bool {
-    if !conn.runtime_session_owner_can_start_initial_document_navigation(session_id) {
-        return false;
-    }
-    let Some(target_url) = conn.runtime_session_owner_target_url(session_id) else {
-        return false;
+    let Some(browser_context) = conn.browser_context_by_id(&browser_context_id) else {
+        return;
     };
-    crate::domains::page::navigate_session_owner_from_renderer_background_events_async(
+    if !browser_context.target_needs_initial_document_navigation(target_id) {
+        return;
+    }
+    let Some(target_url) = browser_context
+        .devtools_target_info(target_id)
+        .map(|target_info| target_info.url)
+    else {
+        return;
+    };
+    let owner_scope = CommandOwnerScope::for_route(route);
+    crate::domains::page::navigate_command_owner_from_renderer_background_events_async(
         conn,
         out,
-        session_id,
+        &owner_scope,
         &target_url,
     )
     .await;
-    true
+    emit_target_info_changed_for_target_background_event(conn, out, &browser_context_id, target_id);
 }
 
 pub(crate) fn schedule_initial_document_target_url_navigation_after_debugger_resume(
@@ -526,14 +515,12 @@ pub(crate) async fn complete_popup_target_navigation_owner_action_async(
     action: PopupTargetNavigationOwnerAction,
 ) -> crate::conn::CdpTurnOutcome {
     let (owner_scope, browser_context_id, target_id, url, kind) = action.into_parts();
-    let mut route_scope = owner_scope.enter(conn);
-    let conn = route_scope.conn_mut();
-    let target_is_current = conn.target_owner_identity_for_session(None).is_some_and(
-        |(current_browser_context_id, current_target_id)| {
+    let target_is_current = conn
+        .target_owner_identity_for_owner(&owner_scope)
+        .is_some_and(|(current_browser_context_id, current_target_id)| {
             current_browser_context_id == browser_context_id
                 && current_target_id.as_deref() == Some(target_id.as_str())
-        },
-    );
+        });
     if !target_is_current || !popup_target_has_loaded_page(conn, &browser_context_id, &target_id) {
         tracing::debug!(
             browser_context_id,
@@ -556,7 +543,13 @@ pub(crate) async fn complete_popup_target_navigation_owner_action_async(
             // runs. Another inspector session can attach after this action is
             // scheduled; that new session must be able to pause the initial
             // document before any target-URL request starts.
-            if !conn.runtime_session_owner_can_start_initial_document_navigation(None) {
+            if conn.target_has_waiting_for_debugger_session(&target_id)
+                || !conn
+                    .browser_context_by_id(&browser_context_id)
+                    .is_some_and(|browser_context| {
+                        browser_context.target_needs_initial_document_navigation(&target_id)
+                    })
+            {
                 return crate::conn::CdpTurnOutcome::new_with_protocol_events(
                     Vec::new(),
                     conn.take_scheduler_events(),
@@ -565,10 +558,10 @@ pub(crate) async fn complete_popup_target_navigation_owner_action_async(
         }
         PopupTargetNavigationKind::NamedTargetReuse => {}
     }
-    crate::domains::page::navigate_session_owner_from_renderer_background_events_async(
+    crate::domains::page::navigate_command_owner_from_renderer_background_events_async(
         conn,
         &mut protocol_events,
-        None,
+        &owner_scope,
         &url,
     )
     .await;
@@ -595,15 +588,13 @@ pub(crate) async fn complete_popup_target_activation_action_async(
     action: PopupTargetActivationAction,
 ) -> crate::conn::CdpTurnOutcome {
     let (owner_scope, browser_context_id, target_id) = action.into_parts();
-    let target_is_current =
-        conn.target_owner_identity_for_route(
-            owner_scope.session_id(),
-            owner_scope.session_owner_route(),
-        )
+    let target_is_current = conn
+        .target_owner_identity_for_owner(&owner_scope)
         .is_some_and(|(current_browser_context_id, current_target_id)| {
             current_browser_context_id == browser_context_id
                 && current_target_id.as_deref() == Some(target_id.as_str())
-        }) && popup_target_has_loaded_page(conn, &browser_context_id, &target_id);
+        })
+        && popup_target_has_loaded_page(conn, &browser_context_id, &target_id);
     if !target_is_current {
         tracing::debug!(
             browser_context_id,
@@ -656,24 +647,24 @@ async fn activate_popup_target_async(
         Ok(Vec::new())
     } else {
         match conn
-            .promote_background_target_to_active_for_connection_async(target_id)
+            .select_page_target_for_connection_async(target_id)
             .await
         {
             Ok(Some(activation)) => Ok(activation.into_protocol_events()),
             Ok(None) => Err("PopupTargetUnavailable".to_owned()),
-            Err(message) => Err(message),
+            Err(error) => Err(error.to_string()),
         }
     };
     restore_previously_active_browser_context(conn, restore_browser_context_id.as_deref());
     result
 }
 
-pub(crate) fn emit_target_info_changed_for_session_owner_background_event(
+pub(crate) fn emit_target_info_changed_for_owner_background_event(
     conn: &mut CdpConnection,
     out: &mut Vec<BackgroundProtocolEvent>,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
 ) {
-    out.extend(conn.target_info_changed_event_plan_for_session_owner(session_id));
+    out.extend(conn.target_info_changed_event_plan_for_owner(owner));
 }
 
 fn emit_target_info_changed_for_target_background_event(

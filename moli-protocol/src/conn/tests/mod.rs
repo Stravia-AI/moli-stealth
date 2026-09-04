@@ -7,10 +7,9 @@ use super::{
     BrowserContextFirstCookieRequest, BrowserContextReservedSiteDataOwnerState,
     BrowserContextSiteDataManagerOwnerState, BrowserContextStructuredCookieCommandVerdict,
     BrowserContextStructuredCookieWriteBackendStatus,
-    BrowserContextStructuredCookieWriteReadinessStatus, CdpConnection, CdpSessionRoute,
-    CommandDispatchContext, CommandResponseFlushContext, NavigationBackgroundEvent,
-    NavigationDispatchState, NavigationResultProjection, ServiceWorkerTargetState,
-    SharedWorkerTargetState, build_event,
+    BrowserContextStructuredCookieWriteReadinessStatus, CdpConnection, CommandDispatchContext,
+    CommandResponseFlushContext, NavigationBackgroundEvent, NavigationDispatchState,
+    NavigationResultProjection, ServiceWorkerTargetState, SharedWorkerTargetState, build_event,
 };
 use crate::devtools_runtime::{
     AutomationEvent, DevToolsFrameId, DevToolsLoaderId, DevToolsTargetFilterEntry,
@@ -425,24 +424,28 @@ fn background_navigation_completion_sender_routes_explicit_session_owners() {
     let mut active = BrowserContext::new("BID-active".to_owned());
     active.set_active_target_id("TID-active");
     active.attach_active_session("SID-active");
-    conn.browser_context = Some(active);
+    conn.install_browser_context_fixture_for_test(active);
 
     let mut inactive = BrowserContext::new("BID-inactive".to_owned());
     inactive.set_active_target_id("TID-inactive");
     inactive.attach_active_session("SID-inactive");
-    conn.inactive_browser_contexts.push(inactive);
+    conn.push_inactive_browser_context_fixture_for_test(inactive);
 
     let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
     conn.set_background_navigation_completion_sender(sender);
 
     assert!(
-        conn.background_navigation_completion_sender_for_session_owner(Some("SID-active"))
-            .is_some(),
+        conn.background_navigation_completion_sender_for_owner(
+            &crate::conn::CommandOwnerScope::for_session("SID-active")
+        )
+        .is_some(),
         "a command scoped to a concrete target owner can continue navigation work in the background"
     );
     assert!(
-        conn.background_navigation_completion_sender_for_session_owner(Some("SID-inactive"))
-            .is_some(),
+        conn.background_navigation_completion_sender_for_owner(
+            &crate::conn::CommandOwnerScope::for_session("SID-inactive")
+        )
+        .is_some(),
         "inactive-context target owners should also be routable by explicit session id"
     );
 }
@@ -456,13 +459,13 @@ fn navigation_gate_resolves_websocket_events_to_their_session_target() {
     let navigation_a = target_a
         .start_document_navigation_for_active_target("LOADER-A".to_owned())
         .expect("target A should accept a navigation request");
-    conn.browser_context = Some(target_a);
+    conn.install_browser_context_fixture_for_test(target_a);
     assert!(conn.arm_background_navigation_completion(&navigation_a, None));
 
     let mut target_b = BrowserContext::new("BID-B".to_owned());
     target_b.set_active_target_id("TID-B");
     target_b.attach_active_session("SID-B");
-    conn.inactive_browser_contexts.push(target_b);
+    conn.push_inactive_browser_context_fixture_for_test(target_b);
 
     let target_b_websocket = BackgroundProtocolEvent::immediate(json!({
         "method": "Network.webSocketClosed",
@@ -487,35 +490,6 @@ fn navigation_gate_resolves_websocket_events_to_their_session_target() {
 }
 
 #[test]
-fn none_session_owner_route_override_scope_restores_previous_route_on_drop() {
-    let mut conn = CdpConnection::new();
-    let previous_route = CdpSessionRoute::PageTarget {
-        browser_context_id: "BID-active".to_owned(),
-        target_id: "TID-active".to_owned(),
-        is_attached_session: false,
-    };
-    let scoped_route = CdpSessionRoute::PageTarget {
-        browser_context_id: "BID-background".to_owned(),
-        target_id: "TID-background".to_owned(),
-        is_attached_session: false,
-    };
-
-    conn.replace_none_session_owner_route_override(Some(previous_route.clone()));
-    {
-        let mut scope = conn.scoped_none_session_owner_route_override(scoped_route.clone());
-        assert_eq!(
-            scope.conn_mut().none_session_owner_route_override(),
-            Some(scoped_route)
-        );
-    }
-
-    assert_eq!(
-        conn.none_session_owner_route_override(),
-        Some(previous_route)
-    );
-}
-
-#[test]
 fn navigation_background_event_queue_drains_current_token() {
     let mut conn = CdpConnection::new();
     let mut browser_context = BrowserContext::new("CTX-nav".to_owned());
@@ -523,7 +497,7 @@ fn navigation_background_event_queue_drains_current_token() {
     let token = browser_context
         .start_document_navigation_for_active_target("LOADER-1".to_owned())
         .expect("active target should produce navigation token");
-    conn.browser_context = Some(browser_context);
+    conn.install_browser_context_fixture_for_test(browser_context);
     let message = build_event(
         "Page.frameStartedLoading",
         json!({ "frameId": "TID-nav" }),
@@ -617,7 +591,7 @@ fn activating_another_target_retains_pending_initial_document_engine() {
         .as_mut()
         .expect("browser context")
         .stage_background_target(
-            "TID-promoted".to_owned(),
+            "TID-activated".to_owned(),
             None,
             "about:blank".to_owned(),
             Some("about:blank".to_owned()),
@@ -626,7 +600,7 @@ fn activating_another_target_retains_pending_initial_document_engine() {
     conn.browser_context
         .as_mut()
         .expect("browser context")
-        .set_active_target_id("TID-promoted");
+        .set_active_target_id("TID-activated");
 
     let retained = conn
         .browser_context_by_id("CTX-pending-target")
@@ -640,7 +614,7 @@ fn activating_another_target_retains_pending_initial_document_engine() {
 }
 
 #[tokio::test]
-async fn removing_active_browser_context_switches_engine_to_promoted_context() {
+async fn removing_active_browser_context_switches_engine_to_activated_context() {
     let mut conn = CdpConnection::new();
     let mut first = conn.new_browser_context("CTX-first".to_owned());
     first.set_active_target_id("TID-first");
@@ -801,13 +775,16 @@ async fn replacing_or_retiring_a_loaded_page_changes_its_attachment_identity() {
     ));
     let context = conn.browser_context.as_mut().unwrap();
     assert_eq!(
-        context.active_target.runtime_slot.page_attachment_id(),
+        context
+            .active_page_target()
+            .runtime_slot
+            .page_attachment_id(),
         None
     );
 
     assert!(context.replace_loaded_page(Some(first_page)).is_none());
     let first_attachment = context
-        .active_target
+        .active_page_target()
         .runtime_slot
         .page_attachment_id()
         .expect("first Page attachment");
@@ -816,7 +793,7 @@ async fn replacing_or_retiring_a_loaded_page_changes_its_attachment_identity() {
         .replace_loaded_page(Some(second_page))
         .expect("first Page should be replaced");
     let second_attachment = context
-        .active_target
+        .active_page_target()
         .runtime_slot
         .page_attachment_id()
         .expect("second Page attachment");
@@ -827,7 +804,10 @@ async fn replacing_or_retiring_a_loaded_page_changes_its_attachment_identity() {
         .clear_loaded_page_with_reason(TargetPageAbsenceReason::TargetClosed)
         .expect("second Page should be retired");
     assert_eq!(
-        context.active_target.runtime_slot.page_attachment_id(),
+        context
+            .active_page_target()
+            .runtime_slot
+            .page_attachment_id(),
         None
     );
     let _ = second.close_async().await;
@@ -846,10 +826,11 @@ async fn moli_diagnostics_preserves_runtime_observable_diagnostics() {
     browser_context.attach_active_session("SID-diagnostics-capture");
     browser_context.set_target_url(page.final_url().as_str().to_owned());
     let _ = browser_context
-        .active_target
+        .active_page_target_mut()
         .runtime_slot
         .replace_loaded_page(Some(page));
-    ctx.conn.browser_context = Some(browser_context);
+    ctx.conn
+        .install_browser_context_fixture_for_test(browser_context);
 
     ctx.process_async(json!({
         "id": 44_100,
@@ -1019,7 +1000,12 @@ async fn memory_diagnostics_sync_counts_dedicated_worker_from_cached_page_snapsh
         let ready_response = conn
             .browser_context
             .as_mut()
-            .and_then(|context| context.active_target.runtime_slot.loaded_page_mut())
+            .and_then(|context| {
+                context
+                    .active_page_target_mut()
+                    .runtime_slot
+                    .loaded_page_mut()
+            })
             .expect("loaded sync diagnostics page")
             .evaluate_runtime_expression_async("globalThis.__lmSyncDiagnosticsWorkerReady === true")
             .await
@@ -1221,41 +1207,6 @@ fn page_navigation_engines_remain_target_local_across_selection() {
     );
 }
 
-#[test]
-fn page_target_host_rejects_a_foreign_browser_context_engine() {
-    let mut conn = CdpConnection::new();
-    let mut context = BrowserContext::new("BID-retain-route".to_owned());
-    context.set_active_target_id("TID-retain-route");
-    conn.insert_browser_context(context);
-    let original_owner = conn
-        .active_navigation_engine()
-        .renderer_owner_id_for_diagnostics();
-    let foreign_context = BrowserContext::new("BID-retain-route-foreign".to_owned());
-    let foreign_engine = NavigationEngine::new_with_fetch_config_and_browser_context_access(
-        FetchConfig::default(),
-        foreign_context.renderer_runtime_owner_access(),
-        conn.standalone_navigation_engine
-            .ensure()
-            .optional_resource_fetch_mask(),
-        conn.standalone_navigation_engine
-            .ensure()
-            .subframe_loading_enabled(),
-    )
-    .expect("foreign context owner should be live during the regression");
-
-    let error = conn
-        .install_page_navigation_engine("BID-retain-route", "TID-retain-route", foreign_engine)
-        .expect_err("a PageTargetHost must reject an engine from another BrowserContext");
-
-    assert!(error.contains("does not match BrowserContext `BID-retain-route`"));
-    assert_eq!(
-        conn.active_navigation_engine()
-            .renderer_owner_id_for_diagnostics(),
-        original_owner,
-        "rejecting a foreign engine must preserve the host's resident engine"
-    );
-}
-
 #[tokio::test]
 async fn memory_diagnostics_splits_pending_inspector_await_counts_by_target_owner() {
     let mut conn = CdpConnection::new();
@@ -1276,9 +1227,11 @@ async fn memory_diagnostics_splits_pending_inspector_await_counts_by_target_owne
     browser_context.set_active_target_id("TID-pending-await-active");
     browser_context.attach_active_session("SID-pending-await-active");
     browser_context.replace_loaded_page(Some(active_page));
-    browser_context.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+    browser_context.active_page_target_mut().devtools_sessions
+        [moli_page_types::DevToolsSessionKey::Primary]
         .register_pending_inspector_await(10_001, Some("SID-pending-await-active"), None);
-    browser_context.devtools_sessions[moli_page_types::DevToolsSessionKey::Primary]
+    browser_context.active_page_target_mut().devtools_sessions
+        [moli_page_types::DevToolsSessionKey::Primary]
         .register_pending_inspector_await(
             10_002,
             Some("SID-pending-await-active"),
@@ -1396,7 +1349,7 @@ async fn memory_diagnostics_splits_pending_inspector_await_counts_by_target_owne
     );
     assert_eq!(
         diagnostics["activeBrowserContext"]["targetHosts"]["pendingInspectorAwaitCount"],
-        json!(1)
+        json!(3)
     );
 }
 
@@ -1411,7 +1364,7 @@ fn navigation_background_event_queue_drops_stale_token() {
     let current = browser_context
         .start_document_navigation_for_active_target("LOADER-2".to_owned())
         .expect("active target should produce current token");
-    conn.browser_context = Some(browser_context);
+    conn.install_browser_context_fixture_for_test(browser_context);
     let stale_message = build_event(
         "Page.frameStartedLoading",
         json!({ "frameId": "TID-nav", "loaderId": "LOADER-1" }),
@@ -1449,7 +1402,7 @@ fn navigation_background_event_queue_preserves_order_for_current_token() {
     let current = browser_context
         .start_document_navigation_for_active_target("LOADER-2".to_owned())
         .expect("active target should produce current navigation token");
-    conn.browser_context = Some(browser_context);
+    conn.install_browser_context_fixture_for_test(browser_context);
 
     let stale_message = build_event(
         "Page.frameStartedLoading",
@@ -1496,7 +1449,7 @@ fn navigation_background_event_sender_preserves_typed_sidecar_for_current_token(
     let current = browser_context
         .start_document_navigation_for_active_target("LOADER-typed".to_owned())
         .expect("active target should produce current navigation token");
-    conn.browser_context = Some(browser_context);
+    conn.install_browser_context_fixture_for_test(browser_context);
     let message = build_event(
         "Page.frameStartedNavigating",
         json!({
@@ -1546,7 +1499,7 @@ async fn materialized_navigation_completion_drops_stale_token() {
     let _current = browser_context
         .start_document_navigation_for_active_target("LOADER-2".to_owned())
         .expect("active target should produce current token");
-    conn.browser_context = Some(browser_context);
+    conn.install_browser_context_fixture_for_test(browser_context);
     let state =
         materialized_navigation_test_state(Some(7), "LOADER-1", "https://example.test/stale");
     let navigation =
@@ -1598,7 +1551,7 @@ async fn materialized_navigation_completion_drops_stale_token_without_navigate_i
     let _ = browser_context
         .start_document_navigation_for_active_target("LOADER-2".to_owned())
         .expect("active target should produce current navigation token");
-    conn.browser_context = Some(browser_context);
+    conn.install_browser_context_fixture_for_test(browser_context);
     let state =
         materialized_navigation_test_state(None, "LOADER-1", "https://example.test/stale-no-id");
     let navigation =
@@ -1632,7 +1585,7 @@ async fn materialized_navigation_completion_drains_current_token() {
     let current = browser_context
         .start_document_navigation_for_active_target("LOADER-1".to_owned())
         .expect("active target should produce current token");
-    conn.browser_context = Some(browser_context);
+    conn.install_browser_context_fixture_for_test(browser_context);
     let state =
         materialized_navigation_test_state(Some(8), "LOADER-1", "https://example.test/current");
     let navigation =
@@ -1668,7 +1621,7 @@ fn materialized_navigation_test_state(
 ) -> NavigationDispatchState {
     NavigationDispatchState {
         navigate_id,
-        navigate_session_id: None,
+        owner: crate::conn::CommandOwnerScope::for_route(crate::conn::CdpSessionRoute::Browser),
         result_projection: NavigationResultProjection::Cdp(
             json!({ "frameId": "TID-nav", "loaderId": loader_id }),
         ),

@@ -4,11 +4,11 @@ mod gate;
 mod tests;
 
 use moli_cookie_jar::{StoredCookieQueryReport, StoredCookieSetReport};
+use moli_core::RendererOutputFence;
 use moli_core::page::{
     NavigationRedirect, Page, RendererMainDocumentCommit, RendererPageCreationArtifacts,
     RendererPendingDownloadActivation, RendererRuntimeRealmInfo, SubresourceRequestInitiatorType,
 };
-use moli_core::{RendererOutputFence, runtime::NavigationEngine};
 use moli_fetch::{
     NegotiatedHttpVersion, NetworkExchangeObservation, NetworkObservationJournal, RedirectInfo,
     StreamingRawResponse,
@@ -42,7 +42,6 @@ pub(crate) struct MaterializedLoadedDocumentProgress {
     pub(crate) renderer_output_predecessor: Option<RendererOutputFence>,
     pub(crate) main_document_commit: Option<Arc<RendererMainDocumentCommit>>,
     pub(crate) progress_gate: MainDocumentProgressGate,
-    pub(crate) navigation_engine: Option<NavigationEngine>,
     pub(crate) network_error_page: Option<crate::conn::NetworkErrorPageNavigation>,
 }
 
@@ -309,7 +308,6 @@ pub(crate) fn materialize_loaded_navigation_progress(
         renderer_output_predecessor,
         main_document_commit,
         document_progress_transfer,
-        navigation_engine,
         network_error_page,
         ..
     } = navigation;
@@ -330,7 +328,6 @@ pub(crate) fn materialize_loaded_navigation_progress(
         renderer_output_predecessor,
         main_document_commit,
         progress_gate,
-        navigation_engine,
         network_error_page,
     }
 }

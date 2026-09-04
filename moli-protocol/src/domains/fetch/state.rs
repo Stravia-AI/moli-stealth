@@ -1,5 +1,5 @@
 use crate::conn::{
-    CdpConnection, PendingFetchAuthNavigation, PendingFetchNavigation,
+    CdpConnection, CommandOwnerScope, PendingFetchAuthNavigation, PendingFetchNavigation,
     PendingSubresourceFetchAuthRequest, PendingSubresourceFetchRequest,
     PendingSubresourceFetchResponseRequest,
 };
@@ -11,23 +11,24 @@ use super::patterns::validate_request_id;
 /// Correlation state installed before renderer work can produce an observable
 /// subresource completion. The command keeps this token only so a failed
 /// renderer dispatch can remove the prepared entry again.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(super) struct PreparedSubresourceCorrelation {
     internal_id: u64,
     registered: bool,
+    owner_scope: CommandOwnerScope,
 }
 
 impl PreparedSubresourceCorrelation {
     pub(super) fn prepare(
         conn: &mut CdpConnection,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         request_id: &str,
         pending: &PendingSubresourceFetchRequest,
         should_register: bool,
     ) -> Option<Self> {
         if should_register
-            && !conn.register_in_flight_subresource_fetch_request_for_session_owner(
-                session_id,
+            && !conn.register_in_flight_subresource_fetch_request_for_owner(
+                owner,
                 Some(request_id.to_owned()),
                 pending.clone(),
             )
@@ -37,13 +38,14 @@ impl PreparedSubresourceCorrelation {
         Some(Self {
             internal_id: pending.internal_id,
             registered: should_register,
+            owner_scope: owner.clone(),
         })
     }
 
-    pub(super) fn rollback(self, conn: &mut CdpConnection, session_id: Option<&str>) {
+    pub(super) fn rollback(self, conn: &mut CdpConnection) {
         if self.registered {
-            conn.take_in_flight_subresource_fetch_request_for_session_owner(
-                session_id,
+            conn.take_in_flight_subresource_fetch_request_for_owner(
+                &self.owner_scope,
                 self.internal_id,
             );
         }
@@ -51,22 +53,21 @@ impl PreparedSubresourceCorrelation {
 
     pub(super) fn prepare_deferred_response_stage(
         conn: &mut CdpConnection,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         request_id: &str,
         pending: &PendingSubresourceFetchRequest,
     ) -> Option<Self> {
-        if !conn
-            .register_in_flight_deferred_response_stage_subresource_fetch_request_for_session_owner(
-                session_id,
-                Some(request_id.to_owned()),
-                pending.clone(),
-            )
-        {
+        if !conn.register_in_flight_deferred_response_stage_subresource_fetch_request_for_owner(
+            owner,
+            Some(request_id.to_owned()),
+            pending.clone(),
+        ) {
             return None;
         }
         Some(Self {
             internal_id: pending.internal_id,
             registered: true,
+            owner_scope: owner.clone(),
         })
     }
 }
@@ -85,43 +86,41 @@ pub(crate) fn action_session_id_for_devtools_context<'a>(
 
 pub(crate) fn pending_request_action_output_plan(
     conn: &mut CdpConnection,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     request_id: &str,
 ) -> CommandOutputPlan {
-    pending_request_action_result(conn, session_id, request_id)
+    pending_request_action_result(conn, owner, request_id)
         .map_or_else(|plan| plan, |()| CommandOutputPlan::success())
 }
 
 pub(crate) fn pending_request_action_result(
     conn: &mut CdpConnection,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     request_id: &str,
 ) -> Result<(), CommandOutputPlan> {
-    pending_request_action_result_with_id_validation(conn, session_id, request_id, true)
+    pending_request_action_result_with_id_validation(conn, owner, request_id, true)
 }
 
 pub(crate) fn pending_request_action_output_plan_with_id_validation(
     conn: &mut CdpConnection,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     request_id: &str,
     validate_id: bool,
 ) -> CommandOutputPlan {
-    pending_request_action_result_with_id_validation(conn, session_id, request_id, validate_id)
+    pending_request_action_result_with_id_validation(conn, owner, request_id, validate_id)
         .map_or_else(|plan| plan, |()| CommandOutputPlan::success())
 }
 
 pub(crate) fn pending_request_action_result_with_id_validation(
     conn: &mut CdpConnection,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     request_id: &str,
     validate_id: bool,
 ) -> Result<(), CommandOutputPlan> {
     if validate_id && validate_request_id(request_id).is_err() {
         return Err(CommandOutputPlan::error(-32602, "InvalidParams"));
     }
-    let Some(result) =
-        conn.consume_pending_request_action_for_session_owner(session_id, request_id)
-    else {
+    let Some(result) = conn.consume_pending_request_action_for_owner(owner, request_id) else {
         return Err(CommandOutputPlan::error(-31998, "BrowserContextNotLoaded"));
     };
     if result.is_err() {
@@ -132,64 +131,48 @@ pub(crate) fn pending_request_action_result_with_id_validation(
 
 pub(crate) fn take_pending_navigation(
     conn: &mut CdpConnection,
-    owner_session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     action_session_id: Option<&str>,
     request_id: &str,
 ) -> Option<PendingFetchNavigation> {
-    conn.take_pending_fetch_navigation_for_session_owner(
-        owner_session_id,
-        action_session_id,
-        request_id,
-    )
+    conn.take_pending_fetch_navigation_for_owner(owner, action_session_id, request_id)
 }
 
 pub(crate) fn take_pending_auth_navigation_for_action_session(
     conn: &mut CdpConnection,
-    owner_session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     action_session_id: Option<&str>,
     request_id: &str,
 ) -> Option<PendingFetchAuthNavigation> {
-    conn.take_pending_fetch_auth_navigation_for_action_session_owner(
-        owner_session_id,
-        action_session_id,
-        request_id,
-    )
+    conn.take_pending_fetch_auth_navigation_for_owner(owner, action_session_id, request_id)
 }
 
 pub(crate) fn take_pending_subresource_fetch_request_for_action_session(
     conn: &mut CdpConnection,
-    owner_session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     action_session_id: Option<&str>,
     request_id: &str,
 ) -> Option<PendingSubresourceFetchRequest> {
-    conn.take_pending_subresource_fetch_request_for_action_session_owner(
-        owner_session_id,
-        action_session_id,
-        request_id,
-    )
+    conn.take_pending_subresource_fetch_request_for_owner(owner, action_session_id, request_id)
 }
 
 pub(crate) fn take_pending_subresource_auth_request_for_action_session(
     conn: &mut CdpConnection,
-    owner_session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     action_session_id: Option<&str>,
     request_id: &str,
 ) -> Option<PendingSubresourceFetchAuthRequest> {
-    conn.take_pending_subresource_fetch_auth_request_for_action_session_owner(
-        owner_session_id,
-        action_session_id,
-        request_id,
-    )
+    conn.take_pending_subresource_fetch_auth_request_for_owner(owner, action_session_id, request_id)
 }
 
 pub(crate) fn take_pending_subresource_response_request_for_action_session(
     conn: &mut CdpConnection,
-    owner_session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     action_session_id: Option<&str>,
     request_id: &str,
 ) -> Option<PendingSubresourceFetchResponseRequest> {
-    conn.take_pending_subresource_fetch_response_request_for_action_session_owner(
-        owner_session_id,
+    conn.take_pending_subresource_fetch_response_request_for_owner(
+        owner,
         action_session_id,
         request_id,
     )
@@ -197,25 +180,21 @@ pub(crate) fn take_pending_subresource_response_request_for_action_session(
 
 pub(crate) fn pending_subresource_response_request_for_action_session(
     conn: &mut CdpConnection,
-    owner_session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     action_session_id: Option<&str>,
     request_id: &str,
 ) -> Option<PendingSubresourceFetchResponseRequest> {
-    conn.pending_subresource_fetch_response_request_for_action_session_owner(
-        owner_session_id,
-        action_session_id,
-        request_id,
-    )
+    conn.pending_subresource_fetch_response_request_for_owner(owner, action_session_id, request_id)
 }
 
 pub(crate) fn mark_pending_subresource_response_body_taken_as_stream_for_action_session(
     conn: &mut CdpConnection,
-    owner_session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     action_session_id: Option<&str>,
     request_id: &str,
 ) -> bool {
-    conn.mark_pending_subresource_fetch_response_body_taken_as_stream_for_action_session_owner(
-        owner_session_id,
+    conn.mark_pending_subresource_fetch_response_body_taken_as_stream_for_owner(
+        owner,
         action_session_id,
         request_id,
     )

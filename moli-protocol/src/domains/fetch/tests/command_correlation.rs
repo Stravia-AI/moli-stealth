@@ -18,10 +18,11 @@ async fn context_with_loaded_fetch_page() -> TestContext {
         .expect("fetch correlation page should load");
     let mut browser_context = attached_browser_context();
     browser_context
-        .active_target
+        .active_page_target_mut()
         .runtime_slot
         .replace_loaded_page(Some(page));
-    ctx.conn.browser_context = Some(browser_context);
+    ctx.conn
+        .install_browser_context_fixture_for_test(browser_context);
     ctx
 }
 
@@ -130,7 +131,10 @@ async fn assert_correlation_lifetime(
     assert!(matches!(&step, CdpCommandTaskStep::Pending(_)));
     assert_eq!(
         ctx.conn
-            .in_flight_subresource_fetch_request_id_for_session_owner(Some("SID-1"), internal_id,)
+            .in_flight_subresource_fetch_request_id_for_owner(
+                &crate::conn::CommandOwnerScope::for_session("SID-1"),
+                internal_id,
+            )
             .as_deref(),
         Some(request_id),
         "renderer-visible network work must have protocol correlation state"
@@ -144,8 +148,10 @@ async fn assert_correlation_lifetime(
         "the synthetic unknown renderer request should fail"
     );
     assert_eq!(
-        ctx.conn
-            .in_flight_subresource_fetch_request_id_for_session_owner(Some("SID-1"), internal_id,),
+        ctx.conn.in_flight_subresource_fetch_request_id_for_owner(
+            &crate::conn::CommandOwnerScope::for_session("SID-1"),
+            internal_id,
+        ),
         None,
         "failed renderer completion must roll back prepared correlation state"
     );
@@ -162,7 +168,8 @@ async fn deferred_fetch_command_keeps_its_exact_page_for_implicit_work() {
         Some("SID-background".to_owned()),
         "https://example.test/background".to_owned(),
     ));
-    ctx.conn.browser_context = Some(browser_context);
+    ctx.conn
+        .install_browser_context_fixture_for_test(browser_context);
 
     let completed = PendingFetchCommandDispatch::new(
         &ctx.conn,
@@ -173,10 +180,9 @@ async fn deferred_fetch_command_keeps_its_exact_page_for_implicit_work() {
     )
     .wait()
     .await;
-    let mut scope = completed.owner_scope.enter(&mut ctx.conn);
-
     assert_eq!(
-        scope.conn_mut().target_owner_identity_for_session(None),
+        ctx.conn
+            .target_owner_identity_for_owner(&completed.owner_scope,),
         Some(("BID-1".to_owned(), Some("TID-background".to_owned()))),
         "protocol-neutral completion work must stay on the Page that issued the Fetch command"
     );
@@ -192,7 +198,8 @@ async fn deferred_sessionless_fetch_command_freezes_the_active_page_at_admission
         None,
         "https://example.test/next".to_owned(),
     ));
-    ctx.conn.browser_context = Some(browser_context);
+    ctx.conn
+        .install_browser_context_fixture_for_test(browser_context);
 
     let completed = PendingFetchCommandDispatch::new(
         &ctx.conn,
@@ -208,10 +215,9 @@ async fn deferred_sessionless_fetch_command_freezes_the_active_page_at_admission
         .as_mut()
         .expect("browser context")
         .set_active_target_id("TID-next");
-    let mut scope = completed.owner_scope.enter(&mut ctx.conn);
-
     assert_eq!(
-        scope.conn_mut().target_owner_identity_for_session(None),
+        ctx.conn
+            .target_owner_identity_for_owner(&completed.owner_scope,),
         Some((
             "BID-sessionless".to_owned(),
             Some("TID-original".to_owned())
@@ -273,8 +279,8 @@ async fn pending_fetch_command_state_is_bound_to_page_attachment() {
         .replace_page_attachment_id_for_test();
     assert!(
         ctx.conn
-            .take_pending_subresource_fetch_request_for_action_session_owner(
-                Some("SID-1"),
+            .take_pending_subresource_fetch_request_for_owner(
+                &crate::conn::CommandOwnerScope::for_session("SID-1"),
                 Some("SID-1"),
                 "INT-collision",
             )
@@ -298,8 +304,8 @@ async fn pending_fetch_command_state_is_bound_to_page_attachment() {
     );
     assert_eq!(
         ctx.conn
-            .take_pending_subresource_fetch_request_for_action_session_owner(
-                Some("SID-1"),
+            .take_pending_subresource_fetch_request_for_owner(
+                &crate::conn::CommandOwnerScope::for_session("SID-1"),
                 Some("SID-1"),
                 "INT-collision",
             )
@@ -327,8 +333,8 @@ async fn completed_continue_atomically_claims_a_pause_still_pending_publication(
 
     assert!(
         ctx.conn
-            .claim_subresource_continue_request_for_session_owner(
-                Some("SID-1"),
+            .claim_subresource_continue_request_for_owner(
+                &crate::conn::CommandOwnerScope::for_session("SID-1"),
                 &page_owner,
                 74,
                 false,
@@ -338,7 +344,12 @@ async fn completed_continue_atomically_claims_a_pause_still_pending_publication(
     );
     let claimed = ctx
         .conn
-        .claim_subresource_continue_request_for_session_owner(Some("SID-1"), &page_owner, 74, true)
+        .claim_subresource_continue_request_for_owner(
+            &crate::conn::CommandOwnerScope::for_session("SID-1"),
+            &page_owner,
+            74,
+            true,
+        )
         .expect("terminal completion should claim the still-pending pause");
     let ClaimedSubresourceContinueRequest::PendingCompletion(pending) = claimed else {
         panic!("terminal completion must preserve the pending-publication race state");
@@ -346,8 +357,8 @@ async fn completed_continue_atomically_claims_a_pause_still_pending_publication(
     assert_eq!(pending.network_request_id, "NETWORK-74");
     assert!(
         ctx.conn
-            .claim_subresource_continue_request_for_session_owner(
-                Some("SID-1"),
+            .claim_subresource_continue_request_for_owner(
+                &crate::conn::CommandOwnerScope::for_session("SID-1"),
                 &page_owner,
                 74,
                 true,
@@ -367,16 +378,16 @@ async fn completed_continue_atomically_claims_a_pause_still_pending_publication(
     let replacement = pending_request(&replacement_owner, 75);
     assert!(
         ctx.conn
-            .register_in_flight_subresource_fetch_request_for_session_owner(
-                Some("SID-1"),
+            .register_in_flight_subresource_fetch_request_for_owner(
+                &crate::conn::CommandOwnerScope::for_session("SID-1"),
                 Some("INT-replacement".to_owned()),
                 replacement,
             )
     );
     assert!(
         ctx.conn
-            .claim_subresource_continue_request_for_session_owner(
-                Some("SID-1"),
+            .claim_subresource_continue_request_for_owner(
+                &crate::conn::CommandOwnerScope::for_session("SID-1"),
                 &page_owner,
                 75,
                 true,
@@ -386,7 +397,10 @@ async fn completed_continue_atomically_claims_a_pause_still_pending_publication(
     );
     assert_eq!(
         ctx.conn
-            .in_flight_subresource_fetch_request_id_for_session_owner(Some("SID-1"), 75)
+            .in_flight_subresource_fetch_request_id_for_owner(
+                &crate::conn::CommandOwnerScope::for_session("SID-1"),
+                75
+            )
             .as_deref(),
         Some("INT-replacement"),
         "a rejected stale capture must leave the replacement request resident"
@@ -402,8 +416,8 @@ async fn continuation_claim_preserves_state_owned_by_a_different_page_residence(
         .expect("initial Page residence should exist");
     assert!(
         ctx.conn
-            .register_in_flight_subresource_fetch_request_for_session_owner(
-                Some("SID-1"),
+            .register_in_flight_subresource_fetch_request_for_owner(
+                &crate::conn::CommandOwnerScope::for_session("SID-1"),
                 Some("INT-retired-in-flight".to_owned()),
                 pending_request(&retired_owner, 76),
             )
@@ -428,8 +442,8 @@ async fn continuation_claim_preserves_state_owned_by_a_different_page_residence(
 
     assert!(
         ctx.conn
-            .claim_subresource_continue_request_for_session_owner(
-                Some("SID-1"),
+            .claim_subresource_continue_request_for_owner(
+                &crate::conn::CommandOwnerScope::for_session("SID-1"),
                 &replacement_owner,
                 76,
                 false,
@@ -439,8 +453,8 @@ async fn continuation_claim_preserves_state_owned_by_a_different_page_residence(
     );
     assert!(
         ctx.conn
-            .claim_subresource_continue_request_for_session_owner(
-                Some("SID-1"),
+            .claim_subresource_continue_request_for_owner(
+                &crate::conn::CommandOwnerScope::for_session("SID-1"),
                 &replacement_owner,
                 77,
                 true,
@@ -455,8 +469,8 @@ async fn continuation_claim_preserves_state_owned_by_a_different_page_residence(
         .install_page_attachment_id_for_test(retired_owner.page_attachment_id());
     let ClaimedSubresourceContinueRequest::InFlight(in_flight) = ctx
         .conn
-        .claim_subresource_continue_request_for_session_owner(
-            Some("SID-1"),
+        .claim_subresource_continue_request_for_owner(
+            &crate::conn::CommandOwnerScope::for_session("SID-1"),
             &retired_owner,
             76,
             false,
@@ -472,8 +486,8 @@ async fn continuation_claim_preserves_state_owned_by_a_different_page_residence(
 
     let ClaimedSubresourceContinueRequest::PendingCompletion(pending) = ctx
         .conn
-        .claim_subresource_continue_request_for_session_owner(
-            Some("SID-1"),
+        .claim_subresource_continue_request_for_owner(
+            &crate::conn::CommandOwnerScope::for_session("SID-1"),
             &retired_owner,
             77,
             true,
@@ -507,8 +521,8 @@ async fn pending_fetch_auth_state_is_bound_to_page_attachment() {
         .replace_page_attachment_id_for_test();
     assert!(
         ctx.conn
-            .take_pending_subresource_fetch_auth_request_for_action_session_owner(
-                Some("SID-1"),
+            .take_pending_subresource_fetch_auth_request_for_owner(
+                &crate::conn::CommandOwnerScope::for_session("SID-1"),
                 Some("SID-1"),
                 "AUTH-collision",
             )
@@ -532,8 +546,8 @@ async fn pending_fetch_auth_state_is_bound_to_page_attachment() {
     );
     assert_eq!(
         ctx.conn
-            .take_pending_subresource_fetch_auth_request_for_action_session_owner(
-                Some("SID-1"),
+            .take_pending_subresource_fetch_auth_request_for_owner(
+                &crate::conn::CommandOwnerScope::for_session("SID-1"),
                 Some("SID-1"),
                 "AUTH-collision",
             )
@@ -565,8 +579,8 @@ async fn pending_fetch_response_state_is_bound_to_page_attachment() {
         .replace_page_attachment_id_for_test();
     assert!(
         ctx.conn
-            .take_pending_subresource_fetch_response_request_for_action_session_owner(
-                Some("SID-1"),
+            .take_pending_subresource_fetch_response_request_for_owner(
+                &crate::conn::CommandOwnerScope::for_session("SID-1"),
                 Some("SID-1"),
                 "RESPONSE-collision",
             )
@@ -590,8 +604,8 @@ async fn pending_fetch_response_state_is_bound_to_page_attachment() {
     );
     assert_eq!(
         ctx.conn
-            .take_pending_subresource_fetch_response_request_for_action_session_owner(
-                Some("SID-1"),
+            .take_pending_subresource_fetch_response_request_for_owner(
+                &crate::conn::CommandOwnerScope::for_session("SID-1"),
                 Some("SID-1"),
                 "RESPONSE-collision",
             )

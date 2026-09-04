@@ -399,10 +399,7 @@ pub(crate) fn complete_pending_css_command(
     } = completed;
     let session_id = owner_scope.session_id();
     let Some(page) = conn
-        .loaded_page_mut_for_protocol_access_for_route(
-            session_id,
-            owner_scope.session_owner_route(),
-        )
+        .loaded_page_mut_for_protocol_access_for_owner(&owner_scope)
         .ok()
     else {
         return CssCommandDispatchStep::Complete(CommandOutputPlan::error(
@@ -788,7 +785,7 @@ mod tests {
     async fn with_loaded_document_async(ctx: &mut TestContext, html: &str) {
         let mut bc = crate::conn::BrowserContext::new("BID-1".into());
         bc.set_active_target_id("TID-1");
-        ctx.conn.browser_context = Some(bc);
+        ctx.conn.install_browser_context_fixture_for_test(bc);
         ctx.install_navigation_fixture_for_session_owner(&format!("data:text/html,{html}"), None)
             .await;
         wait_until_renderer_document_load(ctx, None, "TID-1", LOADER_ID).await;
@@ -799,7 +796,7 @@ mod tests {
             .browser_context
             .as_mut()
             .expect("browser context")
-            .active_target
+            .active_page_target_mut()
             .runtime_slot
             .loaded_page_mut()
             .expect("loaded page")
@@ -918,16 +915,36 @@ mod tests {
         style_sheet_id
     }
 
-    async fn style_sheet_text_for_id_async(ctx: &mut TestContext, style_sheet_id: &str) -> String {
-        ctx.process_async(json!({
+    async fn style_sheet_text_for_id_async(
+        ctx: &mut TestContext,
+        session_id: Option<&str>,
+        style_sheet_id: &str,
+    ) -> String {
+        let mut command = json!({
             "id": 44,
             "method": "CSS.getStyleSheet",
             "params": { "styleSheetId": style_sheet_id }
-        }))
-        .await;
+        });
+        if let Some(session_id) = session_id {
+            command["sessionId"] = json!(session_id);
+        }
+        ctx.process_async(command).await;
         take_response_by_id(ctx, 44)["result"]["styleSheet"]["text"]
             .as_str()
             .expect("stylesheet text")
+            .to_owned()
+    }
+
+    async fn attach_page_session_async(ctx: &mut TestContext, target_id: &str) -> String {
+        ctx.process_async(json!({
+            "id": 42,
+            "method": "Target.attachToTarget",
+            "params": { "targetId": target_id, "flatten": true }
+        }))
+        .await;
+        take_response_by_id(ctx, 42)["result"]["sessionId"]
+            .as_str()
+            .expect("attached Page session id")
             .to_owned()
     }
 
@@ -991,7 +1008,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn css_loaded_page_methods_target_background_owner_without_promotion() {
+    async fn css_loaded_page_methods_target_background_owner_without_activation() {
         let mut ctx = TestContext::new();
         let background = PageTargetHost::with_url(
             "TID-background".to_owned(),
@@ -1003,7 +1020,7 @@ mod tests {
         bc.set_active_target_id("TID-active".to_owned());
         bc.attach_active_session("SID-active".to_owned());
         bc.insert_page_target_host(background);
-        ctx.conn.browser_context = Some(bc);
+        ctx.conn.install_browser_context_fixture_for_test(bc);
         ctx.install_navigation_fixture_for_session_owner(
             "data:text/html,<html><head><style title='owner'>body { color: red; }</style></head><body><div id='target' style='display:flex;width:123px;color:blue'></div></body></html>",
             Some("SID-background"),
@@ -1127,13 +1144,14 @@ mod tests {
         let mut active = BrowserContext::new("BID-active".to_owned());
         active.set_active_target_id("TID-active".to_owned());
         active.attach_active_session("SID-active".to_owned());
-        ctx.conn.browser_context = Some(active);
+        ctx.conn.install_browser_context_fixture_for_test(active);
 
         let mut inactive = BrowserContext::new("BID-inactive".to_owned());
         inactive.set_active_target_id("TID-inactive".to_owned());
         inactive.set_target_url("about:blank".to_owned());
         inactive.attach_active_session("SID-inactive".to_owned());
-        ctx.conn.inactive_browser_contexts.push(inactive);
+        ctx.conn
+            .push_inactive_browser_context_fixture_for_test(inactive);
         ctx.install_navigation_fixture_for_session_owner(
             "data:text/html,<html><head><style title='inactive'>main { color: red; }</style></head><body><main id='target' style='display:block;height:77px'></main></body></html>",
             Some("SID-inactive"),
@@ -1211,12 +1229,26 @@ mod tests {
 
         ctx.process_async(json!({"id": 101, "method": "CSS.enable"}))
             .await;
-        assert!(ctx.conn.browser_context.as_ref().unwrap().css_enabled);
+        assert!(
+            ctx.conn
+                .browser_context
+                .as_ref()
+                .unwrap()
+                .active_page_target()
+                .css_enabled
+        );
         ctx.expect_result(101, json!({}), None);
 
         ctx.process_async(json!({"id": 102, "method": "CSS.disable"}))
             .await;
-        assert!(!ctx.conn.browser_context.as_ref().unwrap().css_enabled);
+        assert!(
+            !ctx.conn
+                .browser_context
+                .as_ref()
+                .unwrap()
+                .active_page_target()
+                .css_enabled
+        );
         ctx.expect_result(102, json!({}), None);
     }
 
@@ -1406,7 +1438,14 @@ mod tests {
         }))
         .await;
         ctx.expect_result(116, json!({}), Some("SID-1"));
-        assert!(ctx.conn.browser_context.as_ref().unwrap().css_enabled);
+        assert!(
+            ctx.conn
+                .browser_context
+                .as_ref()
+                .unwrap()
+                .active_page_target()
+                .css_enabled
+        );
 
         ctx.process_async(json!({
             "id": 117,
@@ -1415,7 +1454,14 @@ mod tests {
         }))
         .await;
         ctx.expect_result(117, json!({}), Some("SID-1"));
-        assert!(!ctx.conn.browser_context.as_ref().unwrap().css_enabled);
+        assert!(
+            !ctx.conn
+                .browser_context
+                .as_ref()
+                .unwrap()
+                .active_page_target()
+                .css_enabled
+        );
     }
 
     #[tokio::test]
@@ -1640,7 +1686,7 @@ mod tests {
         let mut browser_context = BrowserContext::new("BID-css-owner-route".to_owned());
         browser_context.set_active_target_id("TID-css-active".to_owned());
         browser_context
-            .active_target
+            .active_page_target_mut()
             .runtime_slot
             .set_loaded_page_for_test(active_page);
         browser_context.stage_background_target(
@@ -1654,67 +1700,29 @@ mod tests {
             .background_target_mut("TID-css-background")
             .expect("background target")
             .replace_loaded_page(Some(background_page));
-        ctx.conn.browser_context = Some(browser_context);
+        ctx.conn
+            .install_browser_context_fixture_for_test(browser_context);
 
-        let background_route = ctx
-            .conn
-            .target_session_route_for_target_id("TID-css-background")
-            .expect("background target route");
-        let active_style_sheet_id = {
-            let active_route = ctx
-                .conn
-                .target_session_route_for_target_id("TID-css-active")
-                .expect("active target route");
-            let previous_route = ctx
-                .conn
-                .replace_none_session_owner_route_override(Some(active_route));
-            let style_sheet_id = inline_style_sheet_id_for_session_async(&mut ctx, None).await;
-            ctx.conn
-                .replace_none_session_owner_route_override(previous_route);
-            style_sheet_id
-        };
-        let style_sheet_id = {
-            let previous_route = ctx
-                .conn
-                .replace_none_session_owner_route_override(Some(background_route.clone()));
-            let style_sheet_id = inline_style_sheet_id_for_session_async(&mut ctx, None).await;
-            ctx.conn
-                .replace_none_session_owner_route_override(previous_route);
-            style_sheet_id
-        };
+        let background_session = attach_page_session_async(&mut ctx, "TID-css-background").await;
+        let active_style_sheet_id = inline_style_sheet_id_for_session_async(&mut ctx, None).await;
+        let style_sheet_id =
+            inline_style_sheet_id_for_session_async(&mut ctx, Some(&background_session)).await;
         let raw = json!({
             "id": 214,
             "method": "CSS.setStyleSheetText",
             "params": {
                 "styleSheetId": style_sheet_id,
                 "text": "body { color: purple; }"
-            }
+            },
+            "sessionId": background_session
         })
         .to_string();
-        let pending = {
-            let previous_route = ctx
-                .conn
-                .replace_none_session_owner_route_override(Some(background_route));
-            let pending = ctx
-                .conn
-                .try_start_pending_command_dispatch(&raw)
-                .expect("background CSS.setStyleSheetText should start pending");
-            ctx.conn
-                .replace_none_session_owner_route_override(previous_route);
-            pending
-        };
-
-        let active_route = ctx
+        let pending = ctx
             .conn
-            .target_session_route_for_target_id("TID-css-active")
-            .expect("active target route");
-        let previous_route = ctx
-            .conn
-            .replace_none_session_owner_route_override(Some(active_route));
+            .try_start_pending_command_dispatch(&raw)
+            .expect("background CSS.setStyleSheetText should start pending");
         let (messages, scheduler_events) =
             complete_pending_command_task_for_test(&mut ctx, pending).await;
-        ctx.conn
-            .replace_none_session_owner_route_override(previous_route);
 
         assert!(
             scheduler_events.is_empty(),
@@ -1730,36 +1738,15 @@ mod tests {
                 "styleSheetId": style_sheet_id,
             })
         );
-        let active_text = {
-            let active_route = ctx
-                .conn
-                .target_session_route_for_target_id("TID-css-active")
-                .expect("active target route");
-            let previous_route = ctx
-                .conn
-                .replace_none_session_owner_route_override(Some(active_route));
-            let text = style_sheet_text_for_id_async(&mut ctx, &active_style_sheet_id).await;
-            ctx.conn
-                .replace_none_session_owner_route_override(previous_route);
-            text
-        };
+        let active_text =
+            style_sheet_text_for_id_async(&mut ctx, None, &active_style_sheet_id).await;
         assert!(
             active_text.contains("color: red"),
             "ambient active page must not receive background CSS completion: {active_text}"
         );
-        let background_text = {
-            let background_route = ctx
-                .conn
-                .target_session_route_for_target_id("TID-css-background")
-                .expect("background target route");
-            let previous_route = ctx
-                .conn
-                .replace_none_session_owner_route_override(Some(background_route));
-            let text = style_sheet_text_for_id_async(&mut ctx, &style_sheet_id).await;
-            ctx.conn
-                .replace_none_session_owner_route_override(previous_route);
-            text
-        };
+        let background_text =
+            style_sheet_text_for_id_async(&mut ctx, Some(&background_session), &style_sheet_id)
+                .await;
         assert!(
             background_text.contains("color: purple"),
             "background CSS completion should use captured owner route: {background_text}"

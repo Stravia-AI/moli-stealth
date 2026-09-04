@@ -5,13 +5,13 @@ use std::{
 
 use super::{
     page_slot::RuntimeBindingDefinition,
-    parking::{PendingInspectorAwait, TargetPendingInspectorAwaitRegistry},
     pending_renderer_command::{
         DuplicatePendingRendererCommand, PreparedRendererCallDispatch, PreparedRendererCallReplay,
         PreparedRendererCallTermination, RegisterRendererCallError, RendererCallIdExhausted,
         RendererCommandCorrelation, RendererCommandDescriptor,
     },
     session::{InspectorSessionState, TargetPageSessionState, TargetRuntimeSessionState},
+    target_state::{PendingInspectorAwait, TargetPendingInspectorAwaitRegistry},
 };
 use moli_core::{
     network::WebStorageMutationSubscription,
@@ -60,6 +60,7 @@ pub(crate) struct DevToolsSessionState {
 /// source of truth.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct DevToolsSessionRegistry {
+    primary_session_id: Option<String>,
     states: BTreeMap<DevToolsSessionKey, DevToolsSessionState>,
     attached_order: Vec<String>,
 }
@@ -67,6 +68,7 @@ pub(crate) struct DevToolsSessionRegistry {
 impl Default for DevToolsSessionRegistry {
     fn default() -> Self {
         Self {
+            primary_session_id: None,
             states: BTreeMap::from([(
                 DevToolsSessionKey::Primary,
                 DevToolsSessionState::default(),
@@ -77,6 +79,27 @@ impl Default for DevToolsSessionRegistry {
 }
 
 impl DevToolsSessionRegistry {
+    pub(crate) fn key_for_wire_session_id(&self, session_id: &str) -> Option<DevToolsSessionKey> {
+        if self.primary_session_id() == Some(session_id) {
+            return Some(DevToolsSessionKey::Primary);
+        }
+        self.attached(session_id)
+            .map(|_| DevToolsSessionKey::Attached(session_id.to_owned()))
+    }
+
+    pub(crate) fn primary_session_id(&self) -> Option<&str> {
+        self.primary_session_id.as_deref()
+    }
+
+    pub(crate) fn attach_primary(&mut self, session_id: String) {
+        self.primary_session_id = Some(session_id);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn detach_primary(&mut self) -> Option<String> {
+        self.primary_session_id.take()
+    }
+
     pub(crate) fn primary(&self) -> &DevToolsSessionState {
         self.states
             .get(&DevToolsSessionKey::Primary)
@@ -89,36 +112,26 @@ impl DevToolsSessionRegistry {
             .expect("DevTools session registry must retain its primary session")
     }
 
-    pub(crate) fn routed(
+    pub(crate) fn session(
         &self,
-        is_attached_session: bool,
-        session_id: Option<&str>,
+        session_key: &DevToolsSessionKey,
     ) -> Option<&DevToolsSessionState> {
-        if is_attached_session {
-            return self.attached(session_id?);
-        }
-        Some(self.primary())
+        self.states.get(session_key)
     }
 
-    pub(crate) fn routed_mut_or_insert(
+    pub(crate) fn ensure_session(
         &mut self,
-        is_attached_session: bool,
-        session_id: Option<&str>,
+        session_key: &DevToolsSessionKey,
     ) -> &mut DevToolsSessionState {
-        if is_attached_session && let Some(session_id) = session_id {
-            return self.ensure_attached(session_id);
+        match session_key {
+            DevToolsSessionKey::Primary => self.primary_mut(),
+            DevToolsSessionKey::Attached(session_id) => self.ensure_attached(session_id),
         }
-        self.primary_mut()
     }
 
     pub(crate) fn attached(&self, session_id: &str) -> Option<&DevToolsSessionState> {
         self.states
             .get(&DevToolsSessionKey::Attached(session_id.to_owned()))
-    }
-
-    pub(crate) fn attached_mut(&mut self, session_id: &str) -> Option<&mut DevToolsSessionState> {
-        self.states
-            .get_mut(&DevToolsSessionKey::Attached(session_id.to_owned()))
     }
 
     pub(crate) fn ensure_attached(&mut self, session_id: &str) -> &mut DevToolsSessionState {
@@ -143,10 +156,31 @@ impl DevToolsSessionRegistry {
         removed
     }
 
-    pub(crate) fn clear_attached(&mut self) {
-        self.states
-            .retain(|key, _state| matches!(key, DevToolsSessionKey::Primary));
-        self.attached_order.clear();
+    /// Removes one wire session and all domain-handler state it owns.
+    ///
+    /// The primary handler slot remains allocated for the renderer's implicit
+    /// root Inspector session, but its state is replaced atomically. Attached
+    /// sessions are removed from both the state map and attachment order.
+    pub(crate) fn dispose(
+        &mut self,
+        session_id: &str,
+        session_key: &DevToolsSessionKey,
+    ) -> Option<DevToolsSessionState> {
+        match session_key {
+            DevToolsSessionKey::Primary => {
+                if self.primary_session_id() != Some(session_id) {
+                    return None;
+                }
+                self.primary_session_id = None;
+                Some(std::mem::take(self.primary_mut()))
+            }
+            DevToolsSessionKey::Attached(attached_session_id)
+                if attached_session_id == session_id =>
+            {
+                self.remove_attached(session_id)
+            }
+            DevToolsSessionKey::Attached(_) => None,
+        }
     }
 
     pub(crate) fn attached_len(&self) -> usize {
@@ -162,6 +196,11 @@ impl DevToolsSessionRegistry {
             DevToolsSessionKey::Primary => None,
             DevToolsSessionKey::Attached(session_id) => Some((session_id.as_str(), state)),
         })
+    }
+
+    pub(crate) fn attached_session_ids(&self) -> impl Iterator<Item = &str> {
+        self.attached_entries()
+            .map(|(session_id, _state)| session_id)
     }
 
     pub(crate) fn attached_states(&self) -> impl Iterator<Item = &DevToolsSessionState> {
@@ -225,6 +264,18 @@ impl DevToolsSessionRegistry {
         ))
     }
 
+    pub(crate) fn effective_user_agent_override(&self) -> Option<&str> {
+        self.states_in_attachment_order()
+            .filter_map(|state| {
+                state
+                    .emulation_session_state
+                    .browser_identity_override
+                    .as_ref()
+                    .and_then(|identity| identity.user_agent.as_deref())
+            })
+            .last()
+    }
+
     /// Resolves the identity exposed by the live renderer Document.
     ///
     /// Chromium applies the same session attachment precedence to renderer
@@ -268,41 +319,31 @@ impl DevToolsSessionRegistry {
         })
     }
 
-    fn routed_key(is_attached_session: bool, session_id: Option<&str>) -> DevToolsSessionKey {
-        if is_attached_session && let Some(session_id) = session_id {
-            return DevToolsSessionKey::Attached(session_id.to_owned());
-        }
-        DevToolsSessionKey::Primary
-    }
-
     pub(crate) fn set_browser_identity_override(
         &mut self,
-        is_attached_session: bool,
-        session_id: Option<&str>,
+        session_key: &DevToolsSessionKey,
         browser_identity_override: Option<DevToolsBrowserIdentityOverride>,
     ) {
-        let state = self.routed_mut_or_insert(is_attached_session, session_id);
+        let state = self.ensure_session(session_key);
         state.emulation_session_state.browser_identity_override = browser_identity_override;
     }
 
     pub(crate) fn set_locale_override(
         &mut self,
-        is_attached_session: bool,
-        session_id: Option<&str>,
+        session_key: &DevToolsSessionKey,
         locale_override: Option<String>,
     ) -> Result<(), &'static str> {
-        let key = Self::routed_key(is_attached_session, session_id);
         let current_session_owns_override = self
             .states
-            .get(&key)
+            .get(session_key)
             .is_some_and(|state| state.emulation_session_state.locale_override.is_some());
         let another_session_owns_override = self.states.iter().any(|(candidate, state)| {
-            candidate != &key && state.emulation_session_state.locale_override.is_some()
+            candidate != session_key && state.emulation_session_state.locale_override.is_some()
         });
         if !current_session_owns_override && another_session_owns_override {
             return Err("Another locale override is already in effect");
         }
-        self.routed_mut_or_insert(is_attached_session, session_id)
+        self.ensure_session(session_key)
             .emulation_session_state
             .locale_override = locale_override;
         Ok(())
@@ -310,17 +351,15 @@ impl DevToolsSessionRegistry {
 
     pub(crate) fn set_timezone_override(
         &mut self,
-        is_attached_session: bool,
-        session_id: Option<&str>,
+        session_key: &DevToolsSessionKey,
         timezone_override: Option<String>,
     ) -> Result<(), &'static str> {
-        let key = Self::routed_key(is_attached_session, session_id);
         let current_session_owns_override = self
             .states
-            .get(&key)
+            .get(session_key)
             .is_some_and(|state| state.emulation_session_state.timezone_override.is_some());
         let another_session_owns_override = self.states.iter().any(|(candidate, state)| {
-            candidate != &key && state.emulation_session_state.timezone_override.is_some()
+            candidate != session_key && state.emulation_session_state.timezone_override.is_some()
         });
         if timezone_override.is_some()
             && !current_session_owns_override
@@ -328,7 +367,7 @@ impl DevToolsSessionRegistry {
         {
             return Err("Timezone override is already in effect");
         }
-        self.routed_mut_or_insert(is_attached_session, session_id)
+        self.ensure_session(session_key)
             .emulation_session_state
             .timezone_override = timezone_override;
         Ok(())
@@ -346,37 +385,23 @@ impl DevToolsSessionRegistry {
             .find_map(|state| state.emulation_session_state.timezone_override.as_deref())
     }
 
-    pub(crate) fn clear_routed_network_state(
-        &mut self,
-        is_attached_session: bool,
-        session_id: Option<&str>,
-    ) {
-        let key = Self::routed_key(is_attached_session, session_id);
-        if let Some(state) = self.states.get_mut(&key) {
+    pub(crate) fn clear_network_state(&mut self, session_key: &DevToolsSessionKey) {
+        if let Some(state) = self.states.get_mut(session_key) {
             state.network_session_state = DevToolsNetworkSessionState::default();
         }
     }
 
-    pub(crate) fn clear_routed_emulation_state(
-        &mut self,
-        is_attached_session: bool,
-        session_id: Option<&str>,
-    ) {
-        let key = Self::routed_key(is_attached_session, session_id);
-        if let Some(state) = self.states.get_mut(&key) {
-            state.emulation_session_state = DevToolsEmulationSessionState::default();
+    pub(crate) fn clear_emulation_policy_state(&mut self, session_key: &DevToolsSessionKey) {
+        if let Some(state) = self.states.get_mut(session_key) {
+            let emulation = &mut state.emulation_session_state;
+            emulation.browser_identity_override = None;
+            emulation.locale_override = None;
+            emulation.timezone_override = None;
         }
     }
 
     pub(crate) fn states_mut(&mut self) -> impl Iterator<Item = &mut DevToolsSessionState> {
         self.states.values_mut()
-    }
-
-    pub(crate) fn reset(&mut self, preserve_attached_sessions: bool) {
-        *self.primary_mut() = DevToolsSessionState::default();
-        if !preserve_attached_sessions {
-            self.clear_attached();
-        }
     }
 
     pub(crate) fn has_non_default_state(&self) -> bool {
@@ -392,15 +417,6 @@ impl DevToolsSessionRegistry {
         self.states()
             .map(DevToolsSessionState::pending_inspector_await_count)
             .sum()
-    }
-
-    pub(crate) fn drain_pending_inspector_awaits_for_sessions(
-        &mut self,
-        session_ids: &[&str],
-    ) -> Vec<(u64, PendingInspectorAwait)> {
-        self.states_mut()
-            .flat_map(|state| state.drain_pending_inspector_awaits_for_sessions(session_ids))
-            .collect()
     }
 
     pub(crate) fn prepare_renderer_call_replacements(
@@ -645,13 +661,41 @@ pub(crate) struct DevToolsNetworkSessionState {
     pub(crate) service_worker_fetch_diagnostic_entries: usize,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct DevToolsEmulationSessionState {
     // UA, Accept-Language, and platform are independent handler contributions.
     pub(crate) browser_identity_override: Option<DevToolsBrowserIdentityOverride>,
     // Locale and timezone are exclusive controller claims, unlike UA fields.
     pub(crate) locale_override: Option<String>,
     pub(crate) timezone_override: Option<String>,
+    pub(crate) network_conditions: Option<super::EmulatedNetworkConditions>,
+    pub(crate) geolocation_override: Option<super::EmulatedGeolocationOverrideState>,
+    pub(crate) emulated_media: super::EmulatedMediaOverrides,
+    pub(crate) emulated_device_metrics: Option<super::EmulatedDeviceMetrics>,
+    pub(crate) cpu_throttling_rate: f64,
+    pub(crate) touch_emulation_enabled: bool,
+    pub(crate) emit_touch_events_for_mouse: bool,
+    pub(crate) focus_emulation_enabled: bool,
+    pub(crate) script_execution_disabled: bool,
+}
+
+impl Default for DevToolsEmulationSessionState {
+    fn default() -> Self {
+        Self {
+            browser_identity_override: None,
+            locale_override: None,
+            timezone_override: None,
+            network_conditions: None,
+            geolocation_override: None,
+            emulated_media: super::EmulatedMediaOverrides::default(),
+            emulated_device_metrics: None,
+            cpu_throttling_rate: 1.0,
+            touch_emulation_enabled: false,
+            emit_touch_events_for_mouse: false,
+            focus_emulation_enabled: false,
+            script_execution_disabled: false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -901,14 +945,6 @@ impl DevToolsSessionState {
 
     pub(crate) fn drain_pending_inspector_awaits(&mut self) -> Vec<(u64, PendingInspectorAwait)> {
         self.pending_inspector_awaits.drain_all()
-    }
-
-    pub(crate) fn drain_pending_inspector_awaits_for_sessions(
-        &mut self,
-        session_ids: &[&str],
-    ) -> Vec<(u64, PendingInspectorAwait)> {
-        self.pending_inspector_awaits
-            .drain_for_sessions(session_ids)
     }
 
     pub(crate) fn register_runtime_remote_object_ids<I>(&mut self, object_ids: I)
@@ -1239,15 +1275,13 @@ mod tests {
     #[test]
     fn browser_identity_uses_attachment_order_on_network_and_renderer_surfaces() {
         let mut sessions = DevToolsSessionRegistry::default();
+        let primary = DevToolsSessionKey::Primary;
+        let later = DevToolsSessionKey::Attached("SID-later".to_owned());
         sessions.ensure_attached("SID-later");
+        sessions
+            .set_browser_identity_override(&later, identity_override("Moli/Later-1", None, None));
         sessions.set_browser_identity_override(
-            true,
-            Some("SID-later"),
-            identity_override("Moli/Later-1", None, None),
-        );
-        sessions.set_browser_identity_override(
-            false,
-            None,
+            &primary,
             identity_override("Moli/Primary-1", None, None),
         );
         assert_eq!(effective_identity(&sessions).user_agent(), "Moli/Later-1");
@@ -1257,11 +1291,8 @@ mod tests {
             "the later-attached session wins even when it set its override first"
         );
 
-        sessions.set_browser_identity_override(
-            true,
-            Some("SID-later"),
-            identity_override("Moli/Later-2", None, None),
-        );
+        sessions
+            .set_browser_identity_override(&later, identity_override("Moli/Later-2", None, None));
         assert_eq!(
             effective_identity(&sessions).user_agent(),
             "Moli/Later-2",
@@ -1274,8 +1305,7 @@ mod tests {
         );
 
         sessions.set_browser_identity_override(
-            false,
-            None,
+            &primary,
             identity_override("Moli/Primary-2", None, None),
         );
         assert_eq!(effective_identity(&sessions).user_agent(), "Moli/Later-2");
@@ -1284,7 +1314,7 @@ mod tests {
             "Moli/Later-2"
         );
 
-        sessions.set_browser_identity_override(false, None, None);
+        sessions.set_browser_identity_override(&primary, None);
         assert_eq!(effective_identity(&sessions).user_agent(), "Moli/Later-2");
         assert_eq!(
             effective_renderer_identity(&sessions).user_agent(),
@@ -1292,8 +1322,7 @@ mod tests {
         );
 
         sessions.set_browser_identity_override(
-            false,
-            None,
+            &primary,
             identity_override("Moli/Primary-3", Some("fr-FR"), Some("PrimaryPlatform")),
         );
         assert_eq!(effective_identity(&sessions).user_agent(), "Moli/Later-2");
@@ -1313,41 +1342,41 @@ mod tests {
     #[test]
     fn locale_and_timezone_follow_their_distinct_exclusive_claim_rules() {
         let mut sessions = DevToolsSessionRegistry::default();
+        let session_a = DevToolsSessionKey::Attached("SID-a".to_owned());
+        let session_b = DevToolsSessionKey::Attached("SID-b".to_owned());
         sessions.ensure_attached("SID-a");
         sessions.ensure_attached("SID-b");
 
         sessions
-            .set_locale_override(true, Some("SID-a"), Some("fr-FR".to_owned()))
+            .set_locale_override(&session_a, Some("fr-FR".to_owned()))
             .unwrap();
         assert_eq!(
             sessions
-                .set_locale_override(true, Some("SID-b"), Some("de-DE".to_owned()))
+                .set_locale_override(&session_b, Some("de-DE".to_owned()))
                 .unwrap_err(),
             "Another locale override is already in effect"
         );
         assert_eq!(
-            sessions
-                .set_locale_override(true, Some("SID-b"), None)
-                .unwrap_err(),
+            sessions.set_locale_override(&session_b, None).unwrap_err(),
             "Another locale override is already in effect",
             "Chromium treats a non-owner locale clear as a new claim"
         );
         sessions
-            .set_locale_override(true, Some("SID-a"), Some("it-IT".to_owned()))
+            .set_locale_override(&session_a, Some("it-IT".to_owned()))
             .unwrap();
         assert_eq!(sessions.effective_locale_override(), Some("it-IT"));
 
         sessions
-            .set_timezone_override(true, Some("SID-a"), Some("Europe/Paris".to_owned()))
+            .set_timezone_override(&session_a, Some("Europe/Paris".to_owned()))
             .unwrap();
         assert_eq!(
             sessions
-                .set_timezone_override(true, Some("SID-b"), Some("America/New_York".to_owned()),)
+                .set_timezone_override(&session_b, Some("America/New_York".to_owned()))
                 .unwrap_err(),
             "Timezone override is already in effect"
         );
         sessions
-            .set_timezone_override(true, Some("SID-b"), None)
+            .set_timezone_override(&session_b, None)
             .expect("Chromium accepts a non-owner timezone clear as a no-op");
         assert_eq!(sessions.effective_timezone_override(), Some("Europe/Paris"));
 
@@ -1355,10 +1384,10 @@ mod tests {
         assert_eq!(sessions.effective_locale_override(), None);
         assert_eq!(sessions.effective_timezone_override(), None);
         sessions
-            .set_locale_override(true, Some("SID-b"), Some("de-DE".to_owned()))
+            .set_locale_override(&session_b, Some("de-DE".to_owned()))
             .unwrap();
         sessions
-            .set_timezone_override(true, Some("SID-b"), Some("America/New_York".to_owned()))
+            .set_timezone_override(&session_b, Some("America/New_York".to_owned()))
             .unwrap();
     }
 
@@ -1423,13 +1452,71 @@ mod tests {
 
         assert!(sessions.has_pending_inspector_awaits());
         assert_eq!(sessions.pending_inspector_await_count(), 2);
-        let drained = sessions.drain_pending_inspector_awaits_for_sessions(&["SID-attached"]);
-        assert_eq!(drained.len(), 1);
+        let disposed = sessions
+            .dispose(
+                "SID-attached",
+                &DevToolsSessionKey::Attached("SID-attached".to_owned()),
+            )
+            .expect("attached session should be disposed");
+        assert_eq!(disposed.pending_inspector_await_count(), 1);
         assert_eq!(sessions.pending_inspector_await_count(), 1);
 
-        sessions.remove_attached("SID-attached");
+        assert!(sessions.attached_is_empty());
         assert_eq!(sessions.pending_inspector_await_count(), 1);
-        sessions.reset(false);
+        *sessions.primary_mut() = DevToolsSessionState::default();
         assert!(!sessions.has_pending_inspector_awaits());
+    }
+
+    #[test]
+    fn registry_dispose_is_exactly_once_and_preserves_peer_sessions() {
+        let mut sessions = DevToolsSessionRegistry::default();
+        sessions.attach_primary("SID-primary".to_owned());
+        sessions
+            .primary_mut()
+            .runtime_bindings
+            .push(binding("primary"));
+        sessions
+            .ensure_attached("SID-attached")
+            .runtime_bindings
+            .push(binding("attached"));
+
+        let disposed_attached = sessions
+            .dispose(
+                "SID-attached",
+                &DevToolsSessionKey::Attached("SID-attached".to_owned()),
+            )
+            .expect("attached session should be disposed");
+        assert_eq!(
+            disposed_attached.runtime_bindings,
+            vec![binding("attached")]
+        );
+        assert!(sessions.attached_is_empty());
+        assert_eq!(sessions.primary_session_id(), Some("SID-primary"));
+        assert_eq!(
+            sessions.primary().runtime_bindings,
+            vec![binding("primary")]
+        );
+        assert!(
+            sessions
+                .dispose(
+                    "SID-attached",
+                    &DevToolsSessionKey::Attached("SID-attached".to_owned()),
+                )
+                .is_none(),
+            "a disposed session must not settle twice"
+        );
+
+        let disposed_primary = sessions
+            .dispose("SID-primary", &DevToolsSessionKey::Primary)
+            .expect("primary session should be disposed");
+        assert_eq!(disposed_primary.runtime_bindings, vec![binding("primary")]);
+        assert_eq!(sessions.primary_session_id(), None);
+        assert_eq!(sessions.primary(), &DevToolsSessionState::default());
+        assert!(
+            sessions
+                .dispose("SID-primary", &DevToolsSessionKey::Primary)
+                .is_none(),
+            "primary disposal must also be exactly once"
+        );
     }
 }

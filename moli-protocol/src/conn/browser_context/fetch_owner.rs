@@ -4,11 +4,12 @@ use crate::conn::state::{
     TargetFetchConfig, TargetFetchOwner, TargetFetchSubresourceInterceptionSnapshot,
 };
 use crate::conn::{
-    CapturedBody, CompletedFetchResponseBodyStreamReadDispatch, FetchInterceptionPattern,
-    FetchRequestStage, InFlightSubresourceFetchRequest, PausedDocumentTransfer,
-    PendingFetchAuthNavigation, PendingFetchNavigation, PendingFetchResponseBodyStreamRead,
-    PendingFetchResponseBodyStreamReadStart, PendingSubresourceFetchAuthRequest,
-    PendingSubresourceFetchRequest, PendingSubresourceFetchResponseRequest, TargetRuntimeSlot,
+    CapturedBody, CommandOwnerScope, CompletedFetchResponseBodyStreamReadDispatch,
+    FetchInterceptionPattern, FetchRequestStage, InFlightSubresourceFetchRequest,
+    PausedDocumentTransfer, PendingFetchAuthNavigation, PendingFetchNavigation,
+    PendingFetchResponseBodyStreamRead, PendingFetchResponseBodyStreamReadStart,
+    PendingSubresourceFetchAuthRequest, PendingSubresourceFetchRequest,
+    PendingSubresourceFetchResponseRequest, TargetRuntimeSlot,
 };
 use crate::devtools_runtime::{DevToolsNetworkInterceptId, DevToolsNetworkResourceType};
 use crate::domains::network::TargetIoStreamRead;
@@ -102,19 +103,8 @@ fn fetch_body_stream_owner_for_target_mut<'a>(
     browser_context: &'a mut BrowserContext,
     target_id: &str,
 ) -> Option<SessionFetchBodyStreamOwner<'a>> {
-    let is_active_target = browser_context.active_target_id() == Some(target_id);
-    if is_active_target {
-        let owner_key = fetch_stream_owner_key(&browser_context.id, target_id);
-        let active_target = &mut browser_context.active_target;
-        return Some(SessionFetchBodyStreamOwner {
-            owner_key,
-            fetch_owner: &mut active_target.fetch_owner,
-            runtime_slot: &mut active_target.runtime_slot,
-        });
-    }
     let owner_key = fetch_stream_owner_key(&browser_context.id, target_id);
-    let target = browser_context.background_target_mut(target_id)?;
-    let active_target = &mut target.state_mut().active_target;
+    let active_target = browser_context.page_target_mut(target_id)?;
     Some(SessionFetchBodyStreamOwner {
         owner_key,
         fetch_owner: &mut active_target.fetch_owner,
@@ -126,54 +116,25 @@ fn runtime_slot_for_target_scoped_stream_mut<'a>(
     browser_context: &'a mut BrowserContext,
     target_id: &str,
 ) -> Option<&'a mut TargetRuntimeSlot> {
-    let is_active_target = browser_context.active_target_id() == Some(target_id)
-        || (target_id == "active" && browser_context.active_target_id().is_none());
-    if is_active_target {
-        return Some(&mut browser_context.active_target.runtime_slot);
-    }
     browser_context
-        .background_target_mut(target_id)
+        .page_target_mut(target_id)
         .map(|target| &mut target.runtime_slot)
 }
 
 impl TargetSessionOwnerMut<'_> {
     fn open_scoped_io_stream_body_source(&mut self, body: CapturedBody) -> Result<String, String> {
-        match self {
-            Self::ActiveTarget {
-                browser_context, ..
-            } => {
-                let target_id = browser_context
-                    .active_target_id_owned()
-                    .unwrap_or_else(|| "active".to_owned());
-                let owner_key = fetch_stream_owner_key(&browser_context.id, &target_id);
-                let runtime_slot = &mut browser_context.active_target.runtime_slot;
-                let handle = target_scoped_stream_handle(
-                    &owner_key,
-                    runtime_slot.allocate_io_stream_handle(),
-                );
-                runtime_slot.insert_io_stream_body_source(handle.clone(), body, 0);
-                Ok(handle)
-            }
-            Self::PageTargetHost {
-                browser_context,
-                target_id,
-                ..
-            } => {
-                let owner_key = fetch_stream_owner_key(&browser_context.id, target_id);
-                let Some(target) = browser_context.background_target_mut(target_id) else {
-                    return Err("NoDocumentLoaded".to_owned());
-                };
-                let handle = target_scoped_stream_handle(
-                    &owner_key,
-                    target.runtime_slot.allocate_io_stream_handle(),
-                );
-                target
-                    .runtime_slot
-                    .insert_io_stream_body_source(handle.clone(), body, 0);
-                Ok(handle)
-            }
-            Self::NoLoadedBrowserContext => Err("NoDocumentLoaded".to_owned()),
-        }
+        let owner_key = fetch_stream_owner_key(&self.browser_context.id, &self.target_id);
+        let Some(target) = self.browser_context.page_target_mut(&self.target_id) else {
+            return Err("NoDocumentLoaded".to_owned());
+        };
+        let handle = target_scoped_stream_handle(
+            &owner_key,
+            target.runtime_slot.allocate_io_stream_handle(),
+        );
+        target
+            .runtime_slot
+            .insert_io_stream_body_source(handle.clone(), body, 0);
+        Ok(handle)
     }
 }
 
@@ -225,16 +186,11 @@ fn remove_network_intercept_from_browser_context(
     browser_context: &mut BrowserContext,
     intercept_id: &str,
 ) -> Result<Option<Option<moli_core::page::PendingPageCommand>>, String> {
-    if browser_context
-        .active_target
-        .fetch_owner
-        .remove_network_intercept(intercept_id)
-    {
-        let (subresource_enabled, subresource_resource_type) = browser_context
-            .active_target
-            .fetch_owner
-            .subresource_interception_config();
-        let Some(page) = browser_context.active_target.runtime_slot.loaded_page_mut() else {
+    let target = browser_context.active_page_target_mut();
+    if target.fetch_owner.remove_network_intercept(intercept_id) {
+        let (subresource_enabled, subresource_resource_type) =
+            target.fetch_owner.subresource_interception_config();
+        let Some(page) = target.runtime_slot.loaded_page_mut() else {
             return Ok(Some(None));
         };
         return page
@@ -252,9 +208,11 @@ fn remove_network_intercept_from_browser_context(
         .map(|target| target.target_id().to_owned())
         .collect::<Vec<_>>();
     for target_id in target_ids {
-        let removed = browser_context.mutate_parked_page_session_state(&target_id, |state| {
-            state.fetch_owner.remove_network_intercept(intercept_id)
-        });
+        let removed = browser_context
+            .page_target_mut(&target_id)
+            .expect("background target must remain registered")
+            .fetch_owner
+            .remove_network_intercept(intercept_id);
         if removed {
             return Ok(Some(None));
         }
@@ -264,11 +222,11 @@ fn remove_network_intercept_from_browser_context(
 }
 
 impl CdpConnection {
-    pub(crate) fn target_fetch_subresource_interception_snapshot_for_session_owner(
+    pub(crate) fn target_fetch_subresource_interception_snapshot_for_owner(
         &self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
     ) -> Option<TargetFetchSubresourceInterceptionSnapshot> {
-        self.target_session_owner_aggregate_fetch_config(session_id)
+        self.target_session_owner_aggregate_fetch_config_for_owner(owner)
             .map(|config| config.subresource_interception_snapshot())
     }
 
@@ -280,37 +238,37 @@ impl CdpConnection {
             .map(|config| config.subresource_interception_snapshot())
     }
 
-    pub(crate) fn target_fetch_event_session_id_for_session_owner(
+    pub(crate) fn target_fetch_event_session_id_for_owner(
         &self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
     ) -> Option<String> {
-        self.target_session_owner_aggregate_fetch_config(session_id)
+        self.target_session_owner_aggregate_fetch_config_for_owner(owner)
             .and_then(|config| config.session_id().map(str::to_owned))
     }
 
-    pub(crate) fn target_fetch_handle_auth_requests_for_session_owner(
+    pub(crate) fn target_fetch_handle_auth_requests_for_owner(
         &self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
     ) -> bool {
-        self.target_session_owner_aggregate_fetch_config(session_id)
+        self.target_session_owner_aggregate_fetch_config_for_owner(owner)
             .is_some_and(|config| config.handle_auth_requests())
     }
 
-    pub(crate) fn target_fetch_matches_auth_required_for_session_owner(
+    pub(crate) fn target_fetch_matches_auth_required_for_owner(
         &self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         url: &url::Url,
     ) -> bool {
-        self.target_session_owner_aggregate_fetch_config(session_id)
+        self.target_session_owner_aggregate_fetch_config_for_owner(owner)
             .is_some_and(|config| config.matches_auth_required(url))
     }
 
-    pub(crate) fn target_fetch_matching_auth_required_network_intercepts_for_session_owner(
+    pub(crate) fn target_fetch_matching_auth_required_network_intercepts_for_owner(
         &self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         url: &url::Url,
     ) -> Vec<DevToolsNetworkInterceptId> {
-        self.target_session_owner_aggregate_fetch_config(session_id)
+        self.target_session_owner_aggregate_fetch_config_for_owner(owner)
             .map(|config| config.matching_auth_required_network_intercepts(url))
             .unwrap_or_default()
     }
@@ -356,14 +314,14 @@ impl CdpConnection {
         }
     }
 
-    pub(crate) fn allocate_pending_subresource_fetch_request_ids_for_session_owner(
+    pub(crate) fn allocate_pending_subresource_fetch_request_ids_for_owner(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
     ) -> Result<(String, String), String> {
         let mut network_request_id_allocator =
             std::mem::take(&mut self.network_request_id_allocator);
         let result = self
-            .runtime_session_owner_slot_mut(session_id)
+            .runtime_session_owner_slot_mut_for_owner(owner)
             .map(|runtime_slot| {
                 runtime_slot
                     .request_id_allocator()
@@ -375,11 +333,11 @@ impl CdpConnection {
         result
     }
 
-    pub(crate) fn allocate_fetch_navigation_request_id_for_session_owner(
+    pub(crate) fn allocate_fetch_navigation_request_id_for_owner(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
     ) -> Result<String, String> {
-        self.runtime_session_owner_slot_mut(session_id)
+        self.runtime_session_owner_slot_mut_for_owner(owner)
             .map(|runtime_slot| {
                 runtime_slot
                     .request_id_allocator()
@@ -404,22 +362,16 @@ impl CdpConnection {
         session_id: Option<&str>,
         body: CapturedBody,
     ) -> Result<String, String> {
-        let none_session_owner_route = self.none_session_owner_route_override();
-        self.open_io_stream_body_source_for_route(
-            session_id,
-            none_session_owner_route.as_ref(),
-            body,
-        )
+        let owner = CommandOwnerScope::capture(self, session_id);
+        self.open_io_stream_body_source_for_owner(&owner, body)
     }
 
-    pub(crate) fn open_io_stream_body_source_for_route(
+    pub(crate) fn open_io_stream_body_source_for_owner(
         &mut self,
-        session_id: Option<&str>,
-        owner_route: Option<&CdpSessionRoute>,
+        owner: &CommandOwnerScope,
         body: CapturedBody,
     ) -> Result<String, String> {
-        let Some(mut owner) = self.target_session_owner_mut_for_route(session_id, owner_route)
-        else {
+        let Some(mut owner) = self.target_session_owner_mut_for_owner(owner) else {
             return Err("NoDocumentLoaded".to_owned());
         };
         owner.open_scoped_io_stream_body_source(body)
@@ -446,14 +398,14 @@ impl CdpConnection {
             .read_io_stream(handle, offset, size)
     }
 
-    pub(crate) fn register_synthetic_websocket_request_for_session_owner(
+    pub(crate) fn register_synthetic_websocket_request_for_owner(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         request_id: String,
         network_request_id: String,
         socket_id: u64,
     ) -> bool {
-        let Ok(runtime_slot) = self.runtime_session_owner_slot_mut(session_id) else {
+        let Ok(runtime_slot) = self.runtime_session_owner_slot_mut_for_owner(owner) else {
             return false;
         };
         runtime_slot.register_synthetic_websocket_request(
@@ -469,7 +421,16 @@ impl CdpConnection {
         session_id: Option<&str>,
         request_id: &str,
     ) -> Option<u64> {
-        self.runtime_session_owner_slot(session_id)
+        let owner = CommandOwnerScope::capture(self, session_id);
+        self.synthetic_websocket_socket_id_for_owner(&owner, request_id)
+    }
+
+    pub(crate) fn synthetic_websocket_socket_id_for_owner(
+        &self,
+        owner: &CommandOwnerScope,
+        request_id: &str,
+    ) -> Option<u64> {
+        self.runtime_session_owner_slot_for_owner(owner)
             .ok()
             .and_then(|runtime_slot| {
                 runtime_slot.synthetic_websocket_socket_id_for_request(request_id)
@@ -486,71 +447,67 @@ impl CdpConnection {
 
     pub(crate) fn pending_subresource_fetch_request_residence_is_current(
         &self,
-        session_id: Option<&str>,
         pending: &PendingSubresourceFetchRequest,
     ) -> bool {
-        pending.installed_page_owner().is_none_or(|owner| {
-            self.target_page_residence_identity_is_current_for_session(session_id, owner)
-        })
+        pending
+            .installed_page_owner()
+            .is_none_or(|owner| self.target_page_residence_identity_is_current(owner))
     }
 
     fn installed_subresource_fetch_request_is_current(
         &self,
-        session_id: Option<&str>,
         pending: &PendingSubresourceFetchRequest,
     ) -> bool {
-        pending.installed_page_owner().is_some_and(|owner| {
-            self.target_page_residence_identity_is_current_for_session(session_id, owner)
-        })
+        pending
+            .installed_page_owner()
+            .is_some_and(|owner| self.target_page_residence_identity_is_current(owner))
     }
 
-    pub(crate) fn claim_subresource_continue_request_for_session_owner(
+    pub(crate) fn claim_subresource_continue_request_for_owner(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         expected_page_owner: &crate::conn::TargetPageResidenceIdentity,
         internal_id: u64,
         allow_pending_completion: bool,
     ) -> Option<crate::conn::ClaimedSubresourceContinueRequest> {
-        if !self
-            .target_page_residence_identity_is_current_for_session(session_id, expected_page_owner)
-        {
+        if !self.target_page_residence_identity_is_current(expected_page_owner) {
             return None;
         }
-        self.target_session_owner_mut(session_id)?
+        self.target_session_owner_mut_for_owner(owner)?
             .claim_subresource_continue_request(
                 expected_page_owner,
                 internal_id,
-                session_id,
+                owner.session_id(),
                 allow_pending_completion,
             )
     }
 
-    pub(crate) fn consume_pending_request_action_for_session_owner(
+    pub(crate) fn consume_pending_request_action_for_owner(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         request_id: &str,
     ) -> Option<Result<(), &'static str>> {
-        self.target_session_owner_mut(session_id)?
+        self.target_session_owner_mut_for_owner(owner)?
             .consume_pending_request_action(request_id)
     }
 
-    pub(crate) fn take_pending_fetch_navigation_for_session_owner(
+    pub(crate) fn take_pending_fetch_navigation_for_owner(
         &mut self,
-        owner_session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         action_session_id: Option<&str>,
         request_id: &str,
     ) -> Option<PendingFetchNavigation> {
-        self.target_session_owner_mut(owner_session_id)?
+        self.target_session_owner_mut_for_owner(owner)?
             .take_pending_fetch_navigation_for_action_session(request_id, action_session_id)
     }
 
-    pub(crate) fn take_pending_fetch_auth_navigation_for_action_session_owner(
+    pub(crate) fn take_pending_fetch_auth_navigation_for_owner(
         &mut self,
-        owner_session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         action_session_id: Option<&str>,
         request_id: &str,
     ) -> Option<PendingFetchAuthNavigation> {
-        self.target_session_owner_mut(owner_session_id)?
+        self.target_session_owner_mut_for_owner(owner)?
             .take_pending_fetch_auth_navigation_for_action_session(request_id, action_session_id)
     }
 
@@ -560,21 +517,31 @@ impl CdpConnection {
         request_id: String,
         pending: PendingFetchAuthNavigation,
     ) -> bool {
-        self.target_session_owner_mut(session_id)
+        let owner = CommandOwnerScope::capture(self, session_id);
+        self.register_pending_fetch_auth_navigation_for_owner(&owner, request_id, pending)
+    }
+
+    pub(crate) fn register_pending_fetch_auth_navigation_for_owner(
+        &mut self,
+        owner: &CommandOwnerScope,
+        request_id: String,
+        pending: PendingFetchAuthNavigation,
+    ) -> bool {
+        self.target_session_owner_mut_for_owner(owner)
             .is_some_and(|mut owner| {
                 owner.register_pending_fetch_auth_navigation(request_id, pending)
             })
     }
 
-    pub(crate) fn register_pending_fetch_response_navigation_for_session_owner(
+    pub(crate) fn register_pending_fetch_response_navigation_for_owner(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         request_id: String,
         document_navigation_token: Option<crate::conn::DocumentNavigationToken>,
         navigation: crate::conn::NavigationDispatchState,
         body: crate::conn::DocumentBodySource,
     ) -> bool {
-        self.target_session_owner_mut(session_id)
+        self.target_session_owner_mut_for_owner(owner)
             .is_some_and(|mut owner| {
                 owner.register_pending_fetch_response_navigation(
                     request_id,
@@ -585,53 +552,53 @@ impl CdpConnection {
             })
     }
 
-    pub(crate) fn take_pending_fetch_response_transfer_for_terminal_action_for_session_owner(
+    pub(crate) fn take_pending_fetch_response_transfer_for_terminal_action_for_owner(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         request_id: &str,
     ) -> Option<PausedDocumentTransfer> {
-        self.target_session_owner_mut(session_id)?
+        self.target_session_owner_mut_for_owner(owner)?
             .take_pending_fetch_response_transfer_for_terminal_action(request_id)
     }
 
-    pub(crate) fn take_pending_fetch_response_transfer_for_body_read_for_session_owner(
+    pub(crate) fn take_pending_fetch_response_transfer_for_body_read_for_owner(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         request_id: &str,
     ) -> Option<PausedDocumentTransfer> {
-        self.target_session_owner_mut(session_id)?
+        self.target_session_owner_mut_for_owner(owner)?
             .take_pending_fetch_response_transfer(request_id)
     }
 
-    pub(crate) fn register_pending_fetch_response_transfer_for_session_owner(
+    pub(crate) fn register_pending_fetch_response_transfer_for_owner(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         request_id: String,
         transfer: PausedDocumentTransfer,
     ) -> bool {
-        self.target_session_owner_mut(session_id)
+        self.target_session_owner_mut_for_owner(owner)
             .is_some_and(|mut owner| {
                 owner.register_pending_fetch_response_transfer(request_id, transfer)
             })
     }
 
-    pub(crate) fn pending_subresource_fetch_response_request_for_action_session_owner(
+    pub(crate) fn pending_subresource_fetch_response_request_for_owner(
         &mut self,
-        owner_session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         action_session_id: Option<&str>,
         request_id: &str,
     ) -> Option<PendingSubresourceFetchResponseRequest> {
-        self.target_session_owner_mut(owner_session_id)?
+        self.target_session_owner_mut_for_owner(owner)?
             .pending_subresource_fetch_response_request(request_id, action_session_id)
     }
 
-    pub(crate) fn mark_pending_subresource_fetch_response_body_taken_as_stream_for_action_session_owner(
+    pub(crate) fn mark_pending_subresource_fetch_response_body_taken_as_stream_for_owner(
         &mut self,
-        owner_session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         action_session_id: Option<&str>,
         request_id: &str,
     ) -> bool {
-        self.target_session_owner_mut(owner_session_id)
+        self.target_session_owner_mut_for_owner(owner)
             .is_some_and(|mut owner| {
                 owner.mark_pending_subresource_fetch_response_body_taken_as_stream(
                     request_id,
@@ -791,76 +758,70 @@ impl CdpConnection {
         let pending = self
             .target_session_owner_mut(session_id)?
             .take_pending_subresource_fetch_request(request_id, session_id)?;
-        self.pending_subresource_fetch_request_residence_is_current(session_id, &pending)
+        self.pending_subresource_fetch_request_residence_is_current(&pending)
             .then_some(pending)
     }
 
-    pub(crate) fn take_pending_subresource_fetch_request_for_action_session_owner(
+    pub(crate) fn take_pending_subresource_fetch_request_for_owner(
         &mut self,
-        owner_session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         action_session_id: Option<&str>,
         request_id: &str,
     ) -> Option<PendingSubresourceFetchRequest> {
         let pending = self
-            .target_session_owner_mut(owner_session_id)?
+            .target_session_owner_mut_for_owner(owner)?
             .take_pending_subresource_fetch_request(request_id, action_session_id)?;
-        self.pending_subresource_fetch_request_residence_is_current(owner_session_id, &pending)
+        self.pending_subresource_fetch_request_residence_is_current(&pending)
             .then_some(pending)
     }
 
-    pub(crate) fn take_pending_subresource_fetch_auth_request_for_action_session_owner(
+    pub(crate) fn take_pending_subresource_fetch_auth_request_for_owner(
         &mut self,
-        owner_session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         action_session_id: Option<&str>,
         request_id: &str,
     ) -> Option<PendingSubresourceFetchAuthRequest> {
         let pending = self
-            .target_session_owner_mut(owner_session_id)?
+            .target_session_owner_mut_for_owner(owner)?
             .take_pending_subresource_fetch_auth_request(request_id, action_session_id)?;
-        self.target_page_residence_identity_is_current_for_session(
-            owner_session_id,
-            &pending.page_owner,
-        )
-        .then_some(pending)
+        self.target_page_residence_identity_is_current(&pending.page_owner)
+            .then_some(pending)
     }
 
-    pub(crate) fn take_pending_subresource_fetch_response_request_for_action_session_owner(
+    pub(crate) fn take_pending_subresource_fetch_response_request_for_owner(
         &mut self,
-        owner_session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         action_session_id: Option<&str>,
         request_id: &str,
     ) -> Option<PendingSubresourceFetchResponseRequest> {
         let pending = self
-            .target_session_owner_mut(owner_session_id)?
+            .target_session_owner_mut_for_owner(owner)?
             .take_pending_subresource_fetch_response_request(request_id, action_session_id)?;
-        self.target_page_residence_identity_is_current_for_session(
-            owner_session_id,
-            &pending.page_owner,
-        )
-        .then_some(pending)
+        self.target_page_residence_identity_is_current(&pending.page_owner)
+            .then_some(pending)
     }
 
-    pub(crate) fn take_in_flight_subresource_fetch_request_for_session_owner(
+    pub(crate) fn take_in_flight_subresource_fetch_request_for_owner(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         internal_id: u64,
     ) -> Option<InFlightSubresourceFetchRequest> {
         let in_flight = self
-            .target_session_owner_mut(session_id)?
+            .target_session_owner_mut_for_owner(owner)?
             .take_in_flight_subresource_fetch_request(internal_id)?;
-        self.installed_subresource_fetch_request_is_current(session_id, &in_flight.pending)
+        self.installed_subresource_fetch_request_is_current(&in_flight.pending)
             .then_some(in_flight)
     }
 
-    pub(crate) fn in_flight_subresource_fetch_request_id_for_session_owner(
+    pub(crate) fn in_flight_subresource_fetch_request_id_for_owner(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         internal_id: u64,
     ) -> Option<String> {
         let (request_id, page_owner) = self
-            .target_session_owner_mut(session_id)?
+            .target_session_owner_mut_for_owner(owner)?
             .in_flight_subresource_fetch_request_identity(internal_id)?;
-        self.target_page_residence_identity_is_current_for_session(session_id, &page_owner)
+        self.target_page_residence_identity_is_current(&page_owner)
             .then_some(request_id)
     }
 
@@ -870,44 +831,54 @@ impl CdpConnection {
         request_id: String,
         pending: PendingSubresourceFetchRequest,
     ) -> bool {
-        if !self.pending_subresource_fetch_request_residence_is_current(session_id, &pending) {
+        let owner = CommandOwnerScope::capture(self, session_id);
+        self.register_pending_subresource_fetch_request_for_owner(&owner, request_id, pending)
+    }
+
+    pub(crate) fn register_pending_subresource_fetch_request_for_owner(
+        &mut self,
+        owner: &CommandOwnerScope,
+        request_id: String,
+        pending: PendingSubresourceFetchRequest,
+    ) -> bool {
+        if !self.pending_subresource_fetch_request_residence_is_current(&pending) {
             return false;
         }
-        self.record_pending_subresource_network_request_identity(session_id, &pending);
-        self.target_session_owner_mut(session_id)
+        self.record_pending_subresource_network_request_identity_for_owner(owner, &pending);
+        self.target_session_owner_mut_for_owner(owner)
             .is_some_and(|mut owner| {
                 owner.register_pending_subresource_fetch_request(request_id, pending)
             })
     }
 
-    pub(crate) fn register_in_flight_subresource_fetch_request_for_session_owner(
+    pub(crate) fn register_in_flight_subresource_fetch_request_for_owner(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         request_id: Option<String>,
         pending: PendingSubresourceFetchRequest,
     ) -> bool {
-        if !self.installed_subresource_fetch_request_is_current(session_id, &pending) {
+        if !self.installed_subresource_fetch_request_is_current(&pending) {
             return false;
         }
-        self.record_pending_subresource_network_request_identity(session_id, &pending);
-        self.target_session_owner_mut(session_id)
+        self.record_pending_subresource_network_request_identity_for_owner(owner, &pending);
+        self.target_session_owner_mut_for_owner(owner)
             .is_some_and(|mut owner| {
                 owner.register_in_flight_subresource_fetch_request(request_id, pending)
             })
     }
 
-    pub(crate) fn register_in_flight_response_stage_subresource_fetch_request_for_session_owner(
+    pub(crate) fn register_in_flight_response_stage_subresource_fetch_request_for_owner(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         request_id: Option<String>,
         pending: PendingSubresourceFetchRequest,
         response_stage_blocked_intercepts: Vec<DevToolsNetworkInterceptId>,
     ) -> bool {
-        if !self.installed_subresource_fetch_request_is_current(session_id, &pending) {
+        if !self.installed_subresource_fetch_request_is_current(&pending) {
             return false;
         }
-        self.record_pending_subresource_network_request_identity(session_id, &pending);
-        self.target_session_owner_mut(session_id)
+        self.record_pending_subresource_network_request_identity_for_owner(owner, &pending);
+        self.target_session_owner_mut_for_owner(owner)
             .is_some_and(|mut owner| {
                 owner.register_in_flight_response_stage_subresource_fetch_request(
                     request_id,
@@ -918,17 +889,17 @@ impl CdpConnection {
             })
     }
 
-    pub(crate) fn register_in_flight_deferred_response_stage_subresource_fetch_request_for_session_owner(
+    pub(crate) fn register_in_flight_deferred_response_stage_subresource_fetch_request_for_owner(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         request_id: Option<String>,
         pending: PendingSubresourceFetchRequest,
     ) -> bool {
-        if !self.installed_subresource_fetch_request_is_current(session_id, &pending) {
+        if !self.installed_subresource_fetch_request_is_current(&pending) {
             return false;
         }
-        self.record_pending_subresource_network_request_identity(session_id, &pending);
-        self.target_session_owner_mut(session_id)
+        self.record_pending_subresource_network_request_identity_for_owner(owner, &pending);
+        self.target_session_owner_mut_for_owner(owner)
             .is_some_and(|mut owner| {
                 owner.register_in_flight_subresource_fetch_request_with_response_match_policy(
                     request_id,
@@ -944,13 +915,21 @@ impl CdpConnection {
         request_id: String,
         pending: PendingSubresourceFetchAuthRequest,
     ) -> bool {
-        if !self
-            .target_page_residence_identity_is_current_for_session(session_id, &pending.page_owner)
-        {
+        let owner = CommandOwnerScope::capture(self, session_id);
+        self.register_pending_subresource_fetch_auth_request_for_owner(&owner, request_id, pending)
+    }
+
+    pub(crate) fn register_pending_subresource_fetch_auth_request_for_owner(
+        &mut self,
+        owner: &CommandOwnerScope,
+        request_id: String,
+        pending: PendingSubresourceFetchAuthRequest,
+    ) -> bool {
+        if !self.target_page_residence_identity_is_current(&pending.page_owner) {
             return false;
         }
-        self.record_pending_subresource_auth_network_request_identity(session_id, &pending);
-        self.target_session_owner_mut(session_id)
+        self.record_pending_subresource_auth_network_request_identity_for_owner(owner, &pending);
+        self.target_session_owner_mut_for_owner(owner)
             .is_some_and(|mut owner| {
                 owner.register_pending_subresource_fetch_auth_request(request_id, pending)
             })
@@ -962,27 +941,39 @@ impl CdpConnection {
         request_id: String,
         pending: PendingSubresourceFetchResponseRequest,
     ) -> bool {
-        if !self
-            .target_page_residence_identity_is_current_for_session(session_id, &pending.page_owner)
-        {
+        let owner = CommandOwnerScope::capture(self, session_id);
+        self.register_pending_subresource_fetch_response_request_for_owner(
+            &owner, request_id, pending,
+        )
+    }
+
+    pub(crate) fn register_pending_subresource_fetch_response_request_for_owner(
+        &mut self,
+        owner: &CommandOwnerScope,
+        request_id: String,
+        pending: PendingSubresourceFetchResponseRequest,
+    ) -> bool {
+        if !self.target_page_residence_identity_is_current(&pending.page_owner) {
             return false;
         }
-        self.record_pending_subresource_response_network_request_identity(session_id, &pending);
-        self.target_session_owner_mut(session_id)
+        self.record_pending_subresource_response_network_request_identity_for_owner(
+            owner, &pending,
+        );
+        self.target_session_owner_mut_for_owner(owner)
             .is_some_and(|mut owner| {
                 owner.register_pending_subresource_fetch_response_request(request_id, pending)
             })
     }
 
-    fn record_pending_subresource_network_request_identity(
+    fn record_pending_subresource_network_request_identity_for_owner(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         pending: &PendingSubresourceFetchRequest,
     ) {
         let Some(handle) = pending.network_request_handle else {
             return;
         };
-        if let Ok(runtime_slot) = self.runtime_session_owner_slot_mut(session_id) {
+        if let Ok(runtime_slot) = self.runtime_session_owner_slot_mut_for_owner(owner) {
             runtime_slot.record_subresource_request_id_for_handle_if_absent(
                 handle,
                 pending.network_request_id.clone(),
@@ -990,15 +981,15 @@ impl CdpConnection {
         }
     }
 
-    fn record_pending_subresource_auth_network_request_identity(
+    fn record_pending_subresource_auth_network_request_identity_for_owner(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         pending: &PendingSubresourceFetchAuthRequest,
     ) {
         let Some(handle) = pending.network_request_handle else {
             return;
         };
-        if let Ok(runtime_slot) = self.runtime_session_owner_slot_mut(session_id) {
+        if let Ok(runtime_slot) = self.runtime_session_owner_slot_mut_for_owner(owner) {
             runtime_slot.record_subresource_request_id_for_handle_if_absent(
                 handle,
                 pending.network_request_id.clone(),
@@ -1006,15 +997,15 @@ impl CdpConnection {
         }
     }
 
-    fn record_pending_subresource_response_network_request_identity(
+    fn record_pending_subresource_response_network_request_identity_for_owner(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
         pending: &PendingSubresourceFetchResponseRequest,
     ) {
         let Some(handle) = pending.network_request_handle else {
             return;
         };
-        if let Ok(runtime_slot) = self.runtime_session_owner_slot_mut(session_id) {
+        if let Ok(runtime_slot) = self.runtime_session_owner_slot_mut_for_owner(owner) {
             runtime_slot.record_subresource_request_id_for_handle_if_absent(
                 handle,
                 pending.network_request_id.clone(),
@@ -1028,20 +1019,25 @@ impl CdpConnection {
         handle_auth_requests: bool,
         patterns: Vec<FetchInterceptionPattern>,
     ) -> Result<Option<moli_core::page::PendingPageCommand>, String> {
-        let Some(mut owner) = self.target_session_owner_mut(session_id) else {
+        let owner = CommandOwnerScope::capture(self, session_id);
+        self.start_enable_fetch_for_owner(&owner, handle_auth_requests, patterns)
+    }
+
+    pub(crate) fn start_enable_fetch_for_owner(
+        &mut self,
+        command_owner: &CommandOwnerScope,
+        handle_auth_requests: bool,
+        patterns: Vec<FetchInterceptionPattern>,
+    ) -> Result<Option<moli_core::page::PendingPageCommand>, String> {
+        let Some(mut owner) = self.target_session_owner_mut_for_owner(command_owner) else {
             return Err("BrowserContextNotLoaded".to_owned());
         };
-        let Some((subresource_enabled, subresource_resource_type)) = owner.configure_fetch(
-            session_id.map(str::to_owned),
+        let (subresource_enabled, subresource_resource_type) = owner.configure_fetch(
+            command_owner.session_id().map(str::to_owned),
             handle_auth_requests,
             patterns,
-        ) else {
-            return Err("BrowserContextNotLoaded".to_owned());
-        };
-        let Some(page) = owner
-            .runtime_slot_mut()
-            .and_then(TargetRuntimeSlot::loaded_page_mut)
-        else {
+        );
+        let Some(page) = owner.runtime_slot_mut().loaded_page_mut() else {
             return Ok(None);
         };
         page.start_set_fetch_subresource_interception(
@@ -1052,31 +1048,27 @@ impl CdpConnection {
         .map_err(|error| format!("failed to update page fetch interception: {error}"))
     }
 
-    pub(crate) fn start_add_network_intercept_for_session_owner(
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn start_add_network_intercept_for_owner(
         &mut self,
-        session_id: Option<&str>,
+        command_owner: &CommandOwnerScope,
         intercept_session_id: Option<String>,
         intercept_id: String,
         handle_auth_requests: bool,
         auth_url_patterns: Vec<String>,
         patterns: Vec<FetchInterceptionPattern>,
     ) -> Result<Option<moli_core::page::PendingPageCommand>, String> {
-        let Some(mut owner) = self.target_session_owner_mut(session_id) else {
+        let Some(mut owner) = self.target_session_owner_mut_for_owner(command_owner) else {
             return Err("BrowserContextNotLoaded".to_owned());
         };
-        let Some((subresource_enabled, subresource_resource_type)) = owner.add_network_intercept(
+        let (subresource_enabled, subresource_resource_type) = owner.add_network_intercept(
             intercept_id,
             intercept_session_id,
             handle_auth_requests,
             auth_url_patterns,
             patterns,
-        ) else {
-            return Err("BrowserContextNotLoaded".to_owned());
-        };
-        let Some(page) = owner
-            .runtime_slot_mut()
-            .and_then(TargetRuntimeSlot::loaded_page_mut)
-        else {
+        );
+        let Some(page) = owner.runtime_slot_mut().loaded_page_mut() else {
             return Ok(None);
         };
         page.start_set_fetch_subresource_interception(
@@ -1087,13 +1079,13 @@ impl CdpConnection {
         .map_err(|error| format!("failed to update page fetch interception: {error}"))
     }
 
-    pub(crate) fn start_remove_network_intercept_for_session_owner(
+    pub(crate) fn start_remove_network_intercept_for_owner(
         &mut self,
-        session_id: Option<&str>,
+        command_owner: &CommandOwnerScope,
         intercept_id: &str,
         allow_global_lookup: bool,
     ) -> Result<Option<moli_core::page::PendingPageCommand>, String> {
-        let Some(mut owner) = self.target_session_owner_mut(session_id) else {
+        let Some(mut owner) = self.target_session_owner_mut_for_owner(command_owner) else {
             return Err("BrowserContextNotLoaded".to_owned());
         };
         let Some((subresource_enabled, subresource_resource_type)) =
@@ -1104,10 +1096,7 @@ impl CdpConnection {
             }
             return Err("NetworkInterceptNotFound".to_owned());
         };
-        let Some(page) = owner
-            .runtime_slot_mut()
-            .and_then(TargetRuntimeSlot::loaded_page_mut)
-        else {
+        let Some(page) = owner.runtime_slot_mut().loaded_page_mut() else {
             return Ok(None);
         };
         page.start_set_fetch_subresource_interception(
@@ -1148,18 +1137,28 @@ impl CdpConnection {
         )>,
         String,
     > {
-        let Some(mut owner) = self.target_session_owner_mut(session_id) else {
+        let owner = CommandOwnerScope::capture(self, session_id);
+        self.start_disable_fetch_for_owner(&owner)
+    }
+
+    pub(crate) fn start_disable_fetch_for_owner(
+        &mut self,
+        command_owner: &CommandOwnerScope,
+    ) -> Result<
+        Option<(
+            SessionOwnerPendingFetchState,
+            Option<moli_core::page::PendingPageCommand>,
+        )>,
+        String,
+    > {
+        let Some(mut owner) = self.target_session_owner_mut_for_owner(command_owner) else {
             return Ok(None);
         };
-        let Some((pending, (subresource_enabled, subresource_resource_type), page_update_required)) =
-            owner.reset_fetch_config_for_session_and_drain_pending_state(session_id)
-        else {
-            return Ok(None);
-        };
+        let (pending, (subresource_enabled, subresource_resource_type), page_update_required) =
+            owner
+                .reset_fetch_config_for_session_and_drain_pending_state(command_owner.session_id());
         let page_command = if page_update_required
-            && let Some(page) = owner
-                .runtime_slot_mut()
-                .and_then(TargetRuntimeSlot::loaded_page_mut)
+            && let Some(page) = owner.runtime_slot_mut().loaded_page_mut()
         {
             Some(
                 page.start_set_fetch_subresource_interception(
@@ -1174,12 +1173,14 @@ impl CdpConnection {
         Ok(Some((pending, page_command)))
     }
 
-    pub(crate) fn take_pending_fetch_state_for_session_owner(
+    pub(crate) fn take_pending_fetch_state_for_owner(
         &mut self,
-        session_id: Option<&str>,
+        owner: &CommandOwnerScope,
     ) -> Option<SessionOwnerPendingFetchState> {
-        self.target_session_owner_mut(session_id)?
-            .drain_fetch_pending_state()
+        Some(
+            self.target_session_owner_mut_for_owner(owner)?
+                .drain_fetch_pending_state(),
+        )
     }
 }
 
@@ -1187,77 +1188,34 @@ fn pending_fetch_request_route(
     browser_context: &BrowserContext,
     request_id: &str,
 ) -> Option<CdpSessionRoute> {
-    if browser_context
-        .active_target
-        .fetch_owner
-        .contains_pending_request(request_id)
-    {
-        return Some(CdpSessionRoute::PageTarget {
-            browser_context_id: browser_context.id.clone(),
-            target_id: browser_context.active_target_id_owned()?,
-            is_attached_session: false,
-        });
-    }
-
-    browser_context.background_targets().find_map(|target| {
+    browser_context.page_targets.iter().find_map(|target| {
         target
             .fetch_owner
             .contains_pending_request(request_id)
             .then(|| CdpSessionRoute::PageTarget {
                 browser_context_id: browser_context.id.clone(),
                 target_id: target.target_id().to_owned(),
-                is_attached_session: false,
+                session_key: moli_page_types::DevToolsSessionKey::Primary,
             })
     })
 }
 
 impl TargetSessionOwnerMut<'_> {
     fn session_id(&self) -> Option<&str> {
-        match self {
-            Self::ActiveTarget { session_id, .. } | Self::PageTargetHost { session_id, .. } => {
-                session_id.as_deref()
-            }
-            Self::NoLoadedBrowserContext => None,
-        }
+        self.command_session_id.as_deref()
     }
 
     fn pending_fetch_owner_mut(&mut self) -> Option<SessionPendingFetchOwner<'_>> {
-        match self {
-            Self::ActiveTarget {
-                browser_context, ..
-            } => Some(SessionPendingFetchOwner(
-                &mut browser_context.active_target.fetch_owner,
-            )),
-            Self::PageTargetHost {
-                browser_context,
-                target_id,
-                ..
-            } => Some(SessionPendingFetchOwner(
-                &mut browser_context
-                    .background_target_mut(target_id)?
-                    .fetch_owner,
-            )),
-            Self::NoLoadedBrowserContext => None,
-        }
+        Some(SessionPendingFetchOwner(
+            &mut self
+                .browser_context
+                .page_target_mut(&self.target_id)?
+                .fetch_owner,
+        ))
     }
 
     fn fetch_body_stream_owner_mut(&mut self) -> Option<SessionFetchBodyStreamOwner<'_>> {
-        match self {
-            Self::ActiveTarget {
-                browser_context, ..
-            } => {
-                let target_id = browser_context
-                    .active_target_id_owned()
-                    .unwrap_or_else(|| "active".to_owned());
-                fetch_body_stream_owner_for_target_mut(browser_context, &target_id)
-            }
-            Self::PageTargetHost {
-                browser_context,
-                target_id,
-                ..
-            } => fetch_body_stream_owner_for_target_mut(browser_context, target_id),
-            Self::NoLoadedBrowserContext => None,
-        }
+        fetch_body_stream_owner_for_target_mut(self.browser_context, &self.target_id)
     }
 
     pub(super) fn register_pending_fetch_navigation_request(

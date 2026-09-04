@@ -10,6 +10,9 @@ use super::{
 };
 use crate::{
     context_bootstrap::ContextBootstrapAssets,
+    devtools::target::{
+        RendererDevToolsTargetShutdownRegistration, RendererDevToolsTargetShutdownRegistry,
+    },
     document_runtime::DocumentRuntime,
     exception_reporting::v8_message_listener,
     module_runtime::{
@@ -356,24 +359,31 @@ impl RendererDocumentIsolateHandle {
         Self::new_with_foreground_wake(
             V8ForegroundTaskWake::page(v8_foreground_task_sender),
             RendererDocumentIsolateTeardown::standalone_test(),
+            None,
         )
     }
 
     pub(crate) fn new_owner_reserved_page(
         v8_foreground_task_sender: RendererPageV8ForegroundTaskSender,
+        devtools_target_shutdown_registry: &RendererDevToolsTargetShutdownRegistry,
     ) -> Result<RendererDocumentIsolateBootstrap> {
         Self::new_with_foreground_wake(
             V8ForegroundTaskWake::page(v8_foreground_task_sender),
             RendererDocumentIsolateTeardown::owner_reserved_page(),
+            Some(devtools_target_shutdown_registry),
         )
     }
 
     fn new_with_foreground_wake(
         foreground_wake: V8ForegroundTaskWake,
         renderer_document_isolate_teardown: RendererDocumentIsolateTeardown,
+        devtools_target_shutdown_registry: Option<&RendererDevToolsTargetShutdownRegistry>,
     ) -> Result<RendererDocumentIsolateBootstrap> {
         let (renderer_document_isolate, bridge_bindings) =
-            RendererDocumentIsolateHolder::new_holder(foreground_wake)?;
+            RendererDocumentIsolateHolder::new_holder(
+                foreground_wake,
+                devtools_target_shutdown_registry,
+            )?;
         let renderer_document_isolate = Self {
             inner: Rc::new(RefCell::new(renderer_document_isolate)),
         };
@@ -496,6 +506,9 @@ impl RendererDocumentIsolateHandle {
 }
 
 pub(super) struct RendererDocumentIsolateHolder {
+    // Unregister before destroying the Inspector backend so owner shutdown
+    // never observes a target whose isolate has already been disposed.
+    _devtools_target_shutdown_registration: Option<RendererDevToolsTargetShutdownRegistration>,
     // Inspector backend/session teardown touches V8 objects, so it must drop before the
     // isolate. `ScriptVm::drop` normally performs explicit context destruction;
     // this field order is the final safety net for partial construction paths.
@@ -509,7 +522,10 @@ pub(super) struct RendererDocumentIsolateHolder {
 }
 
 impl RendererDocumentIsolateHolder {
-    fn new_holder(foreground_wake: V8ForegroundTaskWake) -> Result<(Self, NativeBridgeBindings)> {
+    fn new_holder(
+        foreground_wake: V8ForegroundTaskWake,
+        devtools_target_shutdown_registry: Option<&RendererDevToolsTargetShutdownRegistry>,
+    ) -> Result<(Self, NativeBridgeBindings)> {
         let timing_enabled = moli_trace::cdp_nav_timing_enabled();
         let total_start = timing_enabled.then(std::time::Instant::now);
 
@@ -607,6 +623,10 @@ impl RendererDocumentIsolateHolder {
 
         let inspector_start = timing_enabled.then(std::time::Instant::now);
         let inspector_backend = RendererInspectorIsolateBackend::new(&mut isolate);
+        let devtools_target_shutdown_registration = devtools_target_shutdown_registry
+            .map(|registry| registry.register(inspector_backend.devtools_target()))
+            .transpose()
+            .map_err(|error| anyhow!(error))?;
         if timing_enabled {
             tracing::info!(
                 target: "moli_cdp_nav_timing",
@@ -632,6 +652,7 @@ impl RendererDocumentIsolateHolder {
 
         Ok((
             Self::new(
+                devtools_target_shutdown_registration,
                 inspector_backend,
                 isolate_bootstrap,
                 platform_registration,
@@ -642,12 +663,14 @@ impl RendererDocumentIsolateHolder {
     }
 
     pub(super) fn new(
+        devtools_target_shutdown_registration: Option<RendererDevToolsTargetShutdownRegistration>,
         inspector_backend: RendererInspectorIsolateBackend,
         bootstrap: IsolateBootstrapCache,
         platform_registration: V8PlatformIsolateRegistration,
         isolate: v8::OwnedIsolate,
     ) -> Self {
         Self {
+            _devtools_target_shutdown_registration: devtools_target_shutdown_registration,
             inspector_backend: Some(inspector_backend),
             bootstrap,
             _platform_registration: platform_registration,
@@ -740,6 +763,22 @@ mod tests {
         }
     }
 
+    struct ContextSlotDropProbe {
+        dropped: Rc<Cell<usize>>,
+        isolate_handle_was_live: Rc<Cell<usize>>,
+        isolate_handle: v8::IsolateHandle,
+    }
+
+    impl Drop for ContextSlotDropProbe {
+        fn drop(&mut self) {
+            self.dropped.set(self.dropped.get().saturating_add(1));
+            if self.isolate_handle.cancel_terminate_execution() {
+                self.isolate_handle_was_live
+                    .set(self.isolate_handle_was_live.get().saturating_add(1));
+            }
+        }
+    }
+
     #[test]
     fn context_annex_weak_handles_are_safe_during_isolate_teardown() {
         crate::ensure_v8_for_test();
@@ -747,17 +786,22 @@ mod tests {
         const ISOLATE_COUNT: usize = 4;
         const CONTEXTS_PER_ISOLATE: usize = 32;
         let dropped_slots = Rc::new(Cell::new(0));
+        let slots_dropped_with_live_isolate = Rc::new(Cell::new(0));
 
         for _ in 0..ISOLATE_COUNT {
             let mut isolate = v8::Isolate::new(Default::default());
+            let isolate_handle = isolate.thread_safe_handle();
             let mut contexts = Vec::with_capacity(CONTEXTS_PER_ISOLATE);
             {
                 let scope = std::pin::pin!(v8::HandleScope::new(&mut isolate));
                 let scope = &mut scope.init();
                 for _ in 0..CONTEXTS_PER_ISOLATE {
                     let context = v8::Context::new(scope, Default::default());
-                    let replaced = context
-                        .set_slot(Rc::new(ContextSlotDropCounter(Rc::clone(&dropped_slots))));
+                    let replaced = context.set_slot(Rc::new(ContextSlotDropProbe {
+                        dropped: Rc::clone(&dropped_slots),
+                        isolate_handle_was_live: Rc::clone(&slots_dropped_with_live_isolate),
+                        isolate_handle: isolate_handle.clone(),
+                    }));
                     assert!(replaced.is_none());
                     contexts.push(v8::Global::new(scope, context));
                 }
@@ -769,6 +813,11 @@ mod tests {
         }
 
         assert_eq!(dropped_slots.get(), ISOLATE_COUNT * CONTEXTS_PER_ISOLATE);
+        assert_eq!(
+            slots_dropped_with_live_isolate.get(),
+            ISOLATE_COUNT * CONTEXTS_PER_ISOLATE,
+            "context annex slots must drop while their weak V8 handles can still be reset"
+        );
     }
 
     #[test]

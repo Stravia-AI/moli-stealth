@@ -414,6 +414,26 @@ impl RendererBrowserContextRuntime {
             .await
     }
 
+    pub async fn dispatch_service_worker_runtime_protocol_message_with_devtools_session_response(
+        &self,
+        version_id: u64,
+        inspector_session_id: String,
+        raw_json: String,
+        response: RendererRuntimeInspectorResponseSender,
+    ) -> Result<crate::runtime::CompletedWorkerRuntimeInspectorCommandDispatch, String> {
+        let Some(runtime) = self.service_worker_runtime_for_existing_registration() else {
+            return Err("ServiceWorkerRuntimeUnavailable".to_owned());
+        };
+        runtime
+            .dispatch_runtime_protocol_message_with_devtools_session_response(
+                ServiceWorkerVersionId::from_u64_for_binding(version_id),
+                inspector_session_id,
+                raw_json,
+                response,
+            )
+            .await
+    }
+
     pub fn detach_service_worker_runtime_inspector_session(
         &self,
         version_id: u64,

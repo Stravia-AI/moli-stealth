@@ -7,32 +7,39 @@ use super::super::publication_route::RendererPublicationProjection;
 use super::super::publication_route::RendererPublicationRoute;
 use super::super::runtime_command_barrier::RuntimeCommandOutputBarriers;
 use super::prepared_outputs::PreparedProtocolOutputs;
-use crate::conn::{BackgroundProtocolEvent, CdpConnection, CommandDispatchContext};
+use crate::conn::{
+    BackgroundProtocolEvent, CdpConnection, CommandDispatchContext, CommandOwnerScope,
+};
 
-fn renderer_owner_action_session_id(
+fn renderer_owner_action_owner(
     conn: &CdpConnection,
-    publication_session_id: Option<&str>,
+    publication_owner: &CommandOwnerScope,
     renderer_cause: Option<&moli_core::RendererRuntimeCommandCausalIdentity>,
-) -> Option<String> {
+) -> CommandOwnerScope {
     if let Some(cause) = renderer_cause
         && let Some(attachment) = conn
-            .target_page_protocol_attachment_identity_for_renderer_inspector_route(
-                publication_session_id,
+            .target_page_protocol_attachment_identity_for_renderer_inspector_owner(
+                publication_owner,
                 cause.inspector_session_id(),
             )
     {
-        // `None` is a valid exact attachment for a command sent through the
-        // implicit primary inspector session, so do not replace it by a peer.
-        return attachment.session_id().map(str::to_owned);
+        return CommandOwnerScope::for_page_attachment(&attachment);
     }
-    if let Some(session_id) = publication_session_id {
-        return Some(session_id.to_owned());
+    if publication_owner.session_id().is_some() {
+        return publication_owner.clone();
     }
-    let (browser_context_id, target_id) =
-        conn.target_owner_identity_for_session(publication_session_id)?;
-    let target_id = target_id?;
+    let Some((browser_context_id, target_id)) =
+        conn.target_owner_identity_for_owner(publication_owner)
+    else {
+        return publication_owner.clone();
+    };
+    let Some(target_id) = target_id else {
+        return publication_owner.clone();
+    };
     conn.target_page_protocol_attachment_identity_for_target(&browser_context_id, &target_id)
-        .and_then(|attachment| attachment.session_id().map(str::to_owned))
+        .as_ref()
+        .map(CommandOwnerScope::for_page_attachment)
+        .unwrap_or_else(|| publication_owner.clone())
 }
 
 /// Ingests one renderer transport message against only the exact Runtime
@@ -123,9 +130,10 @@ async fn ingest_renderer_output_publication(
             session_id,
             projection,
         } => {
-            project_renderer_output_records_for_route(
+            let owner = CommandOwnerScope::for_session(&session_id);
+            project_renderer_output_records_for_owner(
                 conn,
-                Some(&session_id),
+                &owner,
                 records,
                 cursor,
                 projection,
@@ -138,10 +146,10 @@ async fn ingest_renderer_output_publication(
             owner_route,
             projection,
         } => {
-            let mut route_scope = conn.scoped_none_session_owner_route_override(owner_route);
-            project_renderer_output_records_for_route(
-                route_scope.conn_mut(),
-                None,
+            let owner = CommandOwnerScope::for_route(owner_route);
+            project_renderer_output_records_for_owner(
+                conn,
+                &owner,
                 records,
                 cursor,
                 projection,
@@ -153,9 +161,9 @@ async fn ingest_renderer_output_publication(
     }
 }
 
-async fn project_renderer_output_records_for_route(
+async fn project_renderer_output_records_for_owner(
     conn: &mut CdpConnection,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     records: Vec<moli_core::RendererOutputRecord>,
     cursor: moli_core::RendererOutputCursor,
     projection: RendererPublicationProjection,
@@ -177,23 +185,23 @@ async fn project_renderer_output_records_for_route(
         match item {
             RendererOutputItem::OwnerAction(action) => {
                 // A Page stream can remain bound to its implicit primary owner while a
-                // Runtime command arrives through an auxiliary DevTools session. Owner
+                // Runtime command arrives through an attached DevTools session. Owner
                 // actions caused by that command (notably modal dialogs) belong to the
                 // exact inspector attachment, not merely to the stream's base route.
                 // Asynchronous actions have no command cause; an unbound stream then
                 // selects the target's stable concrete Page attachment.
-                let action_session_id =
-                    renderer_owner_action_session_id(conn, session_id, renderer_cause.as_ref());
+                let action_owner =
+                    renderer_owner_action_owner(conn, owner, renderer_cause.as_ref());
                 let outputs = PreparedProtocolOutputs::from_renderer_owner_action(
                     conn,
-                    action_session_id.as_deref(),
+                    &action_owner,
                     action,
                 )
                 .await;
                 barriers
                     .route_publication_outputs(
                         conn,
-                        action_session_id.as_deref(),
+                        &action_owner,
                         renderer_cause.as_ref(),
                         Some(cursor),
                         outputs,
@@ -209,7 +217,7 @@ async fn project_renderer_output_records_for_route(
                 {
                     let Some(outputs) = PreparedProtocolOutputs::from_renderer_network_observation(
                         conn,
-                        session_id,
+                        owner,
                         crate::conn::RendererPageResidenceIdentity::from_residence(
                             cursor.stream().residence(),
                         ),
@@ -222,7 +230,8 @@ async fn project_renderer_output_records_for_route(
                 } else {
                     PreparedProtocolOutputs::from_renderer_observation(
                         conn,
-                        session_id,
+                        owner,
+                        cursor.stream().residence(),
                         cursor.stream().renderer_agent(),
                         &observation,
                     )
@@ -230,7 +239,7 @@ async fn project_renderer_output_records_for_route(
                 barriers
                     .route_publication_outputs(
                         conn,
-                        session_id,
+                        owner,
                         renderer_cause.as_ref(),
                         Some(cursor),
                         outputs,
@@ -246,9 +255,9 @@ async fn project_renderer_output_records_for_route(
 mod tests {
     use moli_core::RendererRuntimeCommandCausalIdentity;
 
-    use crate::conn::{BrowserContext, CdpConnection};
+    use crate::conn::{BrowserContext, CdpConnection, CommandOwnerScope};
 
-    use super::renderer_owner_action_session_id;
+    use super::renderer_owner_action_owner;
 
     #[test]
     fn unbound_owner_actions_choose_a_stable_attachment_without_overriding_exact_root_cause() {
@@ -256,41 +265,46 @@ mod tests {
         let mut browser_context = BrowserContext::new("BID-owner-action".to_owned());
         browser_context.set_active_target_id("TID-owner-action".to_owned());
         assert!(
-            browser_context.assign_auxiliary_session_to_target(
+            browser_context.assign_attached_session_to_target(
                 "TID-owner-action",
                 "SID-owner-action".to_owned(),
             )
         );
         browser_context
-            .active_target
+            .active_page_target_mut()
             .runtime_slot
             .set_page_attachment_id_for_test(1);
-        conn.browser_context = Some(browser_context);
+        conn.install_browser_context_fixture_for_test(browser_context);
+        let owner = CommandOwnerScope::capture(&conn, None);
 
         assert_eq!(
-            renderer_owner_action_session_id(&conn, None, None).as_deref(),
+            renderer_owner_action_owner(&conn, &owner, None).session_id(),
             Some("SID-owner-action"),
             "an asynchronous target action should use its concrete attachment"
         );
         assert_eq!(
-            renderer_owner_action_session_id(
+            renderer_owner_action_owner(
                 &conn,
-                None,
+                &owner,
                 Some(&RendererRuntimeCommandCausalIdentity::new(
                     Some("SID-owner-action".to_owned()),
                     1,
                 )),
             )
-            .as_deref(),
+            .session_id(),
             Some("SID-owner-action"),
         );
+        let implicit = renderer_owner_action_owner(
+            &conn,
+            &owner,
+            Some(&RendererRuntimeCommandCausalIdentity::new(None, 2)),
+        );
         assert_eq!(
-            renderer_owner_action_session_id(
-                &conn,
-                None,
-                Some(&RendererRuntimeCommandCausalIdentity::new(None, 2)),
-            ),
-            None,
+            conn.target_owner_identity_for_owner(&implicit,),
+            Some((
+                "BID-owner-action".to_owned(),
+                Some("TID-owner-action".to_owned()),
+            )),
             "an exact implicit-primary command must not be reassigned to a peer session"
         );
     }

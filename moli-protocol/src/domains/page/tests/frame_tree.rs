@@ -1,9 +1,10 @@
 use super::*;
 
 async fn complete_child_frame_lifecycle(ctx: &mut TestContext) {
+    let owner = crate::conn::CommandOwnerScope::capture(&ctx.conn, None);
     let pending = ctx
         .conn
-        .start_child_frame_lifecycle_work_for_session_owner(None, std::time::Duration::from_secs(2))
+        .start_child_frame_lifecycle_work_for_owner(owner, std::time::Duration::from_secs(2))
         .expect("loaded page should expose child-frame lifecycle work");
     let completed = pending
         .wait()
@@ -236,7 +237,7 @@ async fn get_frame_tree_uses_owner_element_id_when_frame_name_is_empty() {
         .browser_context
         .as_mut()
         .expect("browser context")
-        .active_target
+        .active_page_target_mut()
         .runtime_slot
         .replace_loaded_page(Some(page));
     complete_child_frame_lifecycle(&mut ctx).await;
@@ -264,7 +265,7 @@ async fn get_frame_tree_projects_sandboxed_about_blank_from_document_url() {
     {
         let bc = ctx.conn.browser_context.as_mut().expect("browser context");
         let _ = bc
-            .active_target
+            .active_page_target_mut()
             .runtime_slot
             .replace_loaded_page(Some(page));
         bc.set_target_security_origin("https://top.example".into());
@@ -295,7 +296,7 @@ async fn get_frame_tree_recurses_into_nested_child_frames() {
     {
         let bc = ctx.conn.browser_context.as_mut().expect("browser context");
         let _ = bc
-            .active_target
+            .active_page_target_mut()
             .runtime_slot
             .replace_loaded_page(Some(page));
         bc.set_target_security_origin("https://top.example".into());
@@ -356,7 +357,7 @@ async fn get_frame_tree_projects_nested_sandboxed_srcdoc_from_document_urls() {
     {
         let bc = ctx.conn.browser_context.as_mut().expect("browser context");
         let _ = bc
-            .active_target
+            .active_page_target_mut()
             .runtime_slot
             .replace_loaded_page(Some(page));
         bc.set_target_security_origin("https://top.example".into());
@@ -450,7 +451,7 @@ async fn get_frame_tree_can_complete_through_pending_command_dispatch() {
         .browser_context
         .as_mut()
         .expect("browser context")
-        .active_target
+        .active_page_target_mut()
         .runtime_slot
         .replace_loaded_page(Some(page));
 
@@ -504,7 +505,7 @@ async fn pending_get_frame_tree_after_page_unload_returns_empty_target_tree() {
         .browser_context
         .as_mut()
         .expect("browser context")
-        .active_target
+        .active_page_target_mut()
         .runtime_slot
         .replace_loaded_page(Some(page));
 
@@ -522,7 +523,7 @@ async fn pending_get_frame_tree_after_page_unload_returns_empty_target_tree() {
         .browser_context
         .as_mut()
         .expect("browser context")
-        .active_target
+        .active_page_target_mut()
         .runtime_slot
         .clear_loaded_page_for_test_fixture();
 
@@ -550,7 +551,7 @@ async fn pending_get_frame_tree_after_page_unload_returns_empty_target_tree() {
     );
 }
 #[tokio::test(flavor = "multi_thread")]
-async fn get_frame_tree_targets_loaded_background_owner_without_promotion() {
+async fn get_frame_tree_targets_loaded_background_owner_without_activation() {
     let mut ctx = TestContext::new();
     let page_url = "data:text/html,<iframe name='background-child'></iframe>";
     let background = PageTargetHost::with_url(
@@ -564,7 +565,7 @@ async fn get_frame_tree_targets_loaded_background_owner_without_promotion() {
     bc.attach_active_session("SID-active".to_owned());
     bc.set_target_url("data:text/html,<body>active</body>".to_owned());
     bc.insert_page_target_host(background);
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.install_browser_context_fixture_for_test(bc);
     ctx.install_navigation_fixture_for_session_owner(page_url, Some("SID-background"))
         .await;
     ctx.sent.clear();
@@ -594,7 +595,7 @@ async fn get_frame_tree_targets_loaded_background_owner_without_promotion() {
             .as_ref()
             .and_then(|browser_context| browser_context.active_target_id()),
         Some("TID-active"),
-        "background Page.getFrameTree should not promote the target"
+        "background Page.getFrameTree should not activate the target"
     );
 }
 #[tokio::test(flavor = "multi_thread")]
@@ -605,7 +606,8 @@ async fn get_frame_tree_targets_inactive_loaded_owner_without_activation() {
     inactive.set_active_target_id("TID-inactive".to_owned());
     inactive.attach_active_session("SID-inactive".to_owned());
     inactive.set_target_url("about:blank".to_owned());
-    ctx.conn.inactive_browser_contexts.push(inactive);
+    ctx.conn
+        .push_inactive_browser_context_fixture_for_test(inactive);
     ctx.install_navigation_fixture_for_session_owner(page_url, Some("SID-inactive"))
         .await;
     ctx.sent.clear();

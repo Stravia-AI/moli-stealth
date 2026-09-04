@@ -324,30 +324,29 @@ pub(crate) enum TrustedTypesCodeGenerationCheck {
     Block,
 }
 
-pub(crate) unsafe extern "C" fn trusted_types_code_generation_check_callback(
-    context: v8::Local<'_, v8::Context>,
-    source: v8::Local<'_, v8::Value>,
+pub(crate) fn trusted_types_code_generation_check_callback<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    source: v8::Local<'s, v8::Value>,
     is_code_like: bool,
-    modified_source: *mut *const v8::String,
-) -> bool {
-    v8::callback_scope!(unsafe scope, context);
+) -> v8::ModifyCodeGenerationFromStringsResult<'s> {
     if trusted_types_eval_is_allowed(scope) && source.is_string() {
-        return true;
+        return v8::ModifyCodeGenerationFromStringsResult {
+            codegen_allowed: true,
+            modified_source: None,
+        };
     }
-    match trusted_types_code_generation_check(scope, source, is_code_like) {
-        TrustedTypesCodeGenerationCheck::AllowOriginal => true,
-        TrustedTypesCodeGenerationCheck::AllowModified(source) => {
-            let Some(source) = v8_string(scope, &source) else {
-                return false;
-            };
-            if !modified_source.is_null() {
-                unsafe {
-                    *modified_source = &*source;
-                }
+    let (codegen_allowed, modified_source) =
+        match trusted_types_code_generation_check(scope, source, is_code_like) {
+            TrustedTypesCodeGenerationCheck::AllowOriginal => (true, None),
+            TrustedTypesCodeGenerationCheck::AllowModified(source) => {
+                let source = v8_string(scope, &source);
+                (source.is_some(), source)
             }
-            true
-        }
-        TrustedTypesCodeGenerationCheck::Block => false,
+            TrustedTypesCodeGenerationCheck::Block => (false, None),
+        };
+    v8::ModifyCodeGenerationFromStringsResult {
+        codegen_allowed,
+        modified_source,
     }
 }
 

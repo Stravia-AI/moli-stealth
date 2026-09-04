@@ -26,8 +26,8 @@ pub(crate) enum RendererPublicationOwner {
 /// Exact protocol delivery route selected for one renderer publication.
 ///
 /// An attached session is already an exact route. A publication without a
-/// session instead carries the owner route needed to enter the correct parked
-/// target without promoting it into the active target slot. This type contains
+/// session instead carries the owner route needed to address the correct
+/// background target without changing foreground selection. This type contains
 /// no output payload and grants no renderer execution authority.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum RendererPublicationRoute {
@@ -46,7 +46,7 @@ pub(crate) enum RendererPublicationRoute {
 /// are retained by the target; every other historical record is stale.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RendererPublicationProjection {
-    CurrentPage,
+    CurrentOwner,
     RetiringNetworkOnly,
 }
 
@@ -66,7 +66,7 @@ impl RendererPublicationRoute {
         let owner_route = CdpSessionRoute::PageTarget {
             browser_context_id,
             target_id,
-            is_attached_session: false,
+            session_key: moli_page_types::DevToolsSessionKey::Primary,
         };
         Self::UnattachedOwner {
             owner_route,
@@ -84,7 +84,7 @@ pub(crate) fn renderer_publication_owners(
         // transaction that reserved that exact renderer Page. Inferring its
         // target from the mutable inventory at `Opened` time is ambiguous:
         // protocol can transiently retain two handles to the same Page while
-        // moving a target between active/background residence. Leave Page
+        // changing foreground selection. Leave Page
         // discovery empty and let the explicit binding win in either
         // open-before-bind or bind-before-open order.
         RendererOutputResidenceIdentity::Page { .. } => Vec::new(),
@@ -118,18 +118,19 @@ impl RendererPublicationOwner {
     pub(crate) fn resolve(&self, conn: &CdpConnection) -> Option<RendererPublicationRoute> {
         match self {
             Self::BrowserContext { browser_context_id } => {
-                let browser_context = conn
+                if !conn
                     .browser_context
                     .iter()
                     .chain(conn.inactive_browser_contexts.iter())
-                    .find(|browser_context| browser_context.id == *browser_context_id)?;
+                    .any(|browser_context| browser_context.id == *browser_context_id)
+                {
+                    return None;
+                }
                 Some(RendererPublicationRoute::UnattachedOwner {
-                    owner_route: CdpSessionRoute::PageTarget {
-                        browser_context_id: browser_context.id.clone(),
-                        target_id: browser_context.active_target_id()?.to_owned(),
-                        is_attached_session: false,
+                    owner_route: CdpSessionRoute::BrowserContext {
+                        browser_context_id: browser_context_id.clone(),
                     },
-                    projection: RendererPublicationProjection::CurrentPage,
+                    projection: RendererPublicationProjection::CurrentOwner,
                 })
             }
             Self::PageTarget {
@@ -149,7 +150,7 @@ impl RendererPublicationOwner {
                             *renderer_page,
                             page_owner.page_attachment_id(),
                         ) {
-                            Some(RendererPublicationProjection::CurrentPage)
+                            Some(RendererPublicationProjection::CurrentOwner)
                         } else if runtime_slot.routes_retiring_renderer_page_owner(
                             *renderer_page,
                             page_owner.page_attachment_id(),
@@ -175,7 +176,8 @@ impl RendererPublicationOwner {
 
                     // Prefer the target route captured when the renderer stream
                     // was bound. This disambiguates the brief handoff window in
-                    // which active and parked state can both refer to one Page.
+                    // which the old and new renderer attachments can both be
+                    // observable from one stable target host.
                     let frozen_target = target_id
                         .as_deref()
                         .and_then(|target_id| browser_context.page_target(target_id))

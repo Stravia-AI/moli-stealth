@@ -153,7 +153,7 @@ pub(super) fn style_named_setter<'s>(
     key: v8::Local<'s, v8::Name>,
     value: v8::Local<'s, v8::Value>,
     args: v8::PropertyCallbackArguments<'s>,
-    _rv: v8::ReturnValue<'_, ()>,
+    _rv: v8::ReturnValue<'_, v8::Boolean>,
 ) -> v8::Intercepted {
     let Ok(key) = v8::Local::<v8::String>::try_from(key) else {
         return v8::Intercepted::kNo;

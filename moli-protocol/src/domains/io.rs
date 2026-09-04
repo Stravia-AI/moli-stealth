@@ -407,7 +407,7 @@ mod tests {
         let mut ctx = TestContext::new();
         let mut bc = BrowserContext::new_with_page_for_test("BID-1", "TID-1");
         bc.insert_io_stream("STREAM-1".into(), b"abcdef".to_vec(), 0);
-        ctx.conn.browser_context = Some(bc);
+        ctx.conn.install_browser_context_fixture_for_test(bc);
 
         ctx.process_async(json!({
             "id": 1,
@@ -439,7 +439,7 @@ mod tests {
         let mut ctx = TestContext::new();
         let mut bc = BrowserContext::new_with_page_for_test("BID-1", "TID-1");
         bc.insert_io_stream("STREAM-1".into(), b"abcdef".to_vec(), 0);
-        ctx.conn.browser_context = Some(bc);
+        ctx.conn.install_browser_context_fixture_for_test(bc);
 
         ctx.process_async(json!({
             "id": 3,
@@ -484,7 +484,7 @@ mod tests {
         let mut ctx = TestContext::new();
         let mut bc = BrowserContext::new_with_page_for_test("BID-1", "TID-1");
         bc.insert_io_stream("STREAM-2".into(), vec![b'x'; 1024 * 1024 + 8], 0);
-        ctx.conn.browser_context = Some(bc);
+        ctx.conn.install_browser_context_fixture_for_test(bc);
 
         ctx.process_async(json!({
             "id": 6,
@@ -517,7 +517,7 @@ mod tests {
         let mut ctx = TestContext::new();
         let mut bc = BrowserContext::new_with_page_for_test("BID-1", "TID-1");
         bc.insert_io_stream("STREAM-DISPATCH".into(), b"dispatch".to_vec(), 0);
-        ctx.conn.browser_context = Some(bc);
+        ctx.conn.install_browser_context_fixture_for_test(bc);
 
         process_via_command_dispatch(
             &mut ctx,
@@ -547,7 +547,7 @@ mod tests {
             Some("SID-background".to_owned()),
             "about:blank#background".to_owned(),
         ));
-        ctx.conn.browser_context = Some(bc);
+        ctx.conn.install_browser_context_fixture_for_test(bc);
 
         let handle = ctx
             .conn
@@ -572,28 +572,20 @@ mod tests {
         .await;
         ctx.expect_error(9, -32000, "StreamHandleNotFound");
 
-        let background_route = ctx
-            .conn
-            .target_session_route_for_target_id("TID-background")
-            .expect("background target route");
-        let previous_route = ctx
-            .conn
-            .replace_none_session_owner_route_override(Some(background_route));
         process_via_command_dispatch(
             &mut ctx,
             json!({
                 "id": 10,
+                "sessionId": "SID-background",
                 "method": "IO.read",
                 "params": { "handle": handle, "size": 10 }
             }),
         )
         .await;
-        ctx.conn
-            .replace_none_session_owner_route_override(previous_route);
         ctx.expect_result(
             10,
             json!({ "base64Encoded": false, "data": "background", "eof": false }),
-            None,
+            Some("SID-background"),
         );
 
         process_via_command_dispatch(

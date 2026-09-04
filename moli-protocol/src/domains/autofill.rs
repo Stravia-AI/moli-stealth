@@ -130,10 +130,8 @@ pub(crate) fn complete_pending_autofill_command(
     conn: &mut CdpConnection,
     completed: CompletedAutofillCommandDispatch,
 ) -> CommandOutputPlan {
-    let session_id = completed.owner_scope.session_id();
-    let owner_route = completed.owner_scope.session_owner_route();
     let outcome = completed.completed.and_then(|completion| {
-        conn.loaded_page_mut_for_protocol_access_for_route(session_id, owner_route)
+        conn.loaded_page_mut_for_protocol_access_for_owner(&completed.owner_scope)
             .and_then(|page| {
                 page.finish_autofill_trigger(completion)
                     .map_err(|error| error.to_string())
@@ -170,7 +168,8 @@ mod tests {
         browser_context.set_active_target_id("TID-1".to_owned());
         browser_context.set_target_url("data:text/html,autofill-test".to_owned());
         browser_context.attach_active_session("SID-1".to_owned());
-        ctx.conn.browser_context = Some(browser_context);
+        ctx.conn
+            .install_browser_context_fixture_for_test(browser_context);
         ctx.install_navigation_fixture_for_session_owner(
             &format!("data:text/html,{html}"),
             Some("SID-1"),

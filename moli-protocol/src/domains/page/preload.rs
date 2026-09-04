@@ -12,7 +12,7 @@ use serde_json::json;
 
 use crate::conn::{
     BackgroundProtocolEvent, BrowserContext, CdpConnection, CdpSessionRoute, Cmd,
-    CommandDispatchContext, DocumentStartScript,
+    CommandDispatchContext, CommandOwnerScope, DocumentStartScript,
 };
 use crate::domains::command_output::CommandOutputPlan;
 use crate::domains::runtime::bidi_preload_function_declaration_source;
@@ -124,14 +124,14 @@ impl PendingAddScriptToEvaluateOnNewDocumentCommand {
     }
 }
 
-async fn append_loaded_page_document_start_script_for_session_async(
+async fn append_loaded_page_document_start_script_for_owner_async(
     conn: &mut CdpConnection,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     script: &DocumentStartScript,
 ) -> Result<(), String> {
     let renderer_runtime_inspector_session_id =
-        conn.target_renderer_runtime_inspector_session_id_for_session(session_id);
-    let slot = conn.runtime_session_owner_slot_mut(session_id)?;
+        conn.target_renderer_runtime_inspector_session_id_for_owner(owner);
+    let slot = conn.runtime_session_owner_slot_mut_for_owner(owner)?;
     if let Some(page) = slot.loaded_page_mut() {
         page.add_document_start_script_runtime_activity_async(
             renderer_runtime_inspector_session_id.as_deref(),
@@ -144,12 +144,12 @@ async fn append_loaded_page_document_start_script_for_session_async(
     Ok(())
 }
 
-async fn remove_loaded_page_document_start_script_for_session_async(
+async fn remove_loaded_page_document_start_script_for_owner_async(
     conn: &mut CdpConnection,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     registry_key: &str,
 ) -> Result<(), String> {
-    let slot = conn.runtime_session_owner_slot_mut(session_id)?;
+    let slot = conn.runtime_session_owner_slot_mut_for_owner(owner)?;
     if let Some(page) = slot.loaded_page_mut() {
         page.remove_document_start_script_by_registry_key_async(registry_key)
             .await
@@ -390,13 +390,14 @@ async fn execute_devtools_single_route_preload_command_async(
         Ok(resolved) => resolved,
         Err(error) => return (Err(error), Vec::new(), None),
     };
-    let mut route_scope = conn.scoped_none_session_owner_route_override(route);
+    let owner = CommandOwnerScope::for_route(route);
     let mut events = Vec::new();
     let mut command_context = CommandDispatchContext::default();
     let result = match command {
         DevToolsCommand::AddPreloadScript(command) => {
             execute_devtools_single_route_add_preload_script_command(
-                route_scope.conn_mut(),
+                conn,
+                &owner,
                 command,
                 result_kind,
                 &mut events,
@@ -405,11 +406,8 @@ async fn execute_devtools_single_route_preload_command_async(
             .await
         }
         DevToolsCommand::RemovePreloadScript(command) => {
-            match execute_devtools_single_route_remove_preload_script_command(
-                route_scope.conn_mut(),
-                command,
-            )
-            .await
+            match execute_devtools_single_route_remove_preload_script_command(conn, &owner, command)
+                .await
             {
                 Ok(()) => Ok(DevToolsCommandResult::Empty),
                 Err(error) => Err(error),
@@ -471,16 +469,12 @@ async fn execute_devtools_browser_context_add_preload_script_command(
         let route = CdpSessionRoute::PageTarget {
             browser_context_id: browser_context_id.clone(),
             target_id: active_target_id,
-            is_attached_session: false,
+            session_key: DevToolsSessionKey::Primary,
         };
-        let mut route_scope = conn.scoped_none_session_owner_route_override(route);
-        append_loaded_page_document_start_script_for_session_async(
-            route_scope.conn_mut(),
-            None,
-            &renderer_script,
-        )
-        .await
-        .map_err(|message| devtools_preload_owner_error(&message))?;
+        let owner = CommandOwnerScope::for_route(route);
+        append_loaded_page_document_start_script_for_owner_async(conn, &owner, &renderer_script)
+            .await
+            .map_err(|message| devtools_preload_owner_error(&message))?;
     }
     Ok(DevToolsCommandResult::AddPreloadScript(
         DevToolsAddPreloadScriptResult {
@@ -491,21 +485,22 @@ async fn execute_devtools_browser_context_add_preload_script_command(
 
 async fn execute_devtools_single_route_add_preload_script_command(
     conn: &mut CdpConnection,
+    owner: &CommandOwnerScope,
     command: DevToolsAddPreloadScriptCommand,
     result_kind: DevToolsPreloadResultKind,
     events: &mut Vec<BackgroundProtocolEvent>,
     command_context: &mut CommandDispatchContext,
 ) -> Result<DevToolsCommandResult, DevToolsError> {
     let identifier = if is_bidi_default_preload_command(&command) {
-        execute_devtools_default_add_preload_script_command(conn, command).await?
+        execute_devtools_default_add_preload_script_command(conn, owner, command).await?
     } else {
-        if conn.target_owner_identity_for_session(None).is_none() {
+        if conn.target_owner_identity_for_owner(owner).is_none() {
             return Err(preload_missing_owner_error(conn));
         }
         let mut side_effects = CommandOutputPlan::default();
         let identifier = add_script_to_evaluate_on_new_document_direct_async(
             conn,
-            None,
+            owner,
             command,
             &mut side_effects,
             command_context,
@@ -519,10 +514,20 @@ async fn execute_devtools_single_route_add_preload_script_command(
 
 async fn execute_devtools_default_add_preload_script_command(
     conn: &mut CdpConnection,
+    owner: &CommandOwnerScope,
     command: DevToolsAddPreloadScriptCommand,
 ) -> Result<String, DevToolsError> {
     let script = document_start_script_from_add_preload_command(&command)?;
-    let Some(browser_context) = conn.browser_context.as_mut() else {
+    let Some(browser_context_id) = conn
+        .target_owner_identity_for_owner(owner)
+        .map(|(browser_context_id, _)| browser_context_id)
+    else {
+        return Err(DevToolsError::new(
+            DevToolsErrorKind::NoSuchTarget,
+            "BrowserContextNotLoaded",
+        ));
+    };
+    let Some(browser_context) = conn.browser_context_by_id_mut(&browser_context_id) else {
         return Err(DevToolsError::new(
             DevToolsErrorKind::NoSuchTarget,
             "BrowserContextNotLoaded",
@@ -532,19 +537,19 @@ async fn execute_devtools_default_add_preload_script_command(
     let script = script.with_registry_key(
         BrowserContext::default_document_start_script_registry_key(&identifier),
     );
-    append_default_document_start_script_direct_async(conn, None, identifier, &script).await
+    append_default_document_start_script_direct_async(conn, owner, identifier, &script).await
 }
 
 async fn append_default_document_start_script_direct_async(
     conn: &mut CdpConnection,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     identifier: String,
     script: &DocumentStartScript,
 ) -> Result<String, DevToolsError> {
     let renderer_runtime_inspector_session_id =
-        conn.target_renderer_runtime_inspector_session_id_for_session(session_id);
+        conn.target_renderer_runtime_inspector_session_id_for_owner(owner);
     let Some(page) = conn
-        .runtime_session_owner_slot_mut(session_id)
+        .runtime_session_owner_slot_mut_for_owner(owner)
         .ok()
         .and_then(|slot| slot.loaded_page_mut())
     else {
@@ -562,7 +567,7 @@ async fn append_default_document_start_script_direct_async(
         .await
         .map_err(|error| devtools_preload_internal_error(error.to_string()))?;
     let Some(page) = conn
-        .runtime_session_owner_slot_mut(session_id)
+        .runtime_session_owner_slot_mut_for_owner(owner)
         .ok()
         .and_then(|slot| slot.loaded_page_mut())
     else {
@@ -575,15 +580,16 @@ async fn append_default_document_start_script_direct_async(
 
 async fn execute_devtools_single_route_remove_preload_script_command(
     conn: &mut CdpConnection,
+    owner: &CommandOwnerScope,
     command: DevToolsRemovePreloadScriptCommand,
 ) -> Result<(), DevToolsError> {
     let protocol = command.context.protocol;
     let script_id = command.script_id.into_string();
-    let owner_identity = conn.target_owner_identity_for_session(None);
+    let owner_identity = conn.target_owner_identity_for_owner(owner);
     let target_registry_key = owner_identity.as_ref().map(|(_, target_id)| {
         BrowserContext::target_document_start_script_registry_key(target_id.as_deref(), &script_id)
     });
-    let remove_result = conn.with_target_owner_state_for_session_mut(None, |owner_state| {
+    let remove_result = conn.with_target_owner_state_for_owner_mut(owner, |owner_state| {
         remove_stored_document_start_script_registry_key(
             owner_state,
             None,
@@ -610,19 +616,19 @@ async fn execute_devtools_single_route_remove_preload_script_command(
             "NoSuchScript",
         ));
     }
-    remove_document_start_script_direct_async(conn, None, registry_key).await
+    remove_document_start_script_direct_async(conn, owner, registry_key).await
 }
 
 async fn remove_document_start_script_direct_async(
     conn: &mut CdpConnection,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     registry_key: Option<String>,
 ) -> Result<(), DevToolsError> {
     let Some(registry_key) = registry_key else {
         return Ok(());
     };
     let Some(page) = conn
-        .runtime_session_owner_slot_mut(session_id)
+        .runtime_session_owner_slot_mut_for_owner(owner)
         .ok()
         .and_then(|slot| slot.loaded_page_mut())
     else {
@@ -636,7 +642,7 @@ async fn remove_document_start_script_direct_async(
         .await
         .map_err(|error| devtools_preload_internal_error(error.to_string()))?;
     let Some(page) = conn
-        .runtime_session_owner_slot_mut(session_id)
+        .runtime_session_owner_slot_mut_for_owner(owner)
         .ok()
         .and_then(|slot| slot.loaded_page_mut())
     else {
@@ -682,16 +688,12 @@ async fn execute_devtools_bidi_browser_context_remove_preload_script_command(
         let route = CdpSessionRoute::PageTarget {
             browser_context_id: browser_context_id.clone(),
             target_id: active_target_id,
-            is_attached_session: false,
+            session_key: DevToolsSessionKey::Primary,
         };
-        let mut route_scope = conn.scoped_none_session_owner_route_override(route);
-        remove_loaded_page_document_start_script_for_session_async(
-            route_scope.conn_mut(),
-            None,
-            registry_key,
-        )
-        .await
-        .map_err(|message| devtools_preload_owner_error(&message))?;
+        let owner = CommandOwnerScope::for_route(route);
+        remove_loaded_page_document_start_script_for_owner_async(conn, &owner, registry_key)
+            .await
+            .map_err(|message| devtools_preload_owner_error(&message))?;
     }
     Ok(DevToolsCommandResult::Empty)
 }
@@ -974,10 +976,9 @@ fn find_preload_script_route(conn: &mut CdpConnection, script_id: &str) -> Optio
         let Some(route) = conn.target_session_route_for_target_id(&target_id) else {
             continue;
         };
-        let mut route_scope = conn.scoped_none_session_owner_route_override(route.clone());
-        let scoped_conn = route_scope.conn_mut();
-        let has_script = scoped_conn
-            .target_owner_state_for_session(None)
+        let owner = CommandOwnerScope::for_route(route.clone());
+        let has_script = conn
+            .target_owner_state_for_owner(&owner)
             .is_some_and(|owner_state| {
                 owner_state
                     .document_start_scripts
@@ -986,9 +987,7 @@ fn find_preload_script_route(conn: &mut CdpConnection, script_id: &str) -> Optio
             })
             || route
                 .browser_context_id()
-                .and_then(|browser_context_id| {
-                    scoped_conn.browser_context_by_id(browser_context_id)
-                })
+                .and_then(|browser_context_id| conn.browser_context_by_id(browser_context_id))
                 .is_some_and(|browser_context| {
                     browser_context.has_default_document_start_script(script_id)
                 });
@@ -1228,12 +1227,8 @@ pub(super) fn try_start_create_isolated_world_command(
         return PageCommandTaskStep::Complete(CommandOutputPlan::error(-32000, "NoDocumentLoaded"));
     }
 
-    start_create_isolated_world_initial_navigation_or_renderer_phase(
-        conn,
-        cmd.id,
-        cmd.session_id,
-        task,
-    )
+    let owner = CommandOwnerScope::capture(conn, cmd.session_id);
+    start_create_isolated_world_initial_navigation_or_renderer_phase(conn, cmd.id, owner, task)
 }
 
 fn prepare_create_isolated_world_task(
@@ -1263,15 +1258,14 @@ fn prepare_create_isolated_world_task(
 }
 
 fn pending_create_isolated_world_command_for_session(
-    conn: &CdpConnection,
     command_id: Option<u64>,
-    session_id: Option<&str>,
+    owner_scope: crate::conn::CommandOwnerScope,
     task: CreateIsolatedWorldCommandTask,
     pending: PendingCreateIsolatedWorldPhase,
 ) -> PageCommandTaskStep {
     PageCommandTaskStep::Pending(PendingPageCommandDispatch {
         command_id,
-        owner_scope: crate::conn::CommandOwnerScope::capture(conn, session_id),
+        owner_scope,
         kind: Box::new(PendingPageCommandKind::CreateIsolatedWorld(
             PendingCreateIsolatedWorldCommand { task, pending },
         )),
@@ -1281,21 +1275,19 @@ fn pending_create_isolated_world_command_for_session(
 fn start_create_isolated_world_initial_navigation_or_renderer_phase(
     conn: &mut CdpConnection,
     command_id: Option<u64>,
-    session_id: Option<&str>,
+    owner: CommandOwnerScope,
     mut task: CreateIsolatedWorldCommandTask,
 ) -> PageCommandTaskStep {
     let should_start_target_url_navigation =
-        conn.runtime_session_owner_can_start_initial_document_navigation(session_id);
+        conn.runtime_session_owner_can_start_initial_document_navigation_for_owner(&owner);
     if !should_start_target_url_navigation {
-        return start_create_isolated_world_frame_or_world_phase(
-            conn, command_id, session_id, task,
-        );
+        return start_create_isolated_world_frame_or_world_phase(conn, command_id, owner, task);
     }
 
     let start = match super::navigation::start_initial_document_navigation_for_session_owner(
         conn,
         None,
-        session_id,
+        &owner,
         json!({}),
     ) {
         Ok(start) => start,
@@ -1309,7 +1301,7 @@ fn start_create_isolated_world_initial_navigation_or_renderer_phase(
             ) {
                 return PageCommandTaskStep::Complete(plan);
             }
-            start_create_isolated_world_frame_or_world_phase(conn, command_id, session_id, task)
+            start_create_isolated_world_frame_or_world_phase(conn, command_id, owner, task)
         }
         super::navigation::NavigateCommandStart::CompletePlan(plan) => {
             PageCommandTaskStep::Complete(plan)
@@ -1317,9 +1309,8 @@ fn start_create_isolated_world_initial_navigation_or_renderer_phase(
         super::navigation::NavigateCommandStart::PendingLoad(pending) => {
             task.phase = CreateIsolatedWorldPhase::InitialDocumentNavigation;
             pending_create_isolated_world_command_for_session(
-                conn,
                 command_id,
-                session_id,
+                owner.clone(),
                 task,
                 PendingCreateIsolatedWorldPhase::InitialDocumentNavigation(pending),
             )
@@ -1339,9 +1330,8 @@ fn start_create_isolated_world_initial_navigation_or_renderer_phase(
         super::navigation::NavigateCommandStart::PendingContinueWithoutRequestPause(pending) => {
             task.phase = CreateIsolatedWorldPhase::InitialDocumentNavigation;
             pending_create_isolated_world_command_for_session(
-                conn,
                 command_id,
-                session_id,
+                owner,
                 task,
                 PendingCreateIsolatedWorldPhase::InitialDocumentNavigationContinue(pending),
             )
@@ -1352,7 +1342,7 @@ fn start_create_isolated_world_initial_navigation_or_renderer_phase(
 fn start_create_isolated_world_frame_or_world_phase(
     conn: &mut CdpConnection,
     command_id: Option<u64>,
-    session_id: Option<&str>,
+    owner: CommandOwnerScope,
     mut task: CreateIsolatedWorldCommandTask,
 ) -> PageCommandTaskStep {
     task.phase = CreateIsolatedWorldPhase::RuntimeActivity;
@@ -1360,13 +1350,12 @@ fn start_create_isolated_world_frame_or_world_phase(
     let world_name = task.params.world_name.clone();
     let grant_universal_access = task.params.grant_universal_access;
     let renderer_runtime_inspector_session_id =
-        conn.target_renderer_runtime_inspector_session_id_for_session(session_id);
-    let page = match loaded_page_mut_for_create_isolated_world_renderer_command(
-        conn, session_id, &mut task,
-    ) {
-        Ok(page) => page,
-        Err(plan) => return PageCommandTaskStep::Complete(plan),
-    };
+        conn.target_renderer_runtime_inspector_session_id_for_owner(&owner);
+    let page =
+        match loaded_page_mut_for_create_isolated_world_renderer_command(conn, &owner, &mut task) {
+            Ok(page) => page,
+            Err(plan) => return PageCommandTaskStep::Complete(plan),
+        };
     match page.start_create_isolated_world_runtime_activity_capturing_runtime_inspector_messages(
         renderer_runtime_inspector_session_id.as_deref(),
         frame_id.as_deref(),
@@ -1374,9 +1363,8 @@ fn start_create_isolated_world_frame_or_world_phase(
         grant_universal_access,
     ) {
         Ok(pending) => pending_create_isolated_world_command_for_session(
-            conn,
             command_id,
-            session_id,
+            owner,
             task,
             PendingCreateIsolatedWorldPhase::RendererPageCommand(pending),
         ),
@@ -1388,11 +1376,11 @@ fn start_create_isolated_world_frame_or_world_phase(
 
 fn loaded_page_mut_for_create_isolated_world_renderer_command<'a>(
     conn: &'a mut CdpConnection,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     task: &mut CreateIsolatedWorldCommandTask,
 ) -> Result<&'a mut moli_core::page::Page, CommandOutputPlan> {
     let slot = conn
-        .runtime_session_owner_slot_mut(session_id)
+        .runtime_session_owner_slot_mut_for_owner(owner)
         .map_err(|error| CommandOutputPlan::error(-32000, error))?;
     task.pending_renderer_agent_attachment_id = Some(
         slot.current_renderer_attachment()
@@ -1405,13 +1393,13 @@ fn loaded_page_mut_for_create_isolated_world_renderer_command<'a>(
 
 fn create_isolated_world_renderer_completion_is_stale(
     conn: &CdpConnection,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     task: &CreateIsolatedWorldCommandTask,
 ) -> bool {
     let Some(expected_attachment_id) = task.pending_renderer_agent_attachment_id else {
         return false;
     };
-    conn.runtime_session_owner_slot(session_id)
+    conn.runtime_session_owner_slot_for_owner(owner)
         .map(|slot| {
             slot.current_renderer_attachment()
                 .map(|attachment| attachment.id())
@@ -1424,11 +1412,11 @@ fn create_isolated_world_renderer_completion_is_stale(
 fn restart_create_isolated_world_after_stale_renderer_completion(
     conn: &mut CdpConnection,
     command_id: Option<u64>,
-    session_id: Option<&str>,
+    owner: CommandOwnerScope,
     mut task: CreateIsolatedWorldCommandTask,
 ) -> PageCommandTaskStep {
     task.pending_renderer_agent_attachment_id = None;
-    start_create_isolated_world_frame_or_world_phase(conn, command_id, session_id, task)
+    start_create_isolated_world_frame_or_world_phase(conn, command_id, owner, task)
 }
 
 fn record_document_start_script(
@@ -1539,7 +1527,7 @@ fn target_document_start_script_registry_key_for_owner(
 pub(super) async fn complete_pending_create_isolated_world_command(
     conn: &mut CdpConnection,
     command_id: Option<u64>,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     mut completed: CompletedCreateIsolatedWorldCommand,
     command_context: &mut CommandDispatchContext,
 ) -> PageCommandTaskStep {
@@ -1576,17 +1564,16 @@ pub(super) async fn complete_pending_create_isolated_world_command(
             start_create_isolated_world_frame_or_world_phase(
                 conn,
                 command_id,
-                session_id,
+                owner.clone(),
                 completed.task,
             )
         }
         CreateIsolatedWorldPhase::RuntimeActivity => {
-            if create_isolated_world_renderer_completion_is_stale(conn, session_id, &completed.task)
-            {
+            if create_isolated_world_renderer_completion_is_stale(conn, owner, &completed.task) {
                 return restart_create_isolated_world_after_stale_renderer_completion(
                     conn,
                     command_id,
-                    session_id,
+                    owner.clone(),
                     completed.task,
                 );
             }
@@ -1618,7 +1605,7 @@ pub(super) async fn complete_pending_create_isolated_world_command(
             };
             let completed_world = {
                 let Some(page) = conn
-                    .runtime_session_owner_slot_mut(session_id)
+                    .runtime_session_owner_slot_mut_for_owner(owner)
                     .ok()
                     .and_then(|slot| slot.loaded_page_mut())
                 else {
@@ -1639,13 +1626,8 @@ pub(super) async fn complete_pending_create_isolated_world_command(
                 }
             };
             command_context.consume_renderer_command_turn_output(output);
-            complete_create_isolated_world_task(
-                conn,
-                session_id,
-                completed.task,
-                execution_context_id,
-            )
-            .await
+            complete_create_isolated_world_task(conn, owner, completed.task, execution_context_id)
+                .await
         }
     }
 }
@@ -1671,7 +1653,7 @@ fn append_page_command_step_output(
 
 async fn complete_create_isolated_world_task(
     conn: &mut CdpConnection,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     task: CreateIsolatedWorldCommandTask,
     execution_context_id: i64,
 ) -> PageCommandTaskStep {
@@ -1687,7 +1669,7 @@ async fn complete_create_isolated_world_task(
         Box::pin(
             crate::domains::runtime::start_bidi_preload_channel_listeners_for_execution_context_background_events_async(
                 conn,
-                session_id,
+                owner,
                 execution_context_id,
                 &mut preload_channel_listener_events,
             ),
@@ -1702,14 +1684,14 @@ async fn complete_create_isolated_world_task(
 pub(super) async fn complete_pending_add_script_to_evaluate_on_new_document_command(
     conn: &mut CdpConnection,
     _command_id: Option<u64>,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     completed: CompletedAddScriptToEvaluateOnNewDocumentCommand,
     command_context: &mut CommandDispatchContext,
 ) -> PageCommandTaskStep {
     let mut plan = CommandOutputPlan::default();
     match add_script_to_evaluate_on_new_document_direct_async(
         conn,
-        session_id,
+        owner,
         completed.command,
         &mut plan,
         command_context,
@@ -1729,21 +1711,21 @@ pub(super) async fn complete_pending_add_script_to_evaluate_on_new_document_comm
 
 async fn add_script_to_evaluate_on_new_document_direct_async(
     conn: &mut CdpConnection,
-    session_id: Option<&str>,
+    owner: &CommandOwnerScope,
     command: DevToolsAddPreloadScriptCommand,
     side_effects: &mut CommandOutputPlan,
     command_context: &mut CommandDispatchContext,
 ) -> Result<String, DevToolsError> {
     let script = document_start_script_from_add_preload_command(&command)?;
     let renderer_inspector_session_id =
-        conn.target_renderer_runtime_inspector_session_id_for_session(session_id);
+        conn.target_renderer_runtime_inspector_session_id_for_owner(owner);
     let script_owner_session = (command.context.protocol == DevToolsProtocol::Cdp).then(|| {
         DevToolsSessionKey::from_wire_session_id(renderer_inspector_session_id.as_deref())
     });
     let target_id = conn
-        .target_owner_identity_for_session(session_id)
+        .target_owner_identity_for_owner(owner)
         .and_then(|(_, target_id)| target_id);
-    let Some(recorded) = conn.with_target_owner_state_for_session_mut(session_id, |owner_state| {
+    let Some(recorded) = conn.with_target_owner_state_for_owner_mut(owner, |owner_state| {
         record_document_start_script(
             owner_state,
             target_id.as_deref(),
@@ -1760,7 +1742,7 @@ async fn add_script_to_evaluate_on_new_document_direct_async(
     }
     let pending_run_immediately = {
         let renderer_runtime_inspector_session_id = renderer_inspector_session_id;
-        let slot = match conn.runtime_session_owner_slot_mut(session_id) {
+        let slot = match conn.runtime_session_owner_slot_mut_for_owner(owner) {
             Ok(slot) => slot,
             Err(error) => return Err(devtools_preload_internal_error(error)),
         };
@@ -1788,7 +1770,7 @@ async fn add_script_to_evaluate_on_new_document_direct_async(
                 .map_err(|error| devtools_preload_internal_error(error.to_string()))?;
             let (result, output) = {
                 let slot = conn
-                    .runtime_session_owner_slot_mut(session_id)
+                    .runtime_session_owner_slot_mut_for_owner(owner)
                     .map_err(devtools_preload_internal_error)?;
                 let page = slot.loaded_page_mut().ok_or_else(|| {
                     devtools_preload_internal_error("NoDocumentLoaded".to_owned())
@@ -1808,7 +1790,7 @@ async fn add_script_to_evaluate_on_new_document_direct_async(
         Box::pin(
             crate::domains::runtime::start_bidi_preload_channel_listeners_for_execution_context_background_events_async(
                 conn,
-                session_id,
+                owner,
                 execution_context_id,
                 &mut preload_channel_listener_events,
             ),

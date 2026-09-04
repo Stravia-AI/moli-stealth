@@ -1,13 +1,17 @@
+use std::collections::HashMap;
+
+use indexmap::IndexMap;
 use moli_core::network::SharedWebStorageStore;
 use moli_core::runtime::NavigationEngine;
+use serde_json::Value;
 
 use super::{
-    identity::TargetIdentityState,
-    page_slot::TargetPageSlot,
-    runtime_slot::TargetRuntimeSlot,
-    session::{ActiveTargetState, TargetPageState},
-    session_storage::TargetSessionStorageNamespace,
+    devtools_session::DevToolsSessionRegistry, emulation::EffectiveTargetEmulationState,
+    fetch::TargetFetchOwner, identity::TargetIdentityState, page_slot::TargetPageSlot,
+    runtime_slot::TargetRuntimeSlot, session::TargetNetworkPolicyState,
+    session_storage::TargetSessionStorageNamespace, target_state::TargetOwnerState,
 };
+use crate::conn::cookie_manager_surface::BrowserContextCookieManagerSurface;
 
 /// The stable owner of all state that belongs to one page target.
 ///
@@ -17,18 +21,50 @@ use super::{
 #[derive(Debug)]
 pub struct PageTargetHost {
     target_id: String,
-    primary_session_id: Option<String>,
-    state: Box<TargetPageState>,
     navigation_engine: Option<NavigationEngine>,
+    pub(crate) target_identity: TargetIdentityState,
+    pub(crate) devtools_sessions: DevToolsSessionRegistry,
+    pub(crate) network_policy: TargetNetworkPolicyState,
+    pub(crate) http_proxy_override: Option<String>,
+    pub(crate) http_no_proxy_override: Option<String>,
+    pub(crate) tls_verify_host_override: Option<bool>,
+    pub(crate) base_locale_override: Option<String>,
+    pub(crate) base_timezone_override: Option<String>,
+    pub(crate) effective_emulation_state: EffectiveTargetEmulationState,
+    pub(crate) input_intercept_drags_enabled: bool,
+    pub(crate) input_drag_intercepted: bool,
+    pub(crate) css_enabled: bool,
+    pub(crate) document_cookie_manager_surface: BrowserContextCookieManagerSurface,
+    pub(crate) dom_remote_object_node_cache: HashMap<String, Value>,
+    pub(crate) runtime_slot: TargetRuntimeSlot,
+    pub(crate) fetch_owner: TargetFetchOwner,
+    pub(crate) owner_state: TargetOwnerState,
+    pub(crate) session_storage_namespace: TargetSessionStorageNamespace,
 }
 
 impl PageTargetHost {
     pub(crate) fn empty(target_id: String) -> Self {
         Self {
             target_id,
-            primary_session_id: None,
-            state: Box::default(),
             navigation_engine: None,
+            target_identity: TargetIdentityState::about_blank(),
+            devtools_sessions: DevToolsSessionRegistry::default(),
+            network_policy: TargetNetworkPolicyState::default(),
+            http_proxy_override: None,
+            http_no_proxy_override: None,
+            tls_verify_host_override: None,
+            base_locale_override: None,
+            base_timezone_override: None,
+            effective_emulation_state: EffectiveTargetEmulationState::default(),
+            input_intercept_drags_enabled: false,
+            input_drag_intercepted: false,
+            css_enabled: false,
+            document_cookie_manager_surface: BrowserContextCookieManagerSurface::default(),
+            dom_remote_object_node_cache: HashMap::new(),
+            runtime_slot: TargetRuntimeSlot::default(),
+            fetch_owner: TargetFetchOwner::default(),
+            owner_state: TargetOwnerState::default(),
+            session_storage_namespace: TargetSessionStorageNamespace::default(),
         }
     }
 
@@ -38,19 +74,13 @@ impl PageTargetHost {
         target_identity: TargetIdentityState,
         target_page_slot: TargetPageSlot,
     ) -> Self {
-        Self {
-            target_id,
-            primary_session_id,
-            state: Box::new(TargetPageState {
-                target_identity,
-                active_target: ActiveTargetState {
-                    runtime_slot: TargetRuntimeSlot::from_page_slot(target_page_slot),
-                    ..Default::default()
-                },
-                ..Default::default()
-            }),
-            navigation_engine: None,
+        let mut host = Self::empty(target_id);
+        host.target_identity = target_identity;
+        host.runtime_slot = TargetRuntimeSlot::from_page_slot(target_page_slot);
+        if let Some(session_id) = primary_session_id {
+            host.devtools_sessions.attach_primary(session_id);
         }
+        host
     }
 
     #[cfg(test)]
@@ -93,11 +123,11 @@ impl PageTargetHost {
     }
 
     pub(crate) fn session_id(&self) -> Option<&str> {
-        self.primary_session_id.as_deref()
+        self.devtools_sessions.primary_session_id()
     }
 
     pub(crate) fn has_session(&self) -> bool {
-        self.primary_session_id.is_some()
+        self.session_id().is_some()
     }
 
     pub(crate) fn is_session(&self, session_id: &str) -> bool {
@@ -105,11 +135,12 @@ impl PageTargetHost {
     }
 
     pub(crate) fn attach_session(&mut self, session_id: String) {
-        self.primary_session_id = Some(session_id);
+        self.devtools_sessions.attach_primary(session_id);
     }
 
+    #[cfg(test)]
     pub(crate) fn detach_session(&mut self) -> Option<String> {
-        self.primary_session_id.take()
+        self.devtools_sessions.detach_primary()
     }
 
     pub(crate) fn session_storage_store(&self) -> &SharedWebStorageStore {
@@ -127,14 +158,6 @@ impl PageTargetHost {
         self.session_storage_namespace = namespace;
     }
 
-    pub(crate) fn state(&self) -> &TargetPageState {
-        &self.state
-    }
-
-    pub(crate) fn state_mut(&mut self) -> &mut TargetPageState {
-        &mut self.state
-    }
-
     pub(crate) fn navigation_engine(&self) -> Option<&NavigationEngine> {
         self.navigation_engine.as_ref()
     }
@@ -143,18 +166,20 @@ impl PageTargetHost {
         self.navigation_engine.as_mut()
     }
 
-    pub(crate) fn replace_navigation_engine(
-        &mut self,
-        mut engine: NavigationEngine,
-    ) -> Option<NavigationEngine> {
-        engine.set_bypass_service_worker(self.network_policy.bypass_service_worker());
-        engine.set_cache_disabled(self.network_policy.cache_disabled());
-        self.navigation_engine.replace(engine)
+    pub(crate) fn install_navigation_engine(&mut self, mut engine: NavigationEngine) {
+        assert!(
+            self.navigation_engine.is_none(),
+            "PageTargetHost must retain its first installed NavigationEngine"
+        );
+        let policy = self.effective_policy();
+        engine.set_bypass_service_worker(policy.bypass_service_worker());
+        engine.set_cache_disabled(policy.cache_disabled());
+        self.navigation_engine = Some(engine);
     }
 
     pub(crate) fn set_base_cache_disabled(&mut self, disabled: bool) {
         self.network_policy.set_base_cache_disabled(disabled);
-        let effective = self.network_policy.cache_disabled();
+        let effective = self.effective_policy().cache_disabled();
         if let Some(engine) = self.navigation_engine.as_mut() {
             engine.set_cache_disabled(effective);
         }
@@ -164,17 +189,13 @@ impl PageTargetHost {
         &mut self,
     ) -> Option<(&mut NavigationEngine, &mut TargetRuntimeSlot)> {
         let engine = self.navigation_engine.as_mut()?;
-        Some((engine, &mut self.state.active_target.runtime_slot))
+        Some((engine, &mut self.runtime_slot))
     }
 
     pub(crate) fn has_page_domain_enabled_session(&self) -> bool {
         self.devtools_sessions
             .states()
             .any(|session| session.page_session_state.page_domain_enabled)
-    }
-
-    pub(crate) fn has_pending_javascript_dialog(&self) -> bool {
-        self.state.has_pending_javascript_dialog()
     }
 
     pub(crate) fn has_pending_inspector_awaits(&self) -> bool {
@@ -213,20 +234,6 @@ impl PageTargetHost {
     }
 }
 
-impl std::ops::Deref for PageTargetHost {
-    type Target = TargetPageState;
-
-    fn deref(&self) -> &Self::Target {
-        &self.state
-    }
-}
-
-impl std::ops::DerefMut for PageTargetHost {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.state
-    }
-}
-
 /// All page hosts in one browser context plus the foreground selector.
 ///
 /// Insertion order is retained for Chromium-compatible fallback selection
@@ -234,12 +241,16 @@ impl std::ops::DerefMut for PageTargetHost {
 #[derive(Debug, Default)]
 pub(crate) struct PageTargetRegistry {
     active_target_id: Option<String>,
-    hosts: Vec<PageTargetHost>,
+    hosts: IndexMap<String, PageTargetHost>,
 }
 
 impl PageTargetRegistry {
     pub(crate) fn is_empty(&self) -> bool {
         self.hosts.is_empty()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.hosts.len()
     }
 
     pub(crate) fn active_target_id(&self) -> Option<&str> {
@@ -256,30 +267,27 @@ impl PageTargetRegistry {
     }
 
     pub(crate) fn get(&self, target_id: &str) -> Option<&PageTargetHost> {
-        self.hosts.iter().find(|host| host.is_target(target_id))
+        self.hosts.get(target_id)
     }
 
     pub(crate) fn get_mut(&mut self, target_id: &str) -> Option<&mut PageTargetHost> {
-        self.hosts.iter_mut().find(|host| host.is_target(target_id))
+        self.hosts.get_mut(target_id)
     }
 
     pub(crate) fn insert(&mut self, host: PageTargetHost) -> bool {
-        if self.get(host.target_id()).is_some() {
+        let target_id = host.target_id().to_owned();
+        if self.hosts.contains_key(&target_id) {
             return false;
         }
-        self.hosts.push(host);
+        self.hosts.insert(target_id, host);
         true
     }
 
     pub(crate) fn remove(&mut self, target_id: &str) -> Option<PageTargetHost> {
-        let index = self
-            .hosts
-            .iter()
-            .position(|host| host.is_target(target_id))?;
         if self.active_target_id() == Some(target_id) {
             self.active_target_id = None;
         }
-        Some(self.hosts.remove(index))
+        self.hosts.shift_remove(target_id)
     }
 
     pub(crate) fn select(&mut self, target_id: &str) -> bool {
@@ -291,28 +299,29 @@ impl PageTargetRegistry {
     }
 
     pub(crate) fn rekey_active(&mut self, target_id: String) -> bool {
-        if self.get(&target_id).is_some() {
+        if self.hosts.contains_key(&target_id) {
             return false;
         }
-        let Some(active) = self.active_mut() else {
+        let Some(previous_target_id) = self.active_target_id.clone() else {
+            return false;
+        };
+        let Some((index, _previous_target_id, mut active)) =
+            self.hosts.shift_remove_full(&previous_target_id)
+        else {
             return false;
         };
         active.replace_target_id(target_id.clone());
+        self.hosts.shift_insert(index, target_id.clone(), active);
         self.active_target_id = Some(target_id);
         true
     }
 
-    #[cfg(test)]
-    pub(crate) fn clear_selection(&mut self) {
-        self.active_target_id = None;
-    }
-
     pub(crate) fn iter(&self) -> impl DoubleEndedIterator<Item = &PageTargetHost> {
-        self.hosts.iter()
+        self.hosts.values()
     }
 
     pub(crate) fn iter_mut(&mut self) -> impl DoubleEndedIterator<Item = &mut PageTargetHost> {
-        self.hosts.iter_mut()
+        self.hosts.values_mut()
     }
 
     pub(crate) fn background(&self) -> impl DoubleEndedIterator<Item = &PageTargetHost> {

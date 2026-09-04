@@ -14,18 +14,17 @@ async fn install_document_content_test_page(ctx: &mut TestContext, url: &str) {
         .load_navigation_via_runtime_for_session_owner_async(Some("SID-1"), url)
         .await
         .expect("document-content test page should load");
-    let navigation_engine = navigation.navigation_engine.take();
     let artifacts = navigation.page_creation_artifacts;
     {
         let browser_context = ctx.conn.browser_context.as_mut().expect("browser context");
         let renderer_agent_candidate = browser_context
-            .active_target
+            .active_page_target_mut()
             .runtime_slot
             .prepare_renderer_agent_candidate(&committed_document, &mut navigation.page)
             .expect("document-content test renderer candidate should attach");
         browser_context.commit_document_navigation_if_matches(&committed_document);
         browser_context
-            .active_target
+            .active_page_target_mut()
             .runtime_slot
             .commit_loaded_navigation_renderer_attachment(
                 &mut navigation.page,
@@ -33,12 +32,12 @@ async fn install_document_content_test_page(ctx: &mut TestContext, url: &str) {
             )
             .expect("document-content test renderer candidate should commit");
         browser_context
-            .active_target
+            .active_page_target_mut()
             .runtime_slot
             .set_loaded_page_for_test(navigation.page);
         assert!(
             browser_context
-                .active_target
+                .active_page_target_mut()
                 .runtime_slot
                 .finish_renderer_document_navigation(&committed_document)
                 .expect("document-content test renderer navigation should finish")
@@ -47,18 +46,14 @@ async fn install_document_content_test_page(ctx: &mut TestContext, url: &str) {
             "the fixture should not leave buffered Inspector output behind"
         );
     }
-    let (binding, _) = ctx.conn.bind_renderer_document_lifecycle_for_session_owner(
-        Some("SID-1"),
+    let (binding, _) = ctx.conn.bind_renderer_document_lifecycle_for_owner(
+        &crate::conn::CommandOwnerScope::for_session("SID-1"),
         artifacts,
         Some(committed_document),
         "TID-1".to_owned(),
         LOADER_ID.to_owned(),
     );
     assert!(binding.is_some(), "renderer lifecycle should bind");
-    if let Some(navigation_engine) = navigation_engine {
-        ctx.conn
-            .adopt_loaded_navigation_engine_for_session_owner(Some("SID-1"), navigation_engine);
-    }
     // The fixture commits an already-running renderer Page directly instead
     // of going through the production navigation command. Route that exact
     // Document's initial lifecycle publication before enabling observers.
@@ -183,7 +178,7 @@ async fn set_document_content_is_observable_from_another_attached_session() {
             .browser_context
             .as_mut()
             .expect("browser context")
-            .assign_auxiliary_session_to_target("TID-1", "SID-2".to_owned())
+            .assign_attached_session_to_target("TID-1", "SID-2".to_owned())
     );
 
     for (id, session_id, method, params) in [
@@ -271,7 +266,7 @@ async fn set_document_content_is_observable_from_another_attached_session() {
 
     wait_until_scheduler_message(
         &mut ctx,
-        "setDocumentContent load event on the auxiliary session",
+        "setDocumentContent load event on the attached session",
         |message| {
             message["method"] == json!("Page.loadEventFired")
                 && message["sessionId"] == json!("SID-2")
@@ -283,7 +278,7 @@ async fn set_document_content_is_observable_from_another_attached_session() {
             message["method"] == json!("Page.loadEventFired")
                 && message["sessionId"] == json!("SID-1")
         }),
-        "setDocumentContent lifecycle should fan out to the primary and auxiliary sessions: {:?}",
+        "setDocumentContent lifecycle should fan out to the primary and attached sessions: {:?}",
         ctx.sent
     );
     assert!(
@@ -1705,12 +1700,10 @@ async fn root_set_document_content_unloads_descendant_frame_before_clearing_pare
         "data:text/html,<body><iframe srcdoc='<body>child</body>'></iframe></body>",
     )
     .await;
+    let owner = crate::conn::CommandOwnerScope::for_session("SID-1");
     let pending = ctx
         .conn
-        .start_child_frame_lifecycle_work_for_session_owner(
-            Some("SID-1"),
-            std::time::Duration::from_secs(2),
-        )
+        .start_child_frame_lifecycle_work_for_owner(owner, std::time::Duration::from_secs(2))
         .expect("loaded page should expose child-frame lifecycle work");
     let completed = pending
         .wait()

@@ -1263,16 +1263,16 @@ impl ScriptVm {
                     inspector,
                     PageInspectorSessionTarget::Frontend(inspector_session_id),
                     |session, _, _| -> Result<Option<DomHandle>> {
-                        let Ok(unwrapped) = session.unwrap_object(
+                        let Ok((value, context, _object_group)) = session.unwrap_object(
                             scope,
                             v8::inspector::StringView::from(object_id.as_bytes()),
                         ) else {
                             return Ok(None);
                         };
-                        let Ok(object) = v8::Local::<v8::Object>::try_from(unwrapped.value) else {
+                        let Ok(object) = v8::Local::<v8::Object>::try_from(value) else {
                             return Ok(None);
                         };
-                        let scope = &mut v8::ContextScope::new(scope, unwrapped.context);
+                        let scope = &mut v8::ContextScope::new(scope, context);
                         let Ok((runtime_ptr, handle)) =
                             node_runtime_and_handle_from_object(scope, object)
                         else {
@@ -1915,6 +1915,7 @@ impl ScriptVmPageRealmBootstrap {
         let stylesheet_task_sender = page_task_tx.stylesheet_task_sender();
         let main_parser_continuation_sender = page_task_tx.main_parser_continuation_sender();
         let resource_owner_id = crate::resource_owner::ResourceOwnerId::new();
+        let author_styles_disabled = initial_document_loader_bootstrap.author_styles_disabled();
         let mut document_runtime = Box::new(DocumentRuntime::from_main_frame_dom_host(
             dom_host,
             main_document_owner,
@@ -1923,6 +1924,7 @@ impl ScriptVmPageRealmBootstrap {
             stylesheet_task_sender,
             main_parser_continuation_sender,
         ));
+        document_runtime.set_author_styles_disabled(author_styles_disabled);
         document_runtime.set_bypass_content_security_policy(bypass_content_security_policy);
         let (page_context_cancel_tx, page_context_cancel_rx) =
             renderer_page_context_cancel_channel();

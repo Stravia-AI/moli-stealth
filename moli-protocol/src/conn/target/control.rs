@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use super::graph::TabTarget;
+use super::graph::{TabTarget, TargetGraph};
 use crate::devtools_runtime::{
     DevToolsSessionId, DevToolsTargetFilterEntry, DevToolsTargetId, DevToolsTargetInfo,
     DevToolsTargetKind, TargetAttachmentEvent, TargetDetachmentEvent,
@@ -8,47 +8,37 @@ use crate::devtools_runtime::{
 
 use super::{
     CommittedAttachSession, DetachedTargetSession, PreparedAttachSession, TargetClosureCleanupPlan,
-    TargetClosurePlan, TargetEventPlan, TargetHandlerStore, TargetHostDelta, TargetRegistry,
-    TargetSessionRegistry,
+    TargetClosurePlan, TargetEventPlan, TargetHandlerStore, TargetHostDelta, TargetSessionRegistry,
 };
 use crate::conn::{BackgroundProtocolEvent, CdpSessionRoute, CdpTargetFilter};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct TargetControlPlane {
     sessions: TargetSessionRegistry,
-    registry: TargetRegistry,
+    graph: TargetGraph,
     handlers: TargetHandlerStore,
 }
 
 impl TargetControlPlane {
     pub(crate) fn register_tab(&mut self, tab_target_id: String, primary_page_target_id: String) {
-        self.registry
+        self.graph
             .register_tab(tab_target_id, primary_page_target_id);
     }
 
-    pub(crate) fn register_worker(&mut self, target_id: String, kind: DevToolsTargetKind) {
-        self.registry.register_worker(target_id, kind);
-    }
-
-    pub(crate) fn remove_worker(&mut self, target_id: &str) -> bool {
-        self.registry.remove_worker(target_id).is_some()
-    }
-
     pub(crate) fn tab_target_id_for_page_target_id(&self, page_target_id: &str) -> Option<&str> {
-        self.registry
-            .tab_target_id_for_page_target_id(page_target_id)
+        self.graph.tab_target_id_for_page_target_id(page_target_id)
     }
 
     pub(crate) fn primary_page_target_id_for_tab_target_id(
         &self,
         tab_target_id: &str,
     ) -> Option<&str> {
-        self.registry
+        self.graph
             .primary_page_target_id_for_tab_target_id(tab_target_id)
     }
 
     pub(crate) fn primary_session_id_for_tab_target_id(&self, tab_target_id: &str) -> Option<&str> {
-        self.registry
+        self.graph
             .primary_session_id_for_tab_target_id(tab_target_id)
     }
 
@@ -56,25 +46,27 @@ impl TargetControlPlane {
         &mut self,
         tab_target_id: &str,
         session_id: String,
-        auxiliary: bool,
+        is_attached_session: bool,
     ) -> bool {
-        self.registry
-            .assign_session_to_tab_target(tab_target_id, session_id, auxiliary)
+        self.graph
+            .assign_session_to_tab_target(tab_target_id, session_id, is_attached_session)
     }
 
     pub(crate) fn remove_tab_session(&mut self, session_id: &str) -> Option<String> {
-        self.registry.remove_tab_session(session_id)
+        self.graph.remove_tab_session(session_id)
     }
 
     pub(crate) fn remove_tab_by_page_target_id(
         &mut self,
         page_target_id: &str,
     ) -> Option<TargetClosurePlan> {
-        self.registry.remove_tab_by_page_target_id(page_target_id)
+        self.graph
+            .remove_tab_by_page_target_id(page_target_id)
+            .map(TargetClosurePlan::from_tab_target)
     }
 
     pub(crate) fn tab_target_id_for_session_id(&self, session_id: &str) -> Option<&str> {
-        self.registry.tab_target_id_for_session_id(session_id)
+        self.graph.tab_target_id_for_session_id(session_id)
     }
 
     pub(crate) fn tab_target_info_for_page_target_info(
@@ -85,7 +77,7 @@ impl TargetControlPlane {
             return None;
         }
         let page_target_id = page_target_info.target_id.as_ref()?.as_str();
-        let target = self.registry.tab_for_page_target_id(page_target_id)?;
+        let target = self.graph.tab_for_page_target_id(page_target_id)?;
         Some(super::projection::tab_target_info_from_page_target_info(
             target,
             page_target_info,
@@ -99,14 +91,14 @@ impl TargetControlPlane {
         let target = target_info
             .target_id
             .as_ref()
-            .and_then(|target_id| self.registry.tab_for_page_target_id(target_id.as_str()));
+            .and_then(|target_id| self.graph.tab_for_page_target_id(target_id.as_str()));
         super::projection::project_page_tab_target_infos_for_destruction(target, target_info)
     }
 
     fn paired_tab_target(&self, target_id: &str) -> Option<&TabTarget> {
-        self.registry
+        self.graph
             .tab_for_page_target_id(target_id)
-            .or_else(|| self.registry.tab(target_id))
+            .or_else(|| self.graph.tab(target_id))
     }
 
     pub(crate) fn target_created_deltas(&self, target_id: &str) -> Vec<TargetHostDelta> {
@@ -284,25 +276,20 @@ impl TargetControlPlane {
         &mut self,
         session_id: String,
         owner_session_id: Option<&str>,
-        target_id: Option<&str>,
-        route: Option<CdpSessionRoute>,
+        target_id: &str,
+        route: CdpSessionRoute,
         waiting_for_debugger: bool,
     ) {
         self.ensure_owner(owner_session_id);
-        if let Some(target_id) = target_id {
-            self.sessions
-                .commit_attached_session(PreparedAttachSession::new(
-                    session_id,
-                    owner_session_id,
-                    target_id,
-                    route,
-                    true,
-                    waiting_for_debugger,
-                ));
-        } else {
-            self.sessions
-                .register_auto_attached_session(session_id, owner_session_id, None);
-        }
+        self.sessions
+            .commit_attached_session(PreparedAttachSession::new(
+                session_id,
+                owner_session_id,
+                target_id,
+                route,
+                true,
+                waiting_for_debugger,
+            ));
     }
 
     pub(crate) fn commit_attached_session(
@@ -310,7 +297,7 @@ impl TargetControlPlane {
         session_id: String,
         owner_session_id: Option<&str>,
         target_id: &str,
-        route: Option<CdpSessionRoute>,
+        route: CdpSessionRoute,
         auto_attached: bool,
         waiting_for_debugger: bool,
     ) -> CommittedAttachSession {
@@ -330,7 +317,7 @@ impl TargetControlPlane {
         session_id: String,
         owner_session_id: Option<&str>,
         target_id: &str,
-        route: Option<CdpSessionRoute>,
+        route: CdpSessionRoute,
         auto_attached: bool,
         waiting_for_debugger: bool,
         target_info: DevToolsTargetInfo,
@@ -537,11 +524,11 @@ impl TargetControlPlane {
 
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
-        self.registry.len()
+        self.graph.len()
     }
 
-    pub(crate) fn host_kind(&self, target_id: &str) -> Option<DevToolsTargetKind> {
-        self.registry.host(target_id).map(|host| host.kind())
+    pub(crate) fn contains_tab_or_page_relation(&self, target_id: &str) -> bool {
+        self.graph.contains_target_id(target_id)
     }
 }
 
@@ -658,7 +645,7 @@ mod tests {
         let route = CdpSessionRoute::PageTarget {
             browser_context_id: "BID-1".to_owned(),
             target_id: "TID-page".to_owned(),
-            is_attached_session: false,
+            session_key: moli_page_types::DevToolsSessionKey::Primary,
         };
 
         control.ensure_owner(Some("SID-tab"));
@@ -666,7 +653,7 @@ mod tests {
             "SID-page".to_owned(),
             Some("SID-tab"),
             "TID-page",
-            Some(route.clone()),
+            route.clone(),
             true,
             true,
             target_info("TID-page", DevToolsTargetKind::Page),
@@ -687,7 +674,7 @@ mod tests {
         assert_eq!(committed.session_id(), "SID-page");
         assert_eq!(committed.owner_session_id(), Some("SID-tab"));
         assert_eq!(committed.target_id(), "TID-page");
-        assert_eq!(committed.route(), Some(&route));
+        assert_eq!(committed.route(), &route);
         assert!(committed.auto_attached());
         assert!(committed.waiting_for_debugger());
 
@@ -700,13 +687,13 @@ mod tests {
         let route = CdpSessionRoute::PageTarget {
             browser_context_id: "BID-1".to_owned(),
             target_id: "TID-page".to_owned(),
-            is_attached_session: false,
+            session_key: moli_page_types::DevToolsSessionKey::Primary,
         };
         control.commit_attached_session_event(
             "SID-page".to_owned(),
             Some("SID-owner"),
             "TID-page",
-            Some(route.clone()),
+            route,
             false,
             false,
             target_info("TID-page", DevToolsTargetKind::Page),
@@ -727,7 +714,6 @@ mod tests {
         assert_eq!(detached.session_id(), "SID-page");
         assert_eq!(detached.owner_session_id(), Some("SID-owner"));
         assert_eq!(detached.target_id(), "TID-page");
-        assert_eq!(detached.route(), Some(&route));
         assert!(!detached.auto_attached());
         assert!(!detached.was_waiting_for_debugger());
 
@@ -747,11 +733,11 @@ mod tests {
                 session_id.to_owned(),
                 None,
                 "TID-page",
-                Some(CdpSessionRoute::PageTarget {
+                CdpSessionRoute::PageTarget {
                     browser_context_id: "BID-1".to_owned(),
                     target_id: "TID-page".to_owned(),
-                    is_attached_session: false,
-                }),
+                    session_key: moli_page_types::DevToolsSessionKey::Primary,
+                },
                 false,
                 false,
                 target_info("TID-page", DevToolsTargetKind::Page),
@@ -778,16 +764,16 @@ mod tests {
     #[test]
     fn target_closure_cleanup_event_plan_detaches_declared_sessions() {
         let mut control = TargetControlPlane::default();
-        for session_id in ["SID-primary", "SID-aux"] {
+        for session_id in ["SID-primary", "SID-attached"] {
             control.commit_attached_session_event(
                 session_id.to_owned(),
                 None,
                 "TID-page",
-                Some(CdpSessionRoute::PageTarget {
+                CdpSessionRoute::PageTarget {
                     browser_context_id: "BID-1".to_owned(),
                     target_id: "TID-page".to_owned(),
-                    is_attached_session: false,
-                }),
+                    session_key: moli_page_types::DevToolsSessionKey::Primary,
+                },
                 false,
                 false,
                 target_info("TID-page", DevToolsTargetKind::Page),
@@ -798,7 +784,7 @@ mod tests {
             crate::conn::TargetClosureCleanupPlan::new(
                 "TID-page",
                 Some("Render process gone."),
-                ["SID-primary".to_owned(), "SID-aux".to_owned()],
+                ["SID-primary".to_owned(), "SID-attached".to_owned()],
             ),
             None,
         );
@@ -809,7 +795,7 @@ mod tests {
                 .iter()
                 .map(|session| (session.target_id(), session.session_id()))
                 .collect::<Vec<_>>(),
-            vec![("TID-page", "SID-primary"), ("TID-page", "SID-aux")]
+            vec![("TID-page", "SID-primary"), ("TID-page", "SID-attached")]
         );
         assert_eq!(plan.into_background_events().len(), 2);
     }
@@ -822,11 +808,11 @@ mod tests {
             "SID-page".to_owned(),
             Some("SID-tab"),
             "TID-page",
-            Some(CdpSessionRoute::PageTarget {
+            CdpSessionRoute::PageTarget {
                 browser_context_id: "BID-1".to_owned(),
                 target_id: "TID-page".to_owned(),
-                is_attached_session: true,
-            }),
+                session_key: moli_page_types::DevToolsSessionKey::Attached("SID-page".to_owned()),
+            },
             true,
             false,
             target_info("TID-page", DevToolsTargetKind::Page),
