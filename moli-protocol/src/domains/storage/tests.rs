@@ -3374,14 +3374,10 @@ async fn storage_clear_data_for_origin_clears_http_cache_entries_for_origin() {
             .body_text(),
         "other-cache"
     );
-    let app_error = client
+    client
         .fetch(moli_fetch::Request::get(&app_url).expect("app cached request"))
         .await
         .expect_err("cleared app origin cache entry should miss after server abort");
-    assert!(
-        format!("{app_error:#}").contains("curl request failed"),
-        "unexpected app cache miss error: {app_error:#}"
-    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -3438,14 +3434,10 @@ async fn storage_clear_data_for_origin_uses_browser_context_http_cache_owner() {
         &seed_config,
         moli_cookie_jar::new_shared_browser_cookie_store(),
     );
-    let app_error = client
+    client
         .fetch(moli_fetch::Request::get(&app_url).expect("app cached request"))
         .await
         .expect_err("context-owner-cleared app origin cache entry should miss");
-    assert!(
-        format!("{app_error:#}").contains("curl request failed"),
-        "unexpected app cache miss error: {app_error:#}"
-    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

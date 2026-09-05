@@ -26,10 +26,13 @@ impl NetworkRequestObservation {
         }
     }
 
-    fn from_header_block(data: &[u8], cookie_report: Option<StoredCookieQueryReport>) -> Self {
-        let (data, truncated) = bounded_header_data(data);
+    fn from_headers(
+        headers: &[(String, String)],
+        cookie_report: Option<StoredCookieQueryReport>,
+    ) -> Self {
+        let (headers, truncated) = bounded_headers(headers);
         Self {
-            headers: parse_request_header_block(data),
+            headers,
             cookie_report,
             truncated,
         }
@@ -66,6 +69,15 @@ impl NetworkResponseObservation {
             status,
             headers,
             truncated: false,
+        }
+    }
+
+    fn from_headers(status: u16, headers: &[(String, String)]) -> Self {
+        let (headers, truncated) = bounded_headers(headers);
+        Self {
+            status,
+            headers,
+            truncated,
         }
     }
 
@@ -205,76 +217,47 @@ impl fmt::Debug for NetworkObservationRecorder {
 }
 
 impl NetworkObservationRecorder {
-    pub(crate) fn set_current_request_cookie_report(
+    pub(crate) fn transport_observer(
         &self,
         cookie_report: Option<StoredCookieQueryReport>,
-    ) {
-        self.state.lock().current_request_cookie_report = cookie_report;
+    ) -> Arc<dyn moli_stealth_net::TransportObserver> {
+        Arc::new(NetworkTransportObserver {
+            recorder: self.clone(),
+            cookie_report,
+        })
     }
 
-    pub(crate) fn record_request_header_block(&self, data: &[u8]) {
+    fn record_request_sent(
+        &self,
+        headers: &[(String, String)],
+        cookie_report: Option<StoredCookieQueryReport>,
+    ) {
         let mut state = self.state.lock();
-        state.pending_response = None;
         if state.journal.exchanges.len() == MAX_OBSERVED_EXCHANGES {
             state.journal.truncated = true;
             return;
         }
-        let cookie_report = state.current_request_cookie_report.clone();
         state
             .journal
             .exchanges
             .push(NetworkExchangeObservation::request_only(
-                NetworkRequestObservation::from_header_block(data, cookie_report),
+                NetworkRequestObservation::from_headers(headers, cookie_report),
             ));
     }
 
-    pub(crate) fn record_response_header_line(&self, data: &[u8]) {
+    fn record_response_received(&self, status: u16, headers: &[(String, String)]) {
         let mut state = self.state.lock();
         if state.journal.truncated {
             return;
         }
-        let line = String::from_utf8_lossy(data);
-        let line = line.trim_end_matches(['\r', '\n']);
-
-        if let Some(status) = parse_status_line(line) {
-            state.pending_response = Some(PendingResponseObservation {
-                status,
-                headers: Vec::new(),
-                observed_bytes: data.len(),
-                truncated: data.len() > MAX_OBSERVED_HEADER_BLOCK_BYTES,
-            });
-            return;
-        }
-
-        if line.is_empty() {
-            let Some(response) = state.pending_response.take() else {
-                return;
-            };
-            if (100..200).contains(&response.status) && response.status != 101 {
-                return;
-            }
-            if let Some(exchange) = state
-                .journal
-                .exchanges
-                .iter_mut()
-                .rev()
-                .find(|exchange| exchange.response.is_none())
-            {
-                exchange.response = Some(response.finish());
-            }
-            return;
-        }
-
-        let Some(response) = state.pending_response.as_mut() else {
-            return;
-        };
-        response.observed_bytes = response.observed_bytes.saturating_add(data.len());
-        if response.observed_bytes > MAX_OBSERVED_HEADER_BLOCK_BYTES {
-            response.truncated = true;
-            return;
-        }
-        if let Some(header) = parse_header_line(line) {
-            response.headers.push(header);
+        if let Some(exchange) = state
+            .journal
+            .exchanges
+            .iter_mut()
+            .rev()
+            .find(|exchange| exchange.response.is_none())
+        {
+            exchange.response = Some(NetworkResponseObservation::from_headers(status, headers));
         }
     }
 
@@ -293,79 +276,37 @@ impl NetworkObservationRecorder {
 #[derive(Default)]
 struct NetworkObservationRecorderState {
     journal: NetworkObservationJournal,
-    current_request_cookie_report: Option<StoredCookieQueryReport>,
-    pending_response: Option<PendingResponseObservation>,
 }
 
-struct PendingResponseObservation {
-    status: u16,
-    headers: Vec<(String, String)>,
-    observed_bytes: usize,
-    truncated: bool,
+#[derive(Debug)]
+struct NetworkTransportObserver {
+    recorder: NetworkObservationRecorder,
+    cookie_report: Option<StoredCookieQueryReport>,
 }
 
-impl PendingResponseObservation {
-    fn finish(self) -> NetworkResponseObservation {
-        NetworkResponseObservation {
-            status: self.status,
-            headers: self.headers,
-            truncated: self.truncated,
+impl moli_stealth_net::TransportObserver for NetworkTransportObserver {
+    fn request_sent(&self, headers: &[(String, String)]) {
+        self.recorder
+            .record_request_sent(headers, self.cookie_report.clone());
+    }
+
+    fn response_received(&self, status: u16, headers: &[(String, String)]) {
+        self.recorder.record_response_received(status, headers);
+    }
+}
+
+fn bounded_headers(headers: &[(String, String)]) -> (Vec<(String, String)>, bool) {
+    let mut observed = Vec::with_capacity(headers.len());
+    let mut observed_bytes = 0usize;
+    for (name, value) in headers {
+        let header_bytes = name.len().saturating_add(value.len()).saturating_add(4);
+        if observed_bytes.saturating_add(header_bytes) > MAX_OBSERVED_HEADER_BLOCK_BYTES {
+            return (observed, true);
         }
+        observed_bytes += header_bytes;
+        observed.push((name.clone(), value.clone()));
     }
-}
-
-fn bounded_header_data(data: &[u8]) -> (&[u8], bool) {
-    if data.len() > MAX_OBSERVED_HEADER_BLOCK_BYTES {
-        (&data[..MAX_OBSERVED_HEADER_BLOCK_BYTES], true)
-    } else {
-        (data, false)
-    }
-}
-
-fn parse_request_header_block(data: &[u8]) -> Vec<(String, String)> {
-    String::from_utf8_lossy(data)
-        .lines()
-        .enumerate()
-        .filter_map(|(index, line)| {
-            let line = line.trim_end_matches('\r');
-            if (index == 0 && is_http_request_line(line)) || line.starts_with(':') {
-                return None;
-            }
-            parse_header_line(line)
-        })
-        .collect()
-}
-
-fn is_http_request_line(line: &str) -> bool {
-    let mut fields = line.split_whitespace();
-    let (Some(method), Some(target), Some(version), None) =
-        (fields.next(), fields.next(), fields.next(), fields.next())
-    else {
-        return false;
-    };
-    !method.is_empty()
-        && method
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
-        && !target.is_empty()
-        && version.starts_with("HTTP/")
-}
-
-fn parse_header_line(line: &str) -> Option<(String, String)> {
-    let (name, value) = line.split_once(':')?;
-    let name = name.trim();
-    if name.is_empty() {
-        return None;
-    }
-    Some((name.to_owned(), value.trim().to_owned()))
-}
-
-fn parse_status_line(line: &str) -> Option<u16> {
-    line.strip_prefix("HTTP/")?
-        .split_whitespace()
-        .nth(1)?
-        .parse()
-        .ok()
+    (observed, false)
 }
 
 /// Machine-readable context attached to a network fetch error.
@@ -383,7 +324,7 @@ pub struct NetworkFetchFailureContext {
 /// Request and redirect state owned by the fetch runtime when a transfer fails.
 ///
 /// This remains separate from the raw transport observation journal: the
-/// journal records what libcurl put on the wire, while this context records the
+/// journal records what the transport put on the wire, while this context records the
 /// browser-facing request chain that selected those exchanges.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NetworkFetchFailureRequestContext {
@@ -654,18 +595,17 @@ mod tests {
     #[test]
     fn recorder_preserves_redirect_exchange_order_and_raw_response_status() {
         let recorder = NetworkObservationRecorder::default();
-        recorder.record_request_header_block(
-            b"GET /start HTTP/1.1\r\nHost: example.test\r\nAccept-Encoding: gzip\r\n\r\n",
-        );
-        recorder.record_response_header_line(b"HTTP/1.1 302 Found\r\n");
-        recorder.record_response_header_line(b"Location: /final\r\n");
-        recorder.record_response_header_line(b"\r\n");
-        recorder.record_request_header_block(
-            b"GET /final HTTP/1.1\r\nHost: example.test\r\nIf-None-Match: \"v1\"\r\n\r\n",
-        );
-        recorder.record_response_header_line(b"HTTP/1.1 304 Not Modified\r\n");
-        recorder.record_response_header_line(b"ETag: \"v1\"\r\n");
-        recorder.record_response_header_line(b"\r\n");
+        let observer = recorder.transport_observer(None);
+        observer.request_sent(&[
+            ("Host".to_owned(), "example.test".to_owned()),
+            ("Accept-Encoding".to_owned(), "gzip".to_owned()),
+        ]);
+        observer.response_received(302, &[("Location".to_owned(), "/final".to_owned())]);
+        observer.request_sent(&[
+            ("Host".to_owned(), "example.test".to_owned()),
+            ("If-None-Match".to_owned(), "\"v1\"".to_owned()),
+        ]);
+        observer.response_received(304, &[("ETag".to_owned(), "\"v1\"".to_owned())]);
 
         let journal = recorder.snapshot();
         assert_eq!(journal.exchanges().len(), 2);
@@ -726,14 +666,11 @@ mod tests {
     #[test]
     fn recorder_bounds_exchange_count() {
         let recorder = NetworkObservationRecorder::default();
+        let observer = recorder.transport_observer(None);
         for index in 0..=MAX_OBSERVED_EXCHANGES {
-            recorder.record_request_header_block(
-                format!("GET /{index} HTTP/1.1\r\nHost: example.test\r\n\r\n").as_bytes(),
-            );
+            observer.request_sent(&[("X-Request".to_owned(), index.to_string())]);
         }
-        recorder.record_response_header_line(b"HTTP/1.1 200 OK\r\n");
-        recorder.record_response_header_line(b"Content-Length: 0\r\n");
-        recorder.record_response_header_line(b"\r\n");
+        observer.response_received(200, &[("Content-Length".to_owned(), "0".to_owned())]);
 
         let journal = recorder.snapshot();
         assert_eq!(journal.exchanges().len(), MAX_OBSERVED_EXCHANGES);
@@ -744,9 +681,11 @@ mod tests {
     #[test]
     fn recorder_bounds_each_header_block() {
         let recorder = NetworkObservationRecorder::default();
-        let mut request = b"GET / HTTP/1.1\r\nX-Large: ".to_vec();
-        request.resize(MAX_OBSERVED_HEADER_BLOCK_BYTES + 1, b'a');
-        recorder.record_request_header_block(&request);
+        let observer = recorder.transport_observer(None);
+        observer.request_sent(&[(
+            "X-Large".to_owned(),
+            "a".repeat(MAX_OBSERVED_HEADER_BLOCK_BYTES + 1),
+        )]);
 
         let journal = recorder.snapshot();
         let request = journal
@@ -754,28 +693,6 @@ mod tests {
             .expect("request observation");
         assert!(request.truncated());
         assert!(journal.truncated());
-    }
-
-    #[test]
-    fn recorder_skips_absolute_form_proxy_request_line() {
-        let recorder = NetworkObservationRecorder::default();
-        recorder.record_request_header_block(
-            b"GET http://example.test/proxy HTTP/1.1\r\nHost: example.test\r\nProxy-Connection: Keep-Alive\r\n\r\n",
-        );
-
-        let headers = recorder
-            .snapshot()
-            .final_request_observation()
-            .expect("request observation")
-            .headers()
-            .to_vec();
-        assert_eq!(
-            headers,
-            [
-                ("Host".to_owned(), "example.test".to_owned()),
-                ("Proxy-Connection".to_owned(), "Keep-Alive".to_owned()),
-            ]
-        );
     }
 
     #[test]

@@ -9,10 +9,10 @@ mod cancellation;
 mod client;
 mod client_hints;
 mod config;
-mod dns;
 mod error;
 mod headers;
 mod network_fetch_result;
+#[cfg(test)]
 mod proxy_connect;
 mod referrer_policy;
 mod request;
@@ -25,9 +25,7 @@ mod tests;
 mod url_pattern;
 
 #[cfg(any(test, feature = "test-support"))]
-pub use blocking::{
-    StreamingHtmlResponseStart, StreamingResponseCollector, outgoing_request_headers,
-};
+pub use blocking::{StreamingHtmlResponseStart, outgoing_request_headers};
 pub use blocking::{
     clear_http_cache, clear_http_cache_for_origin, clear_http_cache_root,
     clear_http_cache_root_for_origin, cookie_header_for_request, http_cache_stats,

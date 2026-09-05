@@ -7,10 +7,14 @@ use moli_core::{
     runtime::BrowserConfig,
 };
 use moli_fetch::{FetchConfig, WebBotAuthProfile, WebBotAuthSigner};
+use moli_stealth_net::{H2Setting, TransportFingerprint};
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use crate::cli::{Cli, Commands, CommonArgs, DumpFormat, StripOptions, WebBotAuthProfileChoice};
+use crate::cli::{
+    Cli, Commands, CommonArgs, DumpFormat, StealthPresetChoice, StripOptions,
+    WebBotAuthProfileChoice,
+};
 use crate::network_trace::NetworkTraceConfigSummary;
 
 pub use moli_protocol_server::ServerConfig;
@@ -18,6 +22,8 @@ pub use moli_protocol_server::ServerConfig;
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub log_filter: String,
+    /// 固定于进程启动的传输指纹；不属于 BrowserContext 或页面配置。
+    pub transport_fingerprint: TransportFingerprint,
     pub browser: BrowserConfig,
     pub server: ServerConfig,
     pub fetch: FetchCommandConfig,
@@ -84,6 +90,8 @@ impl AppConfig {
 }
 
 fn apply_common_args(config: &mut AppConfig, common: &CommonArgs) -> Result<()> {
+    config.transport_fingerprint = transport_fingerprint_from_args(common)?;
+
     if let Some(log_level) = common.log_level {
         config.log_filter = log_level.as_tracing_filter().to_owned();
     }
@@ -207,6 +215,50 @@ fn apply_common_args(config: &mut AppConfig, common: &CommonArgs) -> Result<()> 
     Ok(())
 }
 
+fn transport_fingerprint_from_args(common: &CommonArgs) -> Result<TransportFingerprint> {
+    let mut fingerprint = match common.stealth {
+        StealthPresetChoice::Chrome => TransportFingerprint::chrome(),
+        StealthPresetChoice::Off => TransportFingerprint::default(),
+    };
+
+    if let Some(value) = &common.tls_cipher_list {
+        fingerprint.tls.cipher_list = Some(value.clone());
+    }
+    if let Some(value) = &common.tls_curves {
+        fingerprint.tls.curves_list = Some(value.clone());
+    }
+    if let Some(value) = &common.tls_signature_algorithms {
+        fingerprint.tls.signature_algorithms = Some(value.clone());
+    }
+    if let Some(value) = common.http2_header_table_size {
+        fingerprint.set_h2_setting(H2Setting::HeaderTableSize, Some(value));
+    }
+    if let Some(value) = common.http2_enable_push {
+        fingerprint.set_h2_setting(H2Setting::EnablePush, Some(u32::from(value)));
+    }
+    if let Some(value) = common.http2_advertised_max_concurrent_streams {
+        fingerprint.set_h2_setting(H2Setting::MaxConcurrentStreams, Some(value));
+    }
+    if let Some(value) = common.http2_initial_window_size {
+        fingerprint.set_h2_setting(H2Setting::InitialWindowSize, Some(value));
+    }
+    if let Some(value) = common.http2_max_frame_size {
+        fingerprint.set_h2_setting(H2Setting::MaxFrameSize, Some(value));
+    }
+    if let Some(value) = common.http2_max_header_list_size {
+        fingerprint.set_h2_setting(H2Setting::MaxHeaderListSize, Some(value));
+    }
+    if let Some(value) = common.http2_connection_window_size {
+        fingerprint.h2.connection_window_size = Some(value);
+    }
+
+    fingerprint
+        .validate()
+        .map_err(anyhow::Error::new)
+        .context("invalid transport fingerprint configuration")?;
+    Ok(fingerprint)
+}
+
 fn configure_web_bot_auth(fetch: &mut FetchConfig, common: &CommonArgs) -> Result<()> {
     let (key_file, domain) = match (
         common.web_bot_auth_key_file.as_deref(),
@@ -275,6 +327,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             log_filter: "info".to_owned(),
+            transport_fingerprint: TransportFingerprint::chrome(),
             browser: BrowserConfig::default(),
             server: ServerConfig::default(),
             fetch: FetchCommandConfig::default(),

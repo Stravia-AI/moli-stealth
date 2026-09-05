@@ -1,335 +1,510 @@
-//! HTTP/1.1 fallback client using httparse.
-//!
-//! Used when ALPN negotiates `http/1.1` instead of `h2`.
+//! Incremental HTTP/1.x request and response framing.
 
+use bytes::{Buf, Bytes, BytesMut};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::net::error::NetError;
+use super::pool::{ConnectionPool, OriginKey, PooledH1};
+use crate::{ConnectedStream, TransportError};
 
-/// Raw HTTP/1.1 response before decompression.
-pub struct RawResponse {
-    pub status: u16,
-    pub status_text: String,
-    pub headers: Vec<(String, String)>,
-    pub body: Vec<u8>,
+const MAX_HEAD_BYTES: usize = 64 * 1024;
+const READ_CHUNK: usize = 16 * 1024;
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum BodyFraming {
+    Empty,
+    Fixed(u64),
+    Chunked,
+    CloseDelimited,
 }
 
-/// Send an HTTP/1.1 GET request over a stream.
-pub async fn send_get<S>(
-    stream: &mut S,
-    host: &str,
-    path: &str,
-    headers: &[(String, String)],
-) -> Result<RawResponse, NetError>
-where
-    S: AsyncReadExt + AsyncWriteExt + Unpin,
-{
-    send_request(stream, "GET", host, path, headers, None).await
+pub(crate) struct ResponseHead {
+    pub(crate) status: u16,
+    pub(crate) headers: Vec<(String, String)>,
+    pub(crate) version: http::Version,
+    pub(crate) framing: BodyFraming,
+    pub(crate) buffered: BytesMut,
+    pub(crate) reusable: bool,
 }
 
-/// Send an HTTP/1.1 POST request over a stream.
-pub async fn send_post<S>(
-    stream: &mut S,
-    host: &str,
-    path: &str,
-    headers: &[(String, String)],
-    body: &[u8],
-) -> Result<RawResponse, NetError>
-where
-    S: AsyncReadExt + AsyncWriteExt + Unpin,
-{
-    send_request(stream, "POST", host, path, headers, Some(body)).await
-}
-
-async fn send_request<S>(
-    stream: &mut S,
-    method: &str,
-    host: &str,
-    path: &str,
+pub(crate) async fn write_request(
+    connected: &mut ConnectedStream,
+    request: &super::TransportRequest,
     headers: &[(String, String)],
     body: Option<&[u8]>,
-) -> Result<RawResponse, NetError>
-where
-    S: AsyncReadExt + AsyncWriteExt + Unpin,
-{
-    // Build the request using Title-Case names and specific order for H1.
-    // Real Chrome H1 order: Host, Connection, (Content-Length), then others.
-    let mut request = format!("{method} {path} HTTP/1.1\r\n");
-    request.push_str(&format!("Host: {host}\r\n"));
-    request.push_str("Connection: keep-alive\r\n");
+) -> Result<Vec<(String, String)>, TransportError> {
+    let method = http::Method::from_bytes(request.method.as_bytes()).map_err(|_| {
+        TransportError::InvalidInput(format!("invalid HTTP method `{}`", request.method))
+    })?;
+    let url = &request.url;
+    let host = url
+        .host_str()
+        .ok_or_else(|| TransportError::InvalidInput("request URL has no host".into()))?;
+    let host_for_authority = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_owned()
+    };
+    let authority = match url.port() {
+        Some(port) => format!("{host_for_authority}:{port}"),
+        None => host_for_authority,
+    };
+    let target = if connected.absolute_form {
+        url.as_str().to_owned()
+    } else {
+        let mut target = url.path().to_owned();
+        if target.is_empty() {
+            target.push('/');
+        }
+        if let Some(query) = url.query() {
+            target.push('?');
+            target.push_str(query);
+        }
+        target
+    };
 
-    if let Some(body) = body {
-        request.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    let transfer_encodings = headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("transfer-encoding"))
+        .flat_map(|(_, value)| value.split(','))
+        .map(str::trim)
+        .collect::<Vec<_>>();
+    let request_chunked = !transfer_encodings.is_empty()
+        && transfer_encodings
+            .last()
+            .is_some_and(|value| value.eq_ignore_ascii_case("chunked"));
+    if !transfer_encodings.is_empty() && !request_chunked {
+        return Err(TransportError::InvalidInput(
+            "HTTP/1 request Transfer-Encoding must end in chunked".into(),
+        ));
     }
 
-    for (name, value) in headers {
-        let lk = name.to_lowercase();
-        // Skip headers we already added or pseudo-headers from H2 layer
-        if lk == "host" || lk == "connection" || lk == "content-length" || lk.starts_with(':') {
+    let mut sent = Vec::with_capacity(headers.len() + 2);
+    if !has_header(headers, "host") {
+        sent.push(("Host".into(), authority));
+    }
+    if body.is_some()
+        && !has_header(headers, "content-length")
+        && !has_header(headers, "transfer-encoding")
+    {
+        sent.push((
+            "Content-Length".into(),
+            body.map_or(0, <[u8]>::len).to_string(),
+        ));
+    }
+    sent.extend(
+        headers
+            .iter()
+            .filter(|(name, _)| !name.starts_with(':'))
+            .cloned(),
+    );
+
+    let mut wire = Vec::with_capacity(
+        method.as_str().len()
+            + target.len()
+            + sent
+                .iter()
+                .map(|(name, value)| name.len() + value.len() + 4)
+                .sum::<usize>()
+            + 16,
+    );
+    wire.extend_from_slice(method.as_str().as_bytes());
+    wire.push(b' ');
+    wire.extend_from_slice(target.as_bytes());
+    wire.extend_from_slice(b" HTTP/1.1\r\n");
+    for (name, value) in &sent {
+        validate_header(name, value)?;
+        wire.extend_from_slice(name.as_bytes());
+        wire.extend_from_slice(b": ");
+        wire.extend_from_slice(value.as_bytes());
+        wire.extend_from_slice(b"\r\n");
+    }
+    wire.extend_from_slice(b"\r\n");
+
+    connected.stream.write_all(&wire).await?;
+    sent.retain(|(name, _)| !name.eq_ignore_ascii_case("proxy-authorization"));
+    if let Some(observer) = &request.observer {
+        observer.request_sent(&sent);
+    }
+    if request_chunked {
+        if let Some(body) = body.filter(|body| !body.is_empty()) {
+            connected
+                .stream
+                .write_all(format!("{:x}\r\n", body.len()).as_bytes())
+                .await?;
+            connected.stream.write_all(body).await?;
+            connected.stream.write_all(b"\r\n").await?;
+        }
+        connected.stream.write_all(b"0\r\n\r\n").await?;
+    } else if let Some(body) = body {
+        connected.stream.write_all(body).await?;
+    }
+    connected.stream.flush().await?;
+    Ok(sent)
+}
+
+pub(crate) async fn read_final_head(
+    connected: &mut ConnectedStream,
+    request_method: &str,
+) -> Result<ResponseHead, TransportError> {
+    let mut buffered = BytesMut::with_capacity(8192);
+    loop {
+        let head_len = loop {
+            if let Some(position) = find_head_end(&buffered) {
+                break position + 4;
+            }
+            if buffered.len() >= MAX_HEAD_BYTES {
+                return Err(TransportError::Http1(
+                    "response headers exceed 64 KiB".into(),
+                ));
+            }
+            let read = connected.stream.read_buf(&mut buffered).await?;
+            if read == 0 {
+                return if buffered.is_empty() {
+                    Err(TransportError::EmptyResponse)
+                } else {
+                    Err(TransportError::Http1(
+                        "connection closed in response headers".into(),
+                    ))
+                };
+            }
+        };
+
+        let mut raw_headers = [httparse::EMPTY_HEADER; 128];
+        let mut parsed = httparse::Response::new(&mut raw_headers);
+        match parsed.parse(&buffered[..head_len]) {
+            Ok(httparse::Status::Complete(_)) => {}
+            Ok(httparse::Status::Partial) => {
+                return Err(TransportError::Http1("incomplete response headers".into()));
+            }
+            Err(error) => {
+                return Err(TransportError::Http1(format!(
+                    "malformed response headers: {error}"
+                )));
+            }
+        }
+        let status = parsed
+            .code
+            .ok_or_else(|| TransportError::Http1("response has no status".into()))?;
+        let version = match parsed.version {
+            Some(0) => http::Version::HTTP_10,
+            Some(1) => http::Version::HTTP_11,
+            _ => return Err(TransportError::Http1("unsupported HTTP version".into())),
+        };
+        let headers = parsed
+            .headers
+            .iter()
+            .map(|header| {
+                (
+                    header.name.to_ascii_lowercase(),
+                    String::from_utf8_lossy(header.value).into_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        buffered.advance(head_len);
+
+        // 101 is a final upgrade response. Other informational responses are
+        // consumed here and never confused with the final response metadata.
+        if (100..200).contains(&status) && status != 101 {
             continue;
         }
 
-        // Normalize casing to Title-Case for H1 (e.g., user-agent -> User-Agent)
-        let h1_name = normalize_h1_header_name(name);
-        request.push_str(&format!("{h1_name}: {value}\r\n"));
-    }
-    request.push_str("\r\n");
-
-    stream
-        .write_all(request.as_bytes())
-        .await
-        .map_err(|e| NetError::Http(format!("failed to write request: {e}")))?;
-
-    if let Some(body) = body {
-        stream
-            .write_all(body)
-            .await
-            .map_err(|e| NetError::Http(format!("failed to write body: {e}")))?;
-    }
-
-    stream
-        .flush()
-        .await
-        .map_err(|e| NetError::Http(format!("failed to flush: {e}")))?;
-
-    // Read the response
-    read_response(stream).await
-}
-
-async fn read_response<S>(stream: &mut S) -> Result<RawResponse, NetError>
-where
-    S: AsyncReadExt + Unpin,
-{
-    let mut buf = Vec::with_capacity(8192);
-    let header_len;
-
-    // Read until we find the end of headers (\r\n\r\n)
-    loop {
-        let mut tmp = [0u8; 4096];
-        let n = stream
-            .read(&mut tmp)
-            .await
-            .map_err(|e| NetError::Http(format!("read error: {e}")))?;
-        if n == 0 {
-            return Err(NetError::Http(
-                "connection closed before headers".to_string(),
+        let no_body = request_method.eq_ignore_ascii_case("HEAD")
+            || status == 101
+            || status == 204
+            || status == 205
+            || status == 304;
+        let connection_close =
+            header_tokens(&headers, "connection").any(|token| token.eq_ignore_ascii_case("close"));
+        let keep_alive = header_tokens(&headers, "connection")
+            .any(|token| token.eq_ignore_ascii_case("keep-alive"));
+        let transfer_encodings = header_tokens(&headers, "transfer-encoding").collect::<Vec<_>>();
+        let chunked = transfer_encodings
+            .last()
+            .is_some_and(|token| token.eq_ignore_ascii_case("chunked"));
+        if transfer_encodings
+            .iter()
+            .any(|token| token.eq_ignore_ascii_case("chunked"))
+            && !chunked
+        {
+            return Err(TransportError::Http1(
+                "chunked is not the final Transfer-Encoding".into(),
             ));
         }
-        buf.extend_from_slice(&tmp[..n]);
-
-        if let Some(pos) = find_header_end(&buf) {
-            header_len = pos + 4; // include \r\n\r\n
-            break;
-        }
-
-        if buf.len() > 65536 {
-            return Err(NetError::Http("headers too large".to_string()));
-        }
-    }
-
-    // Parse headers
-    let mut parsed_headers = [httparse::EMPTY_HEADER; 128];
-    let mut response = httparse::Response::new(&mut parsed_headers);
-    response
-        .parse(&buf[..header_len])
-        .map_err(|e| NetError::Http(format!("failed to parse response: {e}")))?;
-
-    let status = response.code.unwrap_or(0);
-    let status_text = response.reason.unwrap_or("").to_string();
-
-    let mut headers: Vec<(String, String)> = Vec::new();
-    let mut content_length: Option<usize> = None;
-    let mut chunked = false;
-
-    for header in response.headers.iter() {
-        let name = header.name.to_lowercase();
-        let value = String::from_utf8_lossy(header.value).to_string();
-        if name == "content-length" {
-            content_length = value.parse().ok();
-        }
-        if name == "transfer-encoding" && value.contains("chunked") {
-            chunked = true;
-        }
-        headers.push((name, value));
-    }
-
-    // Read the body
-    let body_start = &buf[header_len..];
-    let body = if chunked {
-        read_chunked_body(stream, body_start).await?
-    } else if let Some(len) = content_length {
-        read_content_length_body(stream, body_start, len).await?
-    } else {
-        // Read until connection close
-        read_until_close(stream, body_start).await?
-    };
-
-    Ok(RawResponse {
-        status,
-        status_text,
-        headers,
-        body,
-    })
-}
-
-fn find_header_end(buf: &[u8]) -> Option<usize> {
-    buf.windows(4).position(|w| w == b"\r\n\r\n")
-}
-
-/// Standard Chrome H1 header casing normalization.
-/// H2 uses lowercase exclusively, but H1 uses Title-Case.
-fn normalize_h1_header_name(name: &str) -> String {
-    match name.to_lowercase().as_str() {
-        "upgrade-insecure-requests" => "Upgrade-Insecure-Requests".to_string(),
-        "user-agent" => "User-Agent".to_string(),
-        "accept" => "Accept".to_string(),
-        "accept-encoding" => "Accept-Encoding".to_string(),
-        "accept-language" => "Accept-Language".to_string(),
-        "referer" => "Referer".to_string(),
-        "cookie" => "Cookie".to_string(),
-        "origin" => "Origin".to_string(),
-        "priority" => "Priority".to_string(),
-        "content-type" => "Content-Type".to_string(),
-        s if s.starts_with("sec-") => {
-            // sec-ch-ua -> Sec-Ch-Ua, sec-fetch-site -> Sec-Fetch-Site
-            let parts: Vec<String> = s
-                .split('-')
-                .map(|p| {
-                    let mut c = p.chars();
-                    match c.next() {
-                        None => String::new(),
-                        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
-                    }
-                })
-                .collect();
-            parts.join("-")
-        }
-        _ => {
-            // Default to capitalized first letter of each part
-            let parts: Vec<String> = name
-                .split('-')
-                .map(|p| {
-                    let mut c = p.chars();
-                    match c.next() {
-                        None => String::new(),
-                        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
-                    }
-                })
-                .collect();
-            parts.join("-")
-        }
+        let framing = if no_body {
+            BodyFraming::Empty
+        } else if chunked {
+            BodyFraming::Chunked
+        } else if let Some(length) = content_length(&headers)? {
+            BodyFraming::Fixed(length)
+        } else {
+            BodyFraming::CloseDelimited
+        };
+        let reusable = status != 101
+            && !connection_close
+            && !matches!(framing, BodyFraming::CloseDelimited)
+            && (version == http::Version::HTTP_11 || keep_alive);
+        return Ok(ResponseHead {
+            status,
+            headers,
+            version,
+            framing,
+            buffered,
+            reusable,
+        });
     }
 }
 
-async fn read_content_length_body<S>(
-    stream: &mut S,
-    initial: &[u8],
-    content_length: usize,
-) -> Result<Vec<u8>, NetError>
-where
-    S: AsyncReadExt + Unpin,
-{
-    let mut body = Vec::with_capacity(content_length);
-    body.extend_from_slice(initial);
-
-    while body.len() < content_length {
-        let mut tmp = vec![0u8; std::cmp::min(8192, content_length - body.len())];
-        let n = stream
-            .read(&mut tmp)
-            .await
-            .map_err(|e| NetError::Http(format!("body read error: {e}")))?;
-        if n == 0 {
-            break;
-        }
-        body.extend_from_slice(&tmp[..n]);
-    }
-
-    Ok(body)
+pub(crate) struct H1Body {
+    connection: Option<PooledH1>,
+    pool: ConnectionPool,
+    key: OriginKey,
+    framing: BodyFraming,
+    buffered: BytesMut,
+    reusable: bool,
+    chunk_remaining: usize,
+    chunk_needs_crlf: bool,
+    reading_trailers: bool,
+    finished: bool,
+    pool_on_complete: bool,
 }
 
-async fn read_chunked_body<S>(stream: &mut S, initial: &[u8]) -> Result<Vec<u8>, NetError>
-where
-    S: AsyncReadExt + Unpin,
-{
-    let mut raw = Vec::from(initial);
-    let mut decoded = Vec::new();
-
-    loop {
-        // Ensure we have enough data for the next chunk header
-        while !contains_crlf(&raw) {
-            let mut tmp = [0u8; 4096];
-            let n = stream
-                .read(&mut tmp)
-                .await
-                .map_err(|e| NetError::Http(format!("chunked read error: {e}")))?;
-            if n == 0 {
-                return Ok(decoded);
-            }
-            raw.extend_from_slice(&tmp[..n]);
+impl H1Body {
+    pub(crate) fn new(
+        connection: PooledH1,
+        pool: ConnectionPool,
+        key: OriginKey,
+        head: ResponseHead,
+    ) -> Self {
+        Self {
+            connection: Some(connection),
+            pool,
+            key,
+            framing: head.framing,
+            buffered: head.buffered,
+            reusable: head.reusable,
+            chunk_remaining: 0,
+            chunk_needs_crlf: false,
+            reading_trailers: false,
+            finished: false,
+            pool_on_complete: true,
         }
+    }
 
-        // Parse chunk size
-        let crlf_pos = match raw.windows(2).position(|w| w == b"\r\n") {
-            Some(pos) => pos,
-            None => {
-                return Err(NetError::Http(
-                    "malformed chunked encoding: missing CRLF".into(),
+    pub(crate) async fn chunk(&mut self) -> Result<Option<Bytes>, TransportError> {
+        if self.finished {
+            return Ok(None);
+        }
+        match self.framing {
+            BodyFraming::Empty => self.complete().await,
+            BodyFraming::Fixed(remaining) => self.fixed_chunk(remaining).await,
+            BodyFraming::Chunked => self.chunked_chunk().await,
+            BodyFraming::CloseDelimited => self.close_delimited_chunk().await,
+        }
+    }
+
+    pub(crate) async fn drain_for_retry(mut self) -> Result<Option<PooledH1>, TransportError> {
+        self.pool_on_complete = false;
+        while self.chunk().await?.is_some() {}
+        Ok(self.connection.take())
+    }
+
+    async fn fixed_chunk(&mut self, remaining: u64) -> Result<Option<Bytes>, TransportError> {
+        if remaining == 0 {
+            return self.complete().await;
+        }
+        if self.buffered.is_empty() {
+            let read = self.read_more().await?;
+            if read == 0 {
+                self.reusable = false;
+                return Err(TransportError::Http1(
+                    "connection closed before Content-Length bytes arrived".into(),
                 ));
             }
-        };
-        let size_str = std::str::from_utf8(&raw[..crlf_pos])
-            .map_err(|e| NetError::Http(format!("invalid chunk size: {e}")))?;
-        // Handle chunk extensions (size;ext=val)
-        let size_str = size_str.split(';').next().unwrap_or(size_str).trim();
-        let chunk_size = usize::from_str_radix(size_str, 16)
-            .map_err(|e| NetError::Http(format!("invalid chunk size '{size_str}': {e}")))?;
-
-        if chunk_size == 0 {
-            break; // Last chunk
         }
+        let count = usize::try_from(remaining)
+            .unwrap_or(usize::MAX)
+            .min(self.buffered.len())
+            .min(READ_CHUNK);
+        let bytes = self.buffered.split_to(count).freeze();
+        self.framing = BodyFraming::Fixed(remaining - count as u64);
+        Ok(Some(bytes))
+    }
 
-        // Consume the size line
-        raw = raw[crlf_pos + 2..].to_vec();
+    async fn close_delimited_chunk(&mut self) -> Result<Option<Bytes>, TransportError> {
+        if self.buffered.is_empty() && self.read_more().await? == 0 {
+            self.finished = true;
+            self.connection.take();
+            return Ok(None);
+        }
+        let count = self.buffered.len().min(READ_CHUNK);
+        Ok(Some(self.buffered.split_to(count).freeze()))
+    }
 
-        // Read chunk data
-        while raw.len() < chunk_size + 2 {
-            let mut tmp = [0u8; 8192];
-            let n = stream
-                .read(&mut tmp)
-                .await
-                .map_err(|e| NetError::Http(format!("chunk data read error: {e}")))?;
-            if n == 0 {
-                return Err(NetError::Http("unexpected EOF in chunked body".to_string()));
+    async fn chunked_chunk(&mut self) -> Result<Option<Bytes>, TransportError> {
+        loop {
+            if self.reading_trailers {
+                if self.buffered.starts_with(b"\r\n") {
+                    self.buffered.advance(2);
+                    return self.complete().await;
+                }
+                if let Some(end) = find_head_end(&self.buffered) {
+                    self.buffered.advance(end + 4);
+                    return self.complete().await;
+                }
+                if self.buffered.len() >= MAX_HEAD_BYTES {
+                    self.reusable = false;
+                    return Err(TransportError::Http1("chunk trailers exceed 64 KiB".into()));
+                }
+                if self.read_more().await? == 0 {
+                    self.reusable = false;
+                    return Err(TransportError::Http1(
+                        "connection closed in chunk trailers".into(),
+                    ));
+                }
+                continue;
             }
-            raw.extend_from_slice(&tmp[..n]);
-        }
 
-        decoded.extend_from_slice(&raw[..chunk_size]);
-        raw = raw[chunk_size + 2..].to_vec(); // skip data + trailing \r\n
+            if self.chunk_needs_crlf {
+                while self.buffered.len() < 2 {
+                    if self.read_more().await? == 0 {
+                        self.reusable = false;
+                        return Err(TransportError::Http1(
+                            "connection closed after chunk data".into(),
+                        ));
+                    }
+                }
+                if &self.buffered[..2] != b"\r\n" {
+                    self.reusable = false;
+                    return Err(TransportError::Http1(
+                        "chunk data lacks trailing CRLF".into(),
+                    ));
+                }
+                self.buffered.advance(2);
+                self.chunk_needs_crlf = false;
+            }
+
+            if self.chunk_remaining == 0 {
+                let line_end = loop {
+                    if let Some(position) =
+                        self.buffered.windows(2).position(|part| part == b"\r\n")
+                    {
+                        break position;
+                    }
+                    if self.buffered.len() >= MAX_HEAD_BYTES {
+                        self.reusable = false;
+                        return Err(TransportError::Http1("chunk size line is too large".into()));
+                    }
+                    if self.read_more().await? == 0 {
+                        self.reusable = false;
+                        return Err(TransportError::Http1(
+                            "connection closed in chunk size".into(),
+                        ));
+                    }
+                };
+                let line = std::str::from_utf8(&self.buffered[..line_end])
+                    .map_err(|_| TransportError::Http1("chunk size is not ASCII".into()))?;
+                let size = line.split(';').next().unwrap_or("").trim();
+                self.chunk_remaining = usize::from_str_radix(size, 16)
+                    .map_err(|_| TransportError::Http1("invalid chunk size".into()))?;
+                self.buffered.advance(line_end + 2);
+                if self.chunk_remaining == 0 {
+                    self.reading_trailers = true;
+                    continue;
+                }
+            }
+
+            if self.buffered.is_empty() && self.read_more().await? == 0 {
+                self.reusable = false;
+                return Err(TransportError::Http1(
+                    "connection closed in chunk data".into(),
+                ));
+            }
+            let count = self
+                .chunk_remaining
+                .min(self.buffered.len())
+                .min(READ_CHUNK);
+            let bytes = self.buffered.split_to(count).freeze();
+            self.chunk_remaining -= count;
+            if self.chunk_remaining == 0 {
+                self.chunk_needs_crlf = true;
+            }
+            return Ok(Some(bytes));
+        }
     }
 
-    Ok(decoded)
-}
-
-fn contains_crlf(buf: &[u8]) -> bool {
-    buf.windows(2).any(|w| w == b"\r\n")
-}
-
-async fn read_until_close<S>(stream: &mut S, initial: &[u8]) -> Result<Vec<u8>, NetError>
-where
-    S: AsyncReadExt + Unpin,
-{
-    let mut body = Vec::from(initial);
-    loop {
-        let mut tmp = [0u8; 8192];
-        let n = stream
-            .read(&mut tmp)
-            .await
-            .map_err(|e| NetError::Http(format!("read error: {e}")))?;
-        if n == 0 {
-            break;
-        }
-        body.extend_from_slice(&tmp[..n]);
+    async fn read_more(&mut self) -> Result<usize, TransportError> {
+        let connection = self.connection.as_mut().ok_or(TransportError::Cancelled)?;
+        Ok(connection
+            .connected
+            .stream
+            .read_buf(&mut self.buffered)
+            .await?)
     }
-    Ok(body)
+
+    async fn complete(&mut self) -> Result<Option<Bytes>, TransportError> {
+        self.finished = true;
+        if self.reusable {
+            if self.pool_on_complete
+                && let Some(connection) = self.connection.take()
+            {
+                self.pool.put_h1(self.key.clone(), connection).await;
+            }
+        } else {
+            self.connection.take();
+        }
+        Ok(None)
+    }
+}
+
+fn validate_header(name: &str, value: &str) -> Result<(), TransportError> {
+    http::header::HeaderName::from_bytes(name.as_bytes())
+        .map_err(|_| TransportError::InvalidInput(format!("invalid header name `{name}`")))?;
+    http::header::HeaderValue::from_str(value)
+        .map_err(|_| TransportError::InvalidInput(format!("invalid value for header `{name}`")))?;
+    Ok(())
+}
+
+fn has_header(headers: &[(String, String)], wanted: &str) -> bool {
+    headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case(wanted))
+}
+
+fn find_head_end(bytes: &[u8]) -> Option<usize> {
+    bytes.windows(4).position(|part| part == b"\r\n\r\n")
+}
+
+fn header_tokens<'a>(
+    headers: &'a [(String, String)],
+    wanted: &'a str,
+) -> impl Iterator<Item = &'a str> {
+    headers
+        .iter()
+        .filter(move |(name, _)| name.eq_ignore_ascii_case(wanted))
+        .flat_map(|(_, value)| value.split(','))
+        .map(str::trim)
+}
+
+fn content_length(headers: &[(String, String)]) -> Result<Option<u64>, TransportError> {
+    let values = headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+        .flat_map(|(_, value)| value.split(','))
+        .map(str::trim)
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .map_err(|_| TransportError::Http1("invalid Content-Length".into()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if let Some(first) = values.first().copied() {
+        if values.iter().any(|value| *value != first) {
+            return Err(TransportError::Http1(
+                "conflicting Content-Length fields".into(),
+            ));
+        }
+        Ok(Some(first))
+    } else {
+        Ok(None)
+    }
 }

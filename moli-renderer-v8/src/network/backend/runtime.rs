@@ -27,7 +27,7 @@ static NEXT_BROWSER_RESOURCE_OWNER_ROOT_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Long-lived transport and renderer memory-cache state for one browser context.
 ///
-/// Clones intentionally share the libcurl/HTTP runtime, cookie store, and one
+/// Clones intentionally share the async HTTP runtime, cookie store, and one
 /// bounded renderer memory cache. It must not acquire mutable Page, Document,
 /// Worker, or request-delivery state.
 #[derive(Clone)]

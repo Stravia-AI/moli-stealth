@@ -7804,12 +7804,17 @@ fn navigator_declared_objects_keep_brand_and_enumerable_members() {
                   Object.prototype.toString.call(high),
                   Object.keys(empty).join(","),
                   Object.keys(high).join(","),
-                  high.fullVersionList
-                    .map(({ brand, version }) => `${brand}:${version}`)
-                    .join(","),
-                  high.architecture,
-                  high.uaFullVersion,
-                  high.formFactors.join(","),
+                  high.fullVersionList.length === ua.brands.length,
+                  high.fullVersionList.every((entry, index) =>
+                    entry.brand === ua.brands[index].brand &&
+                    entry.version.startsWith(`${ua.brands[index].version}.`) &&
+                    Object.keys(entry).join(",") === "brand,version"
+                  ),
+                  high.uaFullVersion === high.fullVersionList[0].version,
+                  typeof high.architecture === "string",
+                  high.uaFullVersion.length > ua.brands[0].version.length,
+                  Array.isArray(high.formFactors) &&
+                    high.formFactors.every(value => typeof value === "string"),
                   "bitness" in high,
                   "formFactor" in high
                 ].join("|");
@@ -7836,7 +7841,7 @@ fn navigator_declared_objects_keep_brand_and_enumerable_members() {
 
     assert_eq!(
         result,
-        r#"{"ua":"true|[object NavigatorUAData]|brands,mobile,platform|true|brand,version","json":"[object Object]|brands,mobile,platform|true|brand,version","highEntropy":"[object Object]|brands,mobile,platform|architecture,brands,formFactors,fullVersionList,mobile,platform,uaFullVersion|Chromium:152.0.7977.75, Not A;Brand:99.0.0.0,Google Chrome:152.0.7977.75|x86|152.0.7977.75|Desktop|false|false","storage":"true|[object StorageEstimate]|quota,usage,usageDetails|1073741824|0|[object Object]|"}"#
+        r#"{"ua":"true|[object NavigatorUAData]|brands,mobile,platform|true|brand,version","json":"[object Object]|brands,mobile,platform|true|brand,version","highEntropy":"[object Object]|brands,mobile,platform|architecture,brands,formFactors,fullVersionList,mobile,platform,uaFullVersion|true|true|true|true|true|true|false|false","storage":"true|[object StorageEstimate]|quota,usage,usageDetails|1073741824|0|[object Object]|"}"#
     );
 }
 

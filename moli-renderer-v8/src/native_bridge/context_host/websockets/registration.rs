@@ -53,6 +53,10 @@ impl JsContextHost {
             user_agent: loader
                 .map(|loader| loader.user_agent().to_owned())
                 .unwrap_or_else(|| moli_fetch::FetchConfig::DEFAULT_USER_AGENT.to_owned()),
+            accept_language: loader
+                .map(|loader| loader.browser_identity().accept_language().to_owned())
+                .unwrap_or_else(|| "en-US,en;q=0.9".to_owned()),
+            tls_session_cache: loader.map(|loader| loader.tls_session_cache()),
             extra_headers: self.extra_http_headers.clone(),
             http_proxy: loader.and_then(|loader| loader.http_proxy().map(ToOwned::to_owned)),
             http_no_proxy: loader.and_then(|loader| loader.http_no_proxy().map(ToOwned::to_owned)),

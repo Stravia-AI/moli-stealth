@@ -5,12 +5,10 @@ mod handshake;
 mod headers;
 mod limits;
 mod protocol;
-mod proxy;
 mod request;
 mod runtime;
 mod stream;
 mod synthetic;
-mod tls;
 mod types;
 
 pub use cookie::websocket_cookie_url;

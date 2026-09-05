@@ -721,7 +721,7 @@ async fn send_malformed_http2_response(
     let _ = tokio::io::AsyncWriteExt::write_all(stream, &response).await;
     let _ = tokio::io::AsyncWriteExt::flush(stream).await;
 
-    // Keep the connection alive until libcurl has classified the malformed
+    // Keep the connection alive until the client has classified the malformed
     // response. A wall-clock delay is racy under load and can turn the
     // intended HTTP/2 protocol error into a peer-reset error instead.
     wait_for_http2_client_error(stream, stream_id).await;
@@ -1043,6 +1043,10 @@ fn handle_scripted_connection(
     requests: Arc<Mutex<Vec<String>>>,
     responses: Arc<Mutex<VecDeque<ScriptedResponse>>>,
 ) {
+    // Windows accepted sockets inherit the nonblocking listener mode.
+    stream
+        .set_nonblocking(false)
+        .expect("scripted connections should use blocking reads");
     let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
     let mut request = Vec::new();
     let mut chunk = [0; 4096];

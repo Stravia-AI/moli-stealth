@@ -351,16 +351,6 @@ pub struct RequestAuth {
     pub password: String,
 }
 
-impl RequestAuth {
-    fn can_use_header_transport(&self) -> bool {
-        matches!(
-            (self.target, self.scheme),
-            (RequestAuthTarget::Server, RequestAuthScheme::Basic)
-                | (RequestAuthTarget::ProxyHeader, RequestAuthScheme::Basic)
-        )
-    }
-}
-
 impl Request {
     pub(crate) fn method(&self) -> &str {
         &self.method
@@ -672,12 +662,6 @@ impl Request {
 
     pub fn auth(&self) -> Option<&RequestAuth> {
         self.auth.as_ref()
-    }
-
-    pub fn auth_requires_buffered_transport(&self) -> bool {
-        self.auth
-            .as_ref()
-            .is_some_and(|auth| !auth.can_use_header_transport())
     }
 
     pub fn preemptive_server_basic_auth_for_url(&self, request_url: &Url) -> Option<(&str, &str)> {

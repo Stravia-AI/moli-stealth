@@ -47,6 +47,7 @@ moli-canvas = { path = "../moli-canvas" }
 moli-encoding = { path = "../moli-encoding" }
 moli-encoding-detector = { path = "../moli-encoding-detector" }
 moli-fetch = { path = "../moli-fetch" }
+moli-stealth-net = { path = "../moli-stealth-net" }
 moli-file-api = { path = "../moli-file-api" }
 moli-geometry = { path = "../moli-geometry" }
 moli-http-cache = { path = "../moli-http-cache" }
@@ -82,7 +83,6 @@ moli-webidl = { path = "../moli-webidl" }
 moli-webidl-callback = { path = "../moli-webidl-callback" }
 moli-websocket = { path = "../moli-websocket" }
 moli-xpath = { path = "../moli-xpath" }
-curl = { version = "0.4.49", default-features = false, features = ["brotli", "http2", "poll_7_68_0", "ssl", "static-curl"] }
 http = "1"
 httpdate = "1.0.3"
 html-escape = "0.2.13"

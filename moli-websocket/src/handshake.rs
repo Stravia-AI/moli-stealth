@@ -1,30 +1,54 @@
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use bytes::BytesMut;
+use moli_stealth_net::BoxedStream;
+use ratchet_rs::{
+    ExtensionProvider, Role, WebSocket, WebSocketConfig,
+    deflate::{Deflate, DeflateExtProvider},
 };
-use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream,
-    tungstenite::{
-        handshake::{client::Response, derive_accept_key},
-        protocol::Role,
-    },
-};
+use sha1::{Digest, Sha1};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+use crate::{headers::request_header_entries, request::chrome_deflate_config};
+
+type Response = http::Response<()>;
+pub(crate) type BrowserWebSocket = WebSocket<BoxedStream, Deflate>;
 
 const MAX_WEBSOCKET_HANDSHAKE_RESPONSE_SIZE: usize = 64 * 1024;
 
 pub(crate) async fn browser_client_handshake(
     request: http::Request<()>,
-    mut stream: MaybeTlsStream<TcpStream>,
-) -> Result<(WebSocketStream<MaybeTlsStream<TcpStream>>, Response), String> {
+    mut stream: BoxedStream,
+) -> Result<(BrowserWebSocket, Response), String> {
     write_handshake_request(&mut stream, &request).await?;
     let (response, tail) = read_handshake_response(&mut stream).await?;
     validate_handshake_response(&request, &response)?;
-    let stream = WebSocketStream::from_partially_read(stream, tail, Role::Client, None).await;
+    validate_extension_selection(&request, &response)?;
+    let mut extension = DeflateExtProvider::with_config(chrome_deflate_config())
+        .negotiate_client(response.headers())
+        .map_err(|error| format!("invalid WebSocket extension negotiation: {error}"))?;
+    if extension.is_none()
+        && response
+            .headers()
+            .contains_key(http::header::SEC_WEBSOCKET_EXTENSIONS)
+    {
+        return Err("WebSocket server selected an unacceptable extension configuration".to_owned());
+    }
+    let config = WebSocketConfig::default();
+    if let Some(extension) = extension.as_mut() {
+        extension.set_max_message_size(config.max_message_size);
+    }
+    let stream = WebSocket::from_upgraded(
+        config,
+        stream,
+        extension,
+        BytesMut::from(tail.as_slice()),
+        Role::Client,
+    );
     Ok((stream, response))
 }
 
 async fn write_handshake_request(
-    stream: &mut MaybeTlsStream<TcpStream>,
+    stream: &mut BoxedStream,
     request: &http::Request<()>,
 ) -> Result<(), String> {
     let request_target = request
@@ -33,8 +57,8 @@ async fn write_handshake_request(
         .map(|path| path.as_str())
         .unwrap_or("/");
     let mut raw = format!("GET {request_target} HTTP/1.1\r\n").into_bytes();
-    for (name, value) in request.headers() {
-        raw.extend_from_slice(name.as_str().as_bytes());
+    for (name, value) in request_header_entries(request.headers()) {
+        raw.extend_from_slice(name.as_bytes());
         raw.extend_from_slice(b": ");
         raw.extend_from_slice(value.as_bytes());
         raw.extend_from_slice(b"\r\n");
@@ -50,9 +74,7 @@ async fn write_handshake_request(
         .map_err(|error| format!("failed to flush WebSocket handshake request: {error}"))
 }
 
-async fn read_handshake_response(
-    stream: &mut MaybeTlsStream<TcpStream>,
-) -> Result<(Response, Vec<u8>), String> {
+async fn read_handshake_response(stream: &mut BoxedStream) -> Result<(Response, Vec<u8>), String> {
     let mut raw = Vec::new();
     let mut chunk = [0_u8; 512];
     loop {
@@ -100,7 +122,7 @@ fn parse_handshake_response(raw_headers: &[u8]) -> Result<Response, String> {
         .ok_or_else(|| "WebSocket handshake response is missing status code".to_owned())?
         .parse::<u16>()
         .map_err(|error| format!("WebSocket handshake response has invalid status: {error}"))?;
-    let mut response = Response::new(None);
+    let mut response = Response::new(());
     *response.status_mut() = http::StatusCode::from_u16(status)
         .map_err(|error| format!("WebSocket handshake response has invalid status: {error}"))?;
 
@@ -147,7 +169,7 @@ fn validate_handshake_response(
         .get(http::header::SEC_WEBSOCKET_KEY)
         .and_then(|value| value.to_str().ok())
         .ok_or_else(|| "WebSocket request is missing Sec-WebSocket-Key".to_owned())?;
-    let expected_accept = derive_accept_key(key.as_bytes());
+    let expected_accept = derive_accept_key(key);
     let accept = response
         .headers()
         .get(http::header::SEC_WEBSOCKET_ACCEPT)
@@ -157,6 +179,81 @@ fn validate_handshake_response(
         return Err("WebSocket handshake response has invalid Sec-WebSocket-Accept".to_owned());
     }
     validate_response_subprotocol(request, response)
+}
+
+fn derive_accept_key(key: &str) -> String {
+    let mut hasher = Sha1::new();
+    hasher.update(key.as_bytes());
+    hasher.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+    BASE64.encode(hasher.finalize())
+}
+
+fn validate_extension_selection(
+    request: &http::Request<()>,
+    response: &Response,
+) -> Result<(), String> {
+    let offered = request
+        .headers()
+        .get_all(http::header::SEC_WEBSOCKET_EXTENSIONS)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .any(|value| {
+            value.split(',').any(|extension| {
+                extension
+                    .trim_start()
+                    .to_ascii_lowercase()
+                    .starts_with("permessage-deflate")
+            })
+        });
+
+    let mut selections = Vec::new();
+    for value in response
+        .headers()
+        .get_all(http::header::SEC_WEBSOCKET_EXTENSIONS)
+        .iter()
+    {
+        let value = value
+            .to_str()
+            .map_err(|error| format!("WebSocket response extensions are invalid: {error}"))?;
+        selections.extend(
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+        );
+    }
+    if selections.is_empty() {
+        return Ok(());
+    }
+    if !offered {
+        return Err("WebSocket server selected an unoffered extension".to_owned());
+    }
+    if selections.len() != 1 {
+        return Err("WebSocket server selected multiple extensions".to_owned());
+    }
+
+    let mut parameters = selections[0].split(';');
+    let extension = parameters.next().unwrap_or_default().trim();
+    if !extension.eq_ignore_ascii_case("permessage-deflate") {
+        return Err(format!(
+            "WebSocket server selected unsupported extension `{extension}`"
+        ));
+    }
+    for parameter in parameters {
+        let name = parameter
+            .trim()
+            .split_once('=')
+            .map(|(name, _)| name)
+            .unwrap_or(parameter.trim());
+
+        if name.eq_ignore_ascii_case("client_max_window_bits") && !parameter.trim().contains('=') {
+            return Err(
+                "WebSocket server selected invalid permessage-deflate parameter `client_max_window_bits` without a value"
+                    .to_owned(),
+            );
+        }
+    }
+    Ok(())
 }
 
 fn header_values_contain_token(

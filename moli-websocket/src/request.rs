@@ -1,11 +1,11 @@
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use ratchet_rs::{
+    ExtensionProvider,
+    deflate::{DeflateConfig, DeflateExtProvider},
+};
 use url::Url;
 
-use crate::{
-    ConnectOptions,
-    headers::{apply_connect_context_headers, insert_header_if_absent},
-    validate_subprotocols,
-};
+use crate::{ConnectOptions, headers::insert_header_if_absent, validate_subprotocols};
 
 pub(crate) fn build_websocket_request(
     url: &str,
@@ -13,16 +13,112 @@ pub(crate) fn build_websocket_request(
     context: &ConnectOptions,
 ) -> Result<http::Request<()>, String> {
     reject_blocked_websocket_port(url)?;
-    let mut request = url
-        .to_owned()
-        .into_client_request()
+    let parsed =
+        Url::parse(url).map_err(|error| format!("failed to parse WebSocket URL: {error}"))?;
+    let mut request_url = parsed.clone();
+    request_url
+        .set_username("")
+        .map_err(|_| "failed to build WebSocket request: invalid username".to_owned())?;
+    request_url
+        .set_password(None)
+        .map_err(|_| "failed to build WebSocket request: invalid password".to_owned())?;
+    let mut request = http::Request::builder()
+        .method(http::Method::GET)
+        .uri(request_url.as_str())
+        .body(())
         .map_err(|error| format!("failed to build WebSocket request: {error}"))?;
-    apply_connect_context_headers(&mut request, context)
-        .map_err(|error| format!("failed to build WebSocket handshake headers: {error}"))?;
-    apply_subprotocol_header(&mut request, protocols)?;
+
+    insert_browser_headers(&mut request, &parsed, context)?;
+    apply_extra_headers(&mut request, context)?;
     apply_basic_auth_header(&mut request, url)?;
     apply_cookie_header(&mut request, context)?;
+    apply_subprotocol_header(&mut request, protocols)?;
     Ok(request)
+}
+
+fn insert_browser_headers(
+    request: &mut http::Request<()>,
+    url: &Url,
+    context: &ConnectOptions,
+) -> Result<(), String> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| "failed to build WebSocket request: URL is missing host".to_owned())?;
+    let host = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_owned()
+    };
+    let authority = url
+        .port()
+        .map(|port| format!("{host}:{port}"))
+        .unwrap_or(host);
+    let key = BASE64.encode(rand::random::<[u8; 16]>());
+
+    for (name, value) in [
+        (http::header::HOST, authority.as_str()),
+        (http::header::CONNECTION, "Upgrade"),
+        (http::header::PRAGMA, "no-cache"),
+        (http::header::CACHE_CONTROL, "no-cache"),
+        (http::header::USER_AGENT, context.user_agent.as_str()),
+        (http::header::UPGRADE, "websocket"),
+        (http::header::ORIGIN, context.origin.as_str()),
+        (http::header::SEC_WEBSOCKET_VERSION, "13"),
+        (http::header::ACCEPT_ENCODING, "gzip, deflate, br, zstd"),
+        (
+            http::header::ACCEPT_LANGUAGE,
+            context.accept_language.as_str(),
+        ),
+        (http::header::SEC_WEBSOCKET_KEY, key.as_str()),
+    ] {
+        insert_header_if_absent(request, name, value)
+            .map_err(|error| format!("failed to build WebSocket handshake headers: {error}"))?;
+    }
+
+    let provider = DeflateExtProvider::with_config(chrome_deflate_config());
+    provider.apply_headers(request.headers_mut());
+    Ok(())
+}
+
+pub(crate) fn chrome_deflate_config() -> DeflateConfig {
+    DeflateConfig {
+        request_server_no_context_takeover: false,
+        request_client_no_context_takeover: false,
+        ..DeflateConfig::default()
+    }
+}
+
+fn apply_extra_headers(
+    request: &mut http::Request<()>,
+    context: &ConnectOptions,
+) -> Result<(), String> {
+    for (name, value) in &context.extra_headers {
+        if is_websocket_control_header(name) {
+            continue;
+        }
+        let Ok(name) = http::header::HeaderName::from_bytes(name.as_bytes()) else {
+            continue;
+        };
+        let value = value
+            .parse()
+            .map_err(|error| format!("failed to build WebSocket handshake headers: {error}"))?;
+        request.headers_mut().insert(name, value);
+    }
+    Ok(())
+}
+
+fn is_websocket_control_header(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "host"
+            | "connection"
+            | "upgrade"
+            | "sec-websocket-accept"
+            | "sec-websocket-extensions"
+            | "sec-websocket-key"
+            | "sec-websocket-protocol"
+            | "sec-websocket-version"
+    )
 }
 
 fn apply_subprotocol_header(

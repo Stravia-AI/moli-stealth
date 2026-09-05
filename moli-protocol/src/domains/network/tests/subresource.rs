@@ -84,7 +84,13 @@ async fn worker_websocket_runtime_activity_emits_cdp_websocket_events_without_pa
     assert!(ctx.sent.iter().any(|message| {
         message["method"] == json!("Network.webSocketWillSendHandshakeRequest")
             && message["params"]["requestId"] == json!(request_id)
-            && message["params"]["request"]["headers"]["origin"] == json!("null")
+            && message["params"]["request"]["headers"]
+                .as_object()
+                .is_some_and(|headers| {
+                    headers.iter().any(|(name, value)| {
+                        name.eq_ignore_ascii_case("origin") && value == &json!("null")
+                    })
+                })
     }));
     assert!(ctx.sent.iter().any(|message| {
         message["method"] == json!("Network.webSocketHandshakeResponseReceived")
@@ -584,7 +590,7 @@ fetch('/slow')
 </script>
 </body></html>"#;
                 let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{}",
+                    "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{}",
                     body.len(),
                     body
                 );
@@ -711,7 +717,7 @@ fetch('/slow-clone')
 </script>
 </body></html>"#;
                 let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{}",
+                    "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{}",
                     body.len(),
                     body
                 );
@@ -792,9 +798,11 @@ fetch('/slow-clone')
 async fn page_fetch_response_body_method_rejects_when_body_errors_after_headers() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let (release_failure_tx, release_failure_rx) = tokio::sync::watch::channel(false);
     let server = tokio::spawn(async move {
         loop {
             let (mut stream, _) = listener.accept().await.unwrap();
+            let mut release_failure_rx = release_failure_rx.clone();
             tokio::spawn(async move {
                 let path = read_raw_http_request_path(&mut stream).await;
                 if path == "/partial" {
@@ -804,7 +812,15 @@ async fn page_fetch_response_body_method_rejects_when_body_errors_after_headers(
                         )
                         .await
                         .unwrap();
-                    sleep(Duration::from_millis(80)).await;
+                    match tokio::time::timeout(
+                        Duration::from_secs(5),
+                        release_failure_rx.wait_for(|released| *released),
+                    )
+                    .await
+                    {
+                        Ok(Ok(_)) => {}
+                        _ => return,
+                    }
                     let _ = stream.shutdown().await;
                     return;
                 }
@@ -823,7 +839,7 @@ fetch('/partial')
 </script>
 </body></html>"#;
                 let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{}",
+                    "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{}",
                     body.len(),
                     body
                 );
@@ -855,15 +871,6 @@ fetch('/partial')
     }))
     .await;
 
-    // Polling window bumped from 20 iterations (~200 ms) to 200 (~2 s), and
-    // the trigger relaxed from the exact "yes|pending" intermediate to
-    // "anything where data-fetch-resolved=yes". The JS promise chain
-    // guarantees data-fetch-resolved is set in the first `.then(response =>
-    // ...)` *before* response.text() returns, so observing it set at all
-    // proves headers resolved first regardless of whether the body promise
-    // has since rejected. Under nextest concurrency the server-side 80 ms
-    // partial-then-shutdown window can race past the renderer's tick and
-    // the test would otherwise miss the "yes|pending" sliver entirely.
     let mut saw_headers_first = false;
     for poll_id in 7_382..7_582 {
         ctx.process_async(json!({
@@ -890,6 +897,7 @@ fetch('/partial')
         saw_headers_first,
         "fetch response should resolve before the body transfer fails"
     );
+    release_failure_tx.send(true).unwrap();
 
     flush_until_subresource_failed(
         &mut ctx,

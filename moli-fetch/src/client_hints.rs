@@ -351,7 +351,7 @@ mod tests {
         }));
         assert!(second.request.request_headers.iter().any(|(name, value)| {
             name.eq_ignore_ascii_case("sec-ch-ua-full-version-list")
-                && value.contains("152.0.7977.75")
+                && value.contains("152.0.7977.82")
         }));
         for (expected_name, expected_value) in [
             ("downlink", "1.7"),

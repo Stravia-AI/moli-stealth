@@ -112,6 +112,18 @@ moli fetch --layout --dump pdf https://example.com > page.pdf
 
 运行 `fetch --help` 可以查看完整的参数列表，包括输出格式、页面加载/响应等待条件、配置文件、代理设置、资源策略和跟踪选项。
 
+### 网络传输与 Stealth
+
+Moli 的 HTTP/1.x、HTTP/2 和出站 WebSocket 共用一套原生 Rust 异步传输，并使用 BoringSSL 处理 TLS。Moli 启动时默认在整个进程中启用以 Chrome **152.0.7977.82** 为参考的联动基线；这不是对所有 Chrome 指纹或渲染表面的通用承诺。尚不支持 HTTP/3。
+
+- `--stealth chrome` 是默认值；`--stealth off` 仍使用同一传输、证书校验和网络限制，只改用普通 TLS/HTTP 参数。单独使用 `moli-stealth-net` 库时，默认也是普通模式，必须由调用方显式选择预设。
+- TLS 可通过 `--tls-cipher-list`、`--tls-curves`、`--tls-signature-algorithms` 覆盖；HTTP/2 可通过 `--http2-header-table-size`、`--http2-enable-push`、`--http2-advertised-max-concurrent-streams`、`--http2-initial-window-size`、`--http2-max-frame-size`、`--http2-max-header-list-size`、`--http2-connection-window-size` 覆盖。配置在进程启动时校验并固定，修改后需要重启。
+- `--user-agent` 与 `--user-agent-suffix` 不会自动切换传输指纹。`moli fetch` 的显式 `--header 'Name: Value'` 优先于生成的请求头基线（Cookie 仍由浏览器 Cookie 策略决定）。
+- `--http-proxy` 优先于环境变量，显式空值会禁用代理回退；否则支持 `http_proxy`、`https_proxy`/`HTTPS_PROXY`、`all_proxy`/`ALL_PROXY` 以及 `--http-no-proxy` 或 `no_proxy`/`NO_PROXY`，并刻意忽略大写 `HTTP_PROXY`。`--http-host-resolve HOST:PORT:ADDR` 固定已批准的直连地址并跳过源站 DNS；代理侧解析遵循所选 HTTP/SOCKS 模式。
+- Basic 和 Digest 服务端/代理认证跨平台可用；Negotiate 与 NTLM 依赖 Windows SSPI，在其他平台不可用。HTTP 代理 Bearer 使用 `--proxy-bearer-token`，凭据只用于代理交换。
+
+本地 CLI/CDP 探针及证据见 [`moli-cdp-smoke/README.md`](../moli-cdp-smoke/README.md)。
+
 ### 启动自动化服务器
 
 ```bash
@@ -200,7 +212,7 @@ Moli 是 Lexmount 旗下的开源无头浏览器；Lexmount Browser 则是围绕
 
 Moli 是一个独立的浏览器内核，而不是对 Chromium 的封装。它基于 Rust 构建，有自己的一套所有权和生命周期规则，核心依赖包括：
 
-- `libcurl`——网络传输与多请求运行时
+- `moli-stealth-net`、BoringSSL 与 HTTP/2——支持 TLS/HTTP 指纹配置的原生 Rust 异步网络传输
 - `html5ever`——HTML 解析
 - `rusty_v8` / V8——JavaScript 执行
 - Servo/Stylo——选择器、层叠与样式计算

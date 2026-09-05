@@ -1,371 +1,312 @@
-//! HTTP/2 client with Chrome 147 SETTINGS fingerprint.
-//!
-//! Uses the `http2` crate (a fork of h2) which supports custom
-//! SETTINGS order, pseudo-header order, and stream priority — all
-//! required to match Chrome's HTTP/2 fingerprint.
-//!
-//! Verified byte-for-byte against a fresh Chrome 147 (147.0.0.0)
-//! capture on macOS arm64 from a TLS-fingerprint reference service:
-//! ```text
-//! akamai_fingerprint: "1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p"
-//! priority: { weight: 256, depends_on: 0, exclusive: 1 }
-//! ```
+//! Incremental HTTP/2 client built on the fingerprint-configurable `http2` fork.
 
-use crate::stealth::{DeviceClass, StealthProfile};
 use bytes::Bytes;
-use http2::client::{Builder, Connection, SendRequest};
-use http2::frame::{PseudoId, PseudoOrder, SettingId, SettingsOrder, StreamDependency, StreamId};
-use tokio::io::{AsyncRead, AsyncWrite};
+use http2::{
+    RecvStream,
+    client::{Builder, Connection, SendRequest},
+    frame::{PseudoId, PseudoOrder, SettingId, SettingsOrder, StreamDependency, StreamId},
+};
 
-use crate::net::error::NetError;
+use crate::{BoxedStream, H2PseudoHeader, H2Setting, TransportError, TransportFingerprint};
 
-/// Chrome HTTP/2 SETTINGS values.
-///
-/// **Verified against a fresh Chrome 147 capture** from a real browser
-/// via a TLS-fingerprint reference service:
-/// ```text
-/// 1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p
-/// ```
-/// Only four settings — Chrome does NOT send `3 MAX_CONCURRENT_STREAMS`
-/// or `5 MAX_FRAME_SIZE` on its client SETTINGS frame. Those defaults
-/// are negotiated from the server side.
-///
-/// An earlier version incorrectly added both of those based on
-/// an out-of-date reference; that made the HTTP/2 SETTINGS
-/// fingerprint hash `d23e6399a1d185e3b8cb58e5640dd698`, diverging from
-/// Chrome's actual hash `52d84b11737d980aef856699f885ca86`. The
-/// reference capture corrected it.
-const HEADER_TABLE_SIZE: u32 = 65_536; // SETTINGS 1
-const ENABLE_PUSH: bool = false; // SETTINGS 2 = 0
-const INITIAL_STREAM_WINDOW_SIZE: u32 = 6_291_456; // SETTINGS 4 = 6 MB
-const MAX_HEADER_LIST_SIZE: u32 = 262_144; // SETTINGS 6 = 256 KB
-// `initial_connection_window_size` is the lib's CONFIGURED target — the
-// http2 lib sends a WINDOW_UPDATE of (target - 65535) on the wire to
-// raise the connection window from the protocol default (65535) up to
-// the configured value. So 15_728_640 here → 15_663_105 on the wire,
-// which is what real Chrome 147 emits. Verified against wreq-util's
-// chrome profile (the gold-standard Rust impl,
-// `0x676e67/wreq-util/src/emulate/profile/chrome/http2.rs`).
-const INITIAL_CONNECTION_WINDOW_SIZE: u32 = 15_728_640; // → wire 15_663_105 = Chrome match
+use super::{TransportRequest, pool::H2StreamPermit};
 
-// =============================================================================
-// Safari iOS 18.4 HTTP/2 SETTINGS
-// =============================================================================
-//
-// Per reference Safari iOS 18.4 captures. iOS 18.4 sends 4 SETTINGS:
-//   2 ENABLE_PUSH = 0
-//   3 MAX_CONCURRENT_STREAMS = 100
-//   4 INITIAL_WINDOW_SIZE = 2097152 (2 MB, vs Chrome's 6 MB)
-//   9 NO_RFC7540_PRIORITIES = 1
-// (iOS 18.0 also sent 8 ENABLE_CONNECT_PROTOCOL = 1, dropped in 18.4.)
-//
-// INITIAL_CONNECTION_WINDOW_SIZE: configured target. The http2 lib sends a
-// WINDOW_UPDATE of (target - 65535) on the wire. Safari emits 10420225 →
-// configured target = 10485760 (10 MB).
-const SAFARI_IOS_INITIAL_STREAM_WINDOW_SIZE: u32 = 2_097_152; // 2 MB
-const SAFARI_IOS_MAX_CONCURRENT_STREAMS: u32 = 100;
-const SAFARI_IOS_INITIAL_CONNECTION_WINDOW_SIZE: u32 = 10_485_760; // → wire 10_420_225
-
-// =============================================================================
-// Firefox 135 HTTP/2 SETTINGS — Firefox wire class
-// =============================================================================
-//
-// Canonical Firefox H2 fingerprint
-// (`1:65536;4:131072;5:16384|12517377|...|m,p,a,s`). Firefox sends only THREE
-// settings: 1 HEADER_TABLE_SIZE=65536, 4 INITIAL_WINDOW_SIZE=131072 (128 KiB,
-// vs Chrome's 6 MB), 5 MAX_FRAME_SIZE=16384. No ENABLE_PUSH, no
-// MAX_HEADER_LIST_SIZE on the wire, no MAX_CONCURRENT_STREAMS. Pseudo-header
-// order is m,p,a,s. Connection-window wire delta 12517377 → target 12582912.
-const FIREFOX_INITIAL_STREAM_WINDOW_SIZE: u32 = 131_072; // 128 KiB
-const FIREFOX_MAX_FRAME_SIZE: u32 = 16_384;
-const FIREFOX_INITIAL_CONNECTION_WINDOW_SIZE: u32 = 12_582_912; // → wire 12_517_377
-
-/// Perform an HTTP/2 handshake over a TLS stream and return a sender + connection.
-///
-/// The connection must be driven by spawning it onto a tokio task.
-/// The sender is used to send requests. Per `profile.device_class`:
-///  - Desktop / Android: Chrome 147 SETTINGS (1,2,4,6) + masp pseudo-header order
-///    + 6 MB stream window + 15663105 wire connection-window
-///  - MobileIOS: Safari 18.4 SETTINGS (2,3,4,9) + msap pseudo-header order
-///    + 2 MB stream window + 10420225 wire connection-window
-pub async fn handshake<T>(
-    io: T,
-    profile: &StealthProfile,
-) -> Result<(SendRequest<Bytes>, Connection<T, Bytes>), NetError>
-where
-    T: AsyncRead + AsyncWrite + Unpin,
-{
-    let is_safari_ios = profile.device_class == DeviceClass::MobileIOS;
-    let is_firefox = profile.browser_name == "Firefox";
-
-    // Pseudo-header order:
-    //   Chrome  (masp) = :method, :authority, :scheme, :path
-    //   Safari  (msap) = :method, :scheme, :authority, :path
-    //   Firefox (mpas) = :method, :path, :authority, :scheme
-    let pseudo_order = if is_safari_ios {
-        PseudoOrder::builder()
-            .push(PseudoId::Method)
-            .push(PseudoId::Scheme)
-            .push(PseudoId::Authority)
-            .push(PseudoId::Path)
-            .build()
-    } else if is_firefox {
-        PseudoOrder::builder()
-            .push(PseudoId::Method)
-            .push(PseudoId::Path)
-            .push(PseudoId::Authority)
-            .push(PseudoId::Scheme)
-            .build()
-    } else {
-        PseudoOrder::builder()
-            .push(PseudoId::Method)
-            .push(PseudoId::Authority)
-            .push(PseudoId::Scheme)
-            .push(PseudoId::Path)
-            .build()
-    };
-
-    // SETTINGS order on the wire. Chrome's 8-entry order (covers all the
-    // settings Chrome MIGHT emit even if only 4 carry values). Safari sends
-    // a different 4-setting subset in a different order; we declare just
-    // those 4 in their on-wire order.
-    let settings_order = if is_safari_ios {
-        // Safari iOS 18.4 wire order: 2, 3, 4, 9
-        SettingsOrder::builder()
-            .push(SettingId::EnablePush)
-            .push(SettingId::MaxConcurrentStreams)
-            .push(SettingId::InitialWindowSize)
-            .push(SettingId::NoRfc7540Priorities)
-            .build()
-    } else if is_firefox {
-        // Firefox 135 wire order: 1, 4, 5 (only three settings)
-        SettingsOrder::builder()
-            .push(SettingId::HeaderTableSize)
-            .push(SettingId::InitialWindowSize)
-            .push(SettingId::MaxFrameSize)
-            .build()
-    } else {
-        // Chrome 130+ canonical 8-entry order — wreq-util reference impl.
-        SettingsOrder::builder()
-            .push(SettingId::HeaderTableSize)
-            .push(SettingId::EnablePush)
-            .push(SettingId::MaxConcurrentStreams)
-            .push(SettingId::InitialWindowSize)
-            .push(SettingId::MaxFrameSize)
-            .push(SettingId::MaxHeaderListSize)
-            .push(SettingId::EnableConnectProtocol)
-            .push(SettingId::NoRfc7540Priorities)
-            .build()
-    };
-
+pub(crate) async fn handshake(
+    io: BoxedStream,
+    fingerprint: &TransportFingerprint,
+) -> Result<(SendRequest<Bytes>, Connection<BoxedStream, Bytes>), TransportError> {
+    let h2 = &fingerprint.h2;
     let mut builder = Builder::new();
-    if is_safari_ios {
-        // Safari 18.4 advertises 4 SETTINGS on the wire (2, 3, 4, 9) — see
-        // SETTINGS order above. The http2 builder accepts additional setting
-        // VALUES that aren't in the wire order; those are used for internal
-        // validation (e.g. capacity checks against frames the server might
-        // send) without appearing on the wire.
-        //
-        // Some servers return RST_STREAM INTERNAL_ERROR if
-        // MAX_HEADER_LIST_SIZE isn't set on the connection — the server
-        // can't validate response headers without a limit. Adding
-        // max_header_list_size with Chrome's 256KB default (matches what real
-        // Safari uses internally even though it doesn't advertise the setting).
-        builder
-            .enable_push(ENABLE_PUSH)
-            .max_concurrent_streams(SAFARI_IOS_MAX_CONCURRENT_STREAMS)
-            .initial_window_size(SAFARI_IOS_INITIAL_STREAM_WINDOW_SIZE)
-            .max_header_list_size(MAX_HEADER_LIST_SIZE)
-            .initial_connection_window_size(SAFARI_IOS_INITIAL_CONNECTION_WINDOW_SIZE)
-            .headers_pseudo_order(pseudo_order)
-            .settings_order(settings_order);
-        // Safari does NOT send a stream-priority frame (`headers_stream_dependency`
-        // is the lib's HEADERS-frame priority hint — Chrome sends weight 255,
-        // exclusive=true; Safari has NO_RFC7540_PRIORITIES so it omits priority).
-        // Skipping the headers_stream_dependency call entirely.
-    } else if is_firefox {
-        // Firefox 135: 3 SETTINGS (1,4,5), 128 KiB stream window, m,p,a,s
-        // pseudo-order. MAX_FRAME_SIZE=16384 (HTTP/2 default) is advertised.
-        // max_header_list_size is set for internal validation (some servers
-        // RST without a limit) but kept OUT of settings_order so it doesn't
-        // appear on the wire — same trick the Safari arm uses.
-        // NOTE: do NOT set max_header_list_size for Firefox — this http2
-        // builder emits any set non-default value on the wire even when it's
-        // absent from settings_order, and real Firefox sends ONLY settings
-        // 1,4,5 (no setting 6). Including it produced a spurious `6:262144`
-        // on the wire, diverging from the canonical Firefox H2 fingerprint.
-        builder
-            .header_table_size(HEADER_TABLE_SIZE)
-            .initial_window_size(FIREFOX_INITIAL_STREAM_WINDOW_SIZE)
-            .max_frame_size(FIREFOX_MAX_FRAME_SIZE)
-            .initial_connection_window_size(FIREFOX_INITIAL_CONNECTION_WINDOW_SIZE)
-            .headers_pseudo_order(pseudo_order)
-            .settings_order(settings_order);
-        // Firefox emits an RFC 7540 idle-stream PRIORITY tree, which this
-        // builder's single StreamDependency hint can't express; the pragmatic
-        // choice is to omit the single Chrome priority hint entirely (closer
-        // to Firefox than a Chrome-weighted one).
-    } else {
-        builder
-            .header_table_size(HEADER_TABLE_SIZE)
-            .enable_push(ENABLE_PUSH)
-            .initial_window_size(INITIAL_STREAM_WINDOW_SIZE)
-            .max_header_list_size(MAX_HEADER_LIST_SIZE)
-            .initial_connection_window_size(INITIAL_CONNECTION_WINDOW_SIZE)
-            .headers_pseudo_order(pseudo_order)
-            .settings_order(settings_order)
-            .headers_stream_dependency(StreamDependency::new(
-                StreamId::zero(),
-                // Chrome 147 sends weight 256 (wire byte 255), exclusive=true,
-                // depends_on=0 — verified against a real-browser capture
-                // from a TLS-fingerprint reference service.
-                255,
-                true,
-            ));
+    if let Some(value) = h2.header_table_size {
+        builder.header_table_size(value);
+    }
+    if let Some(value) = h2.enable_push {
+        builder.enable_push(value);
+    }
+    if let Some(value) = h2.max_concurrent_streams {
+        builder.max_concurrent_streams(value);
+    }
+    if let Some(value) = h2.initial_stream_window_size {
+        builder.initial_window_size(value);
+    }
+    if let Some(value) = h2.max_frame_size {
+        builder.max_frame_size(value);
+    }
+    if let Some(value) = h2.max_header_list_size {
+        builder.max_header_list_size(value);
+    }
+    if let Some(value) = h2.connection_window_size {
+        builder.initial_connection_window_size(value);
+    }
+    if !h2.settings_order.is_empty() {
+        let mut order = SettingsOrder::builder();
+        for setting in &h2.settings_order {
+            order = order.push(match setting {
+                H2Setting::HeaderTableSize => SettingId::HeaderTableSize,
+                H2Setting::EnablePush => SettingId::EnablePush,
+                H2Setting::MaxConcurrentStreams => SettingId::MaxConcurrentStreams,
+                H2Setting::InitialWindowSize => SettingId::InitialWindowSize,
+                H2Setting::MaxFrameSize => SettingId::MaxFrameSize,
+                H2Setting::MaxHeaderListSize => SettingId::MaxHeaderListSize,
+            });
+        }
+        builder.settings_order(order.build());
+    }
+    if !h2.pseudo_header_order.is_empty() {
+        let mut order = PseudoOrder::builder();
+        for pseudo in &h2.pseudo_header_order {
+            order = order.push(match pseudo {
+                H2PseudoHeader::Method => PseudoId::Method,
+                H2PseudoHeader::Authority => PseudoId::Authority,
+                H2PseudoHeader::Scheme => PseudoId::Scheme,
+                H2PseudoHeader::Path => PseudoId::Path,
+            });
+        }
+        builder.headers_pseudo_order(order.build());
+    }
+    if let Some(priority) = h2.headers_priority {
+        builder.headers_stream_dependency(StreamDependency::new(
+            StreamId::from(priority.stream_dependency),
+            priority.weight,
+            priority.exclusive,
+        ));
     }
 
     builder
         .handshake(io)
         .await
-        .map_err(|e| NetError::Http(format!("HTTP/2 handshake failed: {e}")))
+        .map_err(|error| TransportError::Http2(format!("handshake failed: {error}")))
 }
 
-/// Send a GET request over an HTTP/2 connection.
-///
-/// `headers` is an ordered list of (name, value) pairs to include.
-pub async fn send_get(
-    sender: &mut SendRequest<Bytes>,
-    uri: &str,
-    _host: &str,
-    headers: &[(String, String)],
-) -> Result<(http::response::Parts, Vec<u8>), NetError> {
-    let mut ready_sender = sender
-        .clone()
-        .ready()
-        .await
-        .map_err(|e| NetError::Http(format!("HTTP/2 not ready: {e}")))?;
-
-    // In HTTP/2, :authority is derived from the URI automatically.
-    // Do NOT add an explicit `host` header — some servers (nginx) reject it.
-    let mut request = http::Request::builder().method(http::Method::GET).uri(uri);
-
-    for (name, value) in headers {
-        request = request.header(name.as_str(), value.as_str());
-    }
-
-    let request = request
-        .body(())
-        .map_err(|e| NetError::Http(format!("failed to build request: {e}")))?;
-
-    let (response, _) = ready_sender
-        .send_request(request, true) // true = end of stream (no body)
-        .map_err(|e| NetError::Http(format!("failed to send request: {e}")))?;
-
-    let response = response
-        .await
-        .map_err(|e| NetError::Http(format!("HTTP/2 response error: {e}")))?;
-
-    let (parts, mut body) = response.into_parts();
-
-    // Read the response body
-    let mut data = Vec::new();
-    while let Some(chunk) = body.data().await {
-        let chunk = chunk.map_err(|e| NetError::Http(format!("body read error: {e}")))?;
-        let _ = body.flow_control().release_capacity(chunk.len());
-        data.extend_from_slice(&chunk);
-    }
-
-    Ok((parts, data))
+pub(crate) struct H2Response {
+    pub(crate) status: u16,
+    pub(crate) headers: Vec<(String, String)>,
+    pub(crate) body: H2Body,
+    pub(crate) sent_headers: Vec<(String, String)>,
 }
 
-/// Send a POST request over an HTTP/2 connection.
-pub async fn send_post(
-    sender: &mut SendRequest<Bytes>,
-    uri: &str,
-    _host: &str,
-    headers: &[(String, String)],
-    body: &[u8],
-) -> Result<(http::response::Parts, Vec<u8>), NetError> {
-    let mut ready_sender = sender
-        .clone()
-        .ready()
-        .await
-        .map_err(|e| NetError::Http(format!("HTTP/2 not ready: {e}")))?;
+pub(crate) struct H2RequestError {
+    pub(crate) error: TransportError,
+    pub(crate) connection_unusable: bool,
+}
 
+impl H2RequestError {
+    fn request(error: TransportError) -> Self {
+        Self {
+            error,
+            connection_unusable: false,
+        }
+    }
+
+    fn protocol(context: &str, error: http2::Error) -> Self {
+        Self {
+            connection_unusable: !error.is_reset(),
+            error: TransportError::Http2(format!("{context}: {error}")),
+        }
+    }
+}
+
+pub(crate) async fn send_request(
+    sender: SendRequest<Bytes>,
+    transport_request: &TransportRequest,
+    body: Option<Vec<u8>>,
+    stream_permit: H2StreamPermit,
+    priority: Option<crate::H2HeadersPriority>,
+) -> Result<H2Response, H2RequestError> {
+    let method = http::Method::from_bytes(transport_request.method.as_bytes()).map_err(|_| {
+        H2RequestError::request(TransportError::InvalidInput(format!(
+            "invalid HTTP method `{}`",
+            transport_request.method
+        )))
+    })?;
+    let headers = &transport_request.headers;
+    let explicit_authority = headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("host"))
+        .map(|(_, value)| value.as_str());
+    let mut uri = transport_request
+        .url
+        .as_str()
+        .parse::<http::Uri>()
+        .map_err(|error| {
+            H2RequestError::request(TransportError::InvalidInput(format!(
+                "invalid request URI: {error}"
+            )))
+        })?;
+    if let Some(authority) = explicit_authority {
+        let mut parts = uri.into_parts();
+        parts.authority = Some(authority.parse().map_err(|error| {
+            H2RequestError::request(TransportError::InvalidInput(format!(
+                "invalid Host header: {error}"
+            )))
+        })?);
+        uri = http::Uri::from_parts(parts).map_err(|error| {
+            H2RequestError::request(TransportError::InvalidInput(format!(
+                "invalid request URI: {error}"
+            )))
+        })?;
+    }
+    let authority = uri.authority().map(ToString::to_string).ok_or_else(|| {
+        H2RequestError::request(TransportError::InvalidInput(
+            "HTTP/2 request URI has no authority".into(),
+        ))
+    })?;
     let mut request = http::Request::builder()
-        .method(http::Method::POST)
-        .uri(uri)
-        .header("content-length", body.len().to_string());
-
+        .version(http::Version::HTTP_2)
+        .method(method.clone())
+        .uri(uri);
+    let mut sent_headers = Vec::with_capacity(headers.len() + 2);
+    sent_headers.push(("host".into(), authority));
+    let has_content_length = headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("content-length"));
+    if let Some(bytes) = &body
+        && !has_content_length
+    {
+        let value = bytes.len().to_string();
+        request = request.header("content-length", &value);
+        sent_headers.push(("content-length".into(), value));
+    }
     for (name, value) in headers {
+        if name.starts_with(':') {
+            return Err(H2RequestError::request(TransportError::InvalidInput(
+                "HTTP/2 pseudo-headers are derived from the request URL".into(),
+            )));
+        }
+        if name.eq_ignore_ascii_case("host")
+            || is_connection_specific(name, headers)
+            || (name.eq_ignore_ascii_case("te")
+                && value
+                    .split(',')
+                    .any(|token| !token.trim().eq_ignore_ascii_case("trailers")))
+        {
+            continue;
+        }
+        let name = name.to_ascii_lowercase();
         request = request.header(name.as_str(), value.as_str());
+        sent_headers.push((name, value.clone()));
+    }
+    let mut request = request.body(()).map_err(|error| {
+        H2RequestError::request(TransportError::InvalidInput(format!(
+            "invalid request: {error}"
+        )))
+    })?;
+    if let Some(priority) = priority {
+        request.extensions_mut().insert(StreamDependency::new(
+            StreamId::from(priority.stream_dependency),
+            priority.weight,
+            priority.exclusive,
+        ));
     }
 
-    let request = request
-        .body(())
-        .map_err(|e| NetError::Http(format!("failed to build request: {e}")))?;
-
-    let (response, mut send_stream) = ready_sender
-        .send_request(request, false) // false = body follows
-        .map_err(|e| NetError::Http(format!("failed to send request: {e}")))?;
-
-    // Send the body
-    send_stream
-        .send_data(Bytes::copy_from_slice(body), true)
-        .map_err(|e| NetError::Http(format!("failed to send body: {e}")))?;
+    let mut ready = sender
+        .ready()
+        .await
+        .map_err(|error| H2RequestError::protocol("connection is not ready", error))?;
+    let end_stream = body.as_ref().is_none_or(Vec::is_empty);
+    let (response, mut request_body) = ready
+        .send_request(request, end_stream)
+        .map_err(|error| H2RequestError::protocol("request send failed", error))?;
+    if let Some(observer) = &transport_request.observer {
+        observer.request_sent(&sent_headers);
+    }
+    if let Some(body) = body.filter(|body| !body.is_empty()) {
+        request_body
+            .send_data(Bytes::from(body), true)
+            .map_err(|error| H2RequestError::protocol("request body send failed", error))?;
+    }
 
     let response = response
         .await
-        .map_err(|e| NetError::Http(format!("HTTP/2 response error: {e}")))?;
-
-    let (parts, mut resp_body) = response.into_parts();
-
-    let mut data = Vec::new();
-    while let Some(chunk) = resp_body.data().await {
-        let chunk = chunk.map_err(|e| NetError::Http(format!("body read error: {e}")))?;
-        let _ = resp_body.flow_control().release_capacity(chunk.len());
-        data.extend_from_slice(&chunk);
+        .map_err(|error| H2RequestError::protocol("response failed", error))?;
+    let (parts, stream) = response.into_parts();
+    let headers = parts
+        .headers
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.as_str().to_owned(),
+                String::from_utf8_lossy(value.as_bytes()).into_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let status = parts.status.as_u16();
+    if let Some(observer) = &transport_request.observer {
+        observer.response_received(status, &headers);
     }
-
-    Ok((parts, data))
+    let no_body = method == http::Method::HEAD
+        || status == 101
+        || status == 204
+        || status == 205
+        || status == 304;
+    Ok(H2Response {
+        status,
+        headers,
+        body: H2Body {
+            stream: Some(stream),
+            stream_permit: Some(stream_permit),
+            pending_capacity: 0,
+            no_body,
+        },
+        sent_headers,
+    })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+fn is_connection_specific(name: &str, headers: &[(String, String)]) -> bool {
+    name.eq_ignore_ascii_case("connection")
+        || name.eq_ignore_ascii_case("keep-alive")
+        || name.eq_ignore_ascii_case("proxy-connection")
+        || name.eq_ignore_ascii_case("transfer-encoding")
+        || name.eq_ignore_ascii_case("upgrade")
+        || headers
+            .iter()
+            .filter(|(candidate, _)| candidate.eq_ignore_ascii_case("connection"))
+            .flat_map(|(_, value)| value.split(','))
+            .any(|token| token.trim().eq_ignore_ascii_case(name))
+}
 
-    #[tokio::test]
-    #[ignore] // requires network
-    async fn h2_get_httpbin() {
-        let profile = crate::stealth::presets::chrome_148_macos();
-        let connector = crate::net::tls::chrome_connector(&profile).unwrap();
-        let tcp = crate::net::tcp::connect("httpbin.org", 443, std::time::Duration::from_secs(10))
-            .await
-            .unwrap();
-        let tls = crate::net::tls::connect_tls(&connector, &profile, "httpbin.org", tcp)
-            .await
-            .unwrap();
+pub(crate) struct H2Body {
+    stream: Option<RecvStream>,
+    stream_permit: Option<H2StreamPermit>,
+    pending_capacity: usize,
+    no_body: bool,
+}
 
-        // Verify ALPN negotiated h2
-        assert_eq!(
-            crate::net::tls::negotiated_alpn(&tls),
-            Some(b"h2".as_slice())
-        );
-
-        let (mut sender, conn) = handshake(tls, &profile).await.unwrap();
-        tokio::spawn(async move {
-            if let Err(e) = conn.await {
-                eprintln!("H2 connection error: {e}");
+impl H2Body {
+    pub(crate) async fn chunk(&mut self) -> Result<Option<Bytes>, TransportError> {
+        if self.no_body {
+            self.stream.take();
+            self.stream_permit.take();
+            return Ok(None);
+        }
+        let Some(stream) = self.stream.as_mut() else {
+            return Ok(None);
+        };
+        if self.pending_capacity != 0 {
+            stream
+                .flow_control()
+                .release_capacity(self.pending_capacity)
+                .map_err(|error| TransportError::Http2(format!("flow control failed: {error}")))?;
+            self.pending_capacity = 0;
+        }
+        match stream.data().await {
+            Some(Ok(bytes)) => {
+                self.pending_capacity = bytes.len();
+                Ok(Some(bytes))
             }
-        });
+            Some(Err(error)) => Err(TransportError::Http2(format!(
+                "response body failed: {error}"
+            ))),
+            None => {
+                self.stream.take();
+                self.stream_permit.take();
+                Ok(None)
+            }
+        }
+    }
 
-        let (parts, body) = send_get(&mut sender, "https://httpbin.org/get", "httpbin.org", &[])
-            .await
-            .unwrap();
-
-        assert_eq!(parts.status, 200);
-        assert!(!body.is_empty());
-        let text = String::from_utf8_lossy(&body);
-        assert!(text.contains("httpbin.org"), "Response: {text}");
+    pub(crate) async fn drain(mut self) -> Result<(), TransportError> {
+        while self.chunk().await?.is_some() {}
+        Ok(())
     }
 }

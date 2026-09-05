@@ -365,8 +365,56 @@ pub struct ServeArgs {
     pub common: CommonArgs,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+#[value(rename_all = "lower")]
+pub enum StealthPresetChoice {
+    #[default]
+    Chrome,
+    Off,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Args)]
 pub struct CommonArgs {
+    /// Select the process-wide transport fingerprint. `off` keeps the same
+    /// transport and TLS verification while using ordinary protocol defaults.
+    #[arg(long, value_enum, default_value_t = StealthPresetChoice::Chrome)]
+    pub stealth: StealthPresetChoice,
+
+    /// Override the colon-separated BoringSSL cipher-suite list.
+    #[arg(long)]
+    pub tls_cipher_list: Option<String>,
+
+    /// Override the colon-separated BoringSSL supported-groups list.
+    #[arg(long)]
+    pub tls_curves: Option<String>,
+
+    /// Override the colon-separated BoringSSL signature-algorithm list.
+    #[arg(long)]
+    pub tls_signature_algorithms: Option<String>,
+
+    #[arg(long)]
+    pub http2_header_table_size: Option<u32>,
+
+    #[arg(long, action = clap::ArgAction::Set)]
+    pub http2_enable_push: Option<bool>,
+
+    /// Override the MAX_CONCURRENT_STREAMS value advertised to the peer. This
+    /// is distinct from Moli's local `--http2-max-concurrent-streams` cap.
+    #[arg(long)]
+    pub http2_advertised_max_concurrent_streams: Option<u32>,
+
+    #[arg(long)]
+    pub http2_initial_window_size: Option<u32>,
+
+    #[arg(long)]
+    pub http2_max_frame_size: Option<u32>,
+
+    #[arg(long)]
+    pub http2_max_header_list_size: Option<u32>,
+
+    #[arg(long)]
+    pub http2_connection_window_size: Option<u32>,
+
     #[arg(long)]
     pub insecure_disable_tls_host_verification: bool,
 
@@ -394,7 +442,7 @@ pub struct CommonArgs {
 
     /// Limit active fetch-runtime transfers per origin.
     ///
-    /// This is a scheduler limit, not libcurl's per-host connection-pool cap.
+    /// This is a scheduler limit, not the transport's per-host connection-pool cap.
     /// Use `--http-max-host-connections` to change the HTTP/1-style transport
     /// connection cap.
     #[arg(long)]

@@ -14,6 +14,42 @@ struct StreamingResponseLifetimeLease {
     _value: Box<dyn Any + Send + Sync>,
 }
 
+#[derive(Debug)]
+enum BodyReceiver<T> {
+    Bounded(mpsc::Receiver<T>),
+    Unbounded(mpsc::UnboundedReceiver<T>),
+}
+
+impl<T> BodyReceiver<T> {
+    async fn recv(&mut self) -> Option<T> {
+        match self {
+            Self::Bounded(receiver) => receiver.recv().await,
+            Self::Unbounded(receiver) => receiver.recv().await,
+        }
+    }
+
+    fn try_recv(&mut self) -> Option<T> {
+        match self {
+            Self::Bounded(receiver) => receiver.try_recv().ok(),
+            Self::Unbounded(receiver) => receiver.try_recv().ok(),
+        }
+    }
+
+    fn is_closed(&self) -> bool {
+        match self {
+            Self::Bounded(receiver) => receiver.is_closed(),
+            Self::Unbounded(receiver) => receiver.is_closed(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Bounded(receiver) => receiver.is_empty(),
+            Self::Unbounded(receiver) => receiver.is_empty(),
+        }
+    }
+}
+
 impl fmt::Debug for StreamingResponseLifetimeLease {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("StreamingResponseLifetimeLease(..)")
@@ -32,7 +68,7 @@ pub struct StreamingHtmlResponse {
     pub from_cache: bool,
     pub negotiated_http_version: Option<NegotiatedHttpVersion>,
     network_request_extra_info: Option<NetworkRequestExtraInfo>,
-    body_chunks: mpsc::UnboundedReceiver<String>,
+    body_chunks: BodyReceiver<String>,
     cancel_handle: FetchCancelHandle,
     completion: Option<oneshot::Receiver<Result<()>>>,
 }
@@ -67,6 +103,34 @@ impl StreamingHtmlResponse {
     pub fn new_with_head(
         head: ResponseHead,
         body_chunks: mpsc::UnboundedReceiver<String>,
+        cancel_handle: FetchCancelHandle,
+        completion: oneshot::Receiver<Result<()>>,
+    ) -> Self {
+        Self::from_body_receiver(
+            head,
+            BodyReceiver::Unbounded(body_chunks),
+            cancel_handle,
+            completion,
+        )
+    }
+
+    pub(crate) fn new_with_bounded_head(
+        head: ResponseHead,
+        body_chunks: mpsc::Receiver<String>,
+        cancel_handle: FetchCancelHandle,
+        completion: oneshot::Receiver<Result<()>>,
+    ) -> Self {
+        Self::from_body_receiver(
+            head,
+            BodyReceiver::Bounded(body_chunks),
+            cancel_handle,
+            completion,
+        )
+    }
+
+    fn from_body_receiver(
+        head: ResponseHead,
+        body_chunks: BodyReceiver<String>,
         cancel_handle: FetchCancelHandle,
         completion: oneshot::Receiver<Result<()>>,
     ) -> Self {
@@ -134,7 +198,7 @@ impl StreamingHtmlResponse {
         // Used by the phase-one streaming parser to coalesce chunks that are
         // already buffered. This must stay nonblocking so fetch backpressure
         // still comes from the response channel.
-        self.body_chunks.try_recv().ok()
+        self.body_chunks.try_recv()
     }
 
     pub async fn finish(&mut self) -> Result<()> {
@@ -171,7 +235,7 @@ pub struct StreamingRawResponse {
     pub from_cache: bool,
     pub negotiated_http_version: Option<NegotiatedHttpVersion>,
     network_request_extra_info: Option<NetworkRequestExtraInfo>,
-    body_chunks: mpsc::UnboundedReceiver<Vec<u8>>,
+    body_chunks: BodyReceiver<Vec<u8>>,
     cancel_handle: FetchCancelHandle,
     completion: Option<oneshot::Receiver<Result<()>>>,
     lifetime_lease: Option<StreamingResponseLifetimeLease>,
@@ -201,7 +265,7 @@ impl StreamingRawResponse {
             from_cache: false,
             negotiated_http_version: None,
             network_request_extra_info: None,
-            body_chunks,
+            body_chunks: BodyReceiver::Unbounded(body_chunks),
             cancel_handle,
             completion: Some(completion),
             lifetime_lease: None,
@@ -211,6 +275,34 @@ impl StreamingRawResponse {
     pub fn new_with_head(
         head: ResponseHead,
         body_chunks: mpsc::UnboundedReceiver<Vec<u8>>,
+        cancel_handle: FetchCancelHandle,
+        completion: oneshot::Receiver<Result<()>>,
+    ) -> Self {
+        Self::from_body_receiver(
+            head,
+            BodyReceiver::Unbounded(body_chunks),
+            cancel_handle,
+            completion,
+        )
+    }
+
+    pub(crate) fn new_with_bounded_head(
+        head: ResponseHead,
+        body_chunks: mpsc::Receiver<Vec<u8>>,
+        cancel_handle: FetchCancelHandle,
+        completion: oneshot::Receiver<Result<()>>,
+    ) -> Self {
+        Self::from_body_receiver(
+            head,
+            BodyReceiver::Bounded(body_chunks),
+            cancel_handle,
+            completion,
+        )
+    }
+
+    fn from_body_receiver(
+        head: ResponseHead,
+        body_chunks: BodyReceiver<Vec<u8>>,
         cancel_handle: FetchCancelHandle,
         completion: oneshot::Receiver<Result<()>>,
     ) -> Self {
@@ -270,7 +362,7 @@ impl StreamingRawResponse {
 
     pub fn try_next_chunk(&mut self) -> Option<Vec<u8>> {
         // See StreamingHtmlResponse::try_next_chunk.
-        self.body_chunks.try_recv().ok()
+        self.body_chunks.try_recv()
     }
 
     /// Returns whether the producer has closed the body channel and every

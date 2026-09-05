@@ -113,6 +113,18 @@ moli fetch --layout --dump pdf https://example.com > page.pdf
 
 Lancez `fetch --help` pour la liste complète des options : formats de sortie, conditions d'attente (chargement de page, réponse réseau), profils, configuration du proxy, politiques de ressources et options de traçage.
 
+### Transport réseau et Stealth
+
+HTTP/1.x, HTTP/2 et les WebSockets sortants partagent un transport asynchrone Rust natif utilisant BoringSSL. Au démarrage, Moli applique par défaut à tout le processus une base Stealth coordonnée, référencée sur Chrome **152.0.7977.82**. Elle ne garantit pas la reproduction universelle de toutes les empreintes Chrome ni des surfaces de rendu. HTTP/3 n'est pas pris en charge.
+
+- `--stealth chrome` est la valeur par défaut. `--stealth off` conserve le même transport, la validation des certificats et les restrictions réseau, mais emploie les paramètres TLS/HTTP ordinaires. Utilisée seule, la bibliothèque `moli-stealth-net` reste également ordinaire tant que l'appelant ne choisit pas explicitement un profil.
+- Les substitutions TLS sont `--tls-cipher-list`, `--tls-curves` et `--tls-signature-algorithms`. Celles de HTTP/2 sont `--http2-header-table-size`, `--http2-enable-push`, `--http2-advertised-max-concurrent-streams`, `--http2-initial-window-size`, `--http2-max-frame-size`, `--http2-max-header-list-size` et `--http2-connection-window-size`. La configuration est validée et figée au démarrage ; toute modification exige un redémarrage.
+- `--user-agent` et `--user-agent-suffix` ne changent pas automatiquement l'empreinte de transport. Pour `moli fetch`, un `--header 'Name: Value'` explicite prime sur les en-têtes de base générés (les cookies restent soumis à la politique du navigateur).
+- `--http-proxy` prime sur l'environnement et une valeur vide explicite désactive le repli. Sinon, Moli consulte `http_proxy`, `https_proxy`/`HTTPS_PROXY`, `all_proxy`/`ALL_PROXY`, ainsi que `--http-no-proxy` ou `no_proxy`/`NO_PROXY`, mais ignore volontairement `HTTP_PROXY` en majuscules. `--http-host-resolve HOST:PORT:ADDR` fixe les adresses directes autorisées et évite le DNS de l'origine ; le DNS côté proxy suit le mode HTTP/SOCKS choisi.
+- L'authentification Basic et Digest des serveurs/proxys est multiplateforme. Negotiate et NTLM nécessitent Windows SSPI et ne sont pas disponibles ailleurs. Pour un proxy HTTP, Bearer utilise `--proxy-bearer-token` et les identifiants restent confinés à l'échange avec le proxy.
+
+Consultez [`moli-cdp-smoke/README.md`](../moli-cdp-smoke/README.md) pour les sondes CLI/CDP locales et les preuves enregistrées.
+
 ### Démarrer le serveur d'automatisation
 
 ```bash
@@ -202,7 +214,7 @@ Le résultat de la mise en page est un instantané produit à la demande, pas un
 
 Moli est un noyau de navigateur autonome — pas une surcouche posée sur Chromium. Écrit en Rust, il définit ses propres règles de propriété mémoire et de cycle de vie. Ses principales dépendances :
 
-- `libcurl` — transport réseau et runtime multi-requêtes
+- `moli-stealth-net`, BoringSSL et HTTP/2 — transport réseau asynchrone Rust natif avec empreintes TLS/HTTP configurables
 - `html5ever` — parsing HTML
 - `rusty_v8` / V8 — exécution JavaScript
 - Servo/Stylo — sélecteurs, cascade et styles calculés

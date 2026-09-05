@@ -1,506 +1,535 @@
-//! HTTP CONNECT and SOCKS5 proxy support.
+//! Outbound proxy protocol mechanisms used by the shared connector.
 //!
-//! Phase 7 follow-up T1C — gives `StealthProfile.proxy` a real
-//! implementation so we can route requests through residential
-//! proxies / IP rotators when the direct path is reputation-blocked
-//! (by various challenge / bot-detection vendors).
-//!
-//! ## Supported schemes
-//!
-//! - `http://[user[:pass]@]host:port` — uses HTTP/1.1 `CONNECT host:port`
-//!   tunneling. The TLS handshake then runs unchanged on the tunnel.
-//! - `https://[user[:pass]@]host:port` — same as `http://` but the hop
-//!   to the proxy is itself TLS-wrapped (TLS-in-TLS); we currently
-//!   plain-CONNECT and warn — a tiny fraction of providers require it.
-//! - `socks5://[user[:pass]@]host:port` — RFC 1928 SOCKS5 with optional
-//!   RFC 1929 username/password auth.
-//!
-//! ## Selection
-//!
-//! The active `StealthProfile.proxy` field controls routing. If it is absent,
-//! no proxy is used (direct connect via
-//! `tcp::happy_eyeballs`).
+//! Routing policy lives in `connection::proxy_url`; this module only parses a
+//! selected proxy and performs HTTP CONNECT or SOCKS protocol exchanges.
 
-use std::time::Duration;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
-use base64::Engine as _;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+use url::Url;
 
-use crate::net::error::NetError;
-use crate::net::tcp::DnsCache;
+use crate::{
+    AuthScheme, ProxyResponse, TransportAuth, TransportError, auth::AuthSession,
+    connection::IoStream,
+};
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum ProxyAuth {
-    None,
-    UserPass(String, String),
+const MAX_PROXY_RESPONSE: usize = 64 * 1024;
+const MAX_PROXY_HEADERS: usize = 256 * 1024;
+const MAX_AUTH_EXCHANGES: usize = 4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProxyKind {
+    Http,
+    Socks4 { remote_dns: bool },
+    Socks5 { remote_dns: bool },
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum ProxyConfig {
-    Http {
-        host: String,
-        port: u16,
-        auth: ProxyAuth,
-        /// True for `https://` proxy URLs (TLS-wrapped hop).
-        tls: bool,
-    },
-    Socks5 {
-        host: String,
-        port: u16,
-        auth: ProxyAuth,
-    },
+#[derive(Debug, Clone)]
+pub(crate) struct ProxyConfig {
+    kind: ProxyKind,
+    host: String,
+    port: u16,
+    tls: bool,
+    url_auth: Option<TransportAuth>,
 }
 
 impl ProxyConfig {
-    /// Resolve the proxy declared by the active profile.
-    pub fn resolve(profile_proxy: Option<&str>) -> Result<Option<Self>, NetError> {
-        match profile_proxy {
-            Some(s) if !s.is_empty() => Self::parse(s).map(Some),
-            _ => Ok(None),
-        }
-    }
-
-    /// Parse a proxy URL string. Accepts the shapes documented at the
-    /// top of this module.
-    pub fn parse(s: &str) -> Result<Self, NetError> {
-        let url = url::Url::parse(s)
-            .map_err(|e| NetError::Http(format!("invalid proxy URL {s:?}: {e}")))?;
-
+    pub(crate) fn parse(url: &Url) -> Result<Self, TransportError> {
         let host = url
             .host_str()
-            .ok_or_else(|| NetError::Http(format!("proxy URL {s:?} has no host")))?
-            .to_string();
-        // url.port() returns None when the port matches the scheme default.
-        // For http/https/ws/wss the url crate resolves defaults; for
-        // socks5/socks5h we apply the IANA-registered 1080 ourselves.
-        let port = url
-            .port()
-            .or_else(|| match url.scheme() {
-                "http" | "ws" => Some(80),
-                "https" | "wss" => Some(443),
-                "socks5" | "socks5h" => Some(1080),
-                _ => None,
-            })
-            .ok_or_else(|| NetError::Http(format!("proxy URL {s:?} must include a port")))?;
-
-        let auth = match (url.username(), url.password()) {
-            ("", _) => ProxyAuth::None,
-            (u, Some(p)) => ProxyAuth::UserPass(percent_decode(u)?, percent_decode(p)?),
-            (u, None) => ProxyAuth::UserPass(percent_decode(u)?, String::new()),
-        };
-
-        match url.scheme() {
-            "http" => Ok(Self::Http {
-                host,
-                port,
-                auth,
-                tls: false,
-            }),
-            "https" => Ok(Self::Http {
-                host,
-                port,
-                auth,
-                tls: true,
-            }),
-            "socks5" | "socks5h" => Ok(Self::Socks5 { host, port, auth }),
-            other => Err(NetError::Http(format!(
-                "unsupported proxy scheme {other:?} in {s:?} (use http://, https://, or socks5://)"
-            ))),
-        }
-    }
-
-    fn host(&self) -> &str {
-        match self {
-            Self::Http { host, .. } | Self::Socks5 { host, .. } => host,
-        }
-    }
-    fn port(&self) -> u16 {
-        match self {
-            Self::Http { port, .. } | Self::Socks5 { port, .. } => *port,
-        }
-    }
-}
-
-fn percent_decode(s: &str) -> Result<String, NetError> {
-    percent_encoding::percent_decode_str(s)
-        .decode_utf8()
-        .map(|c| c.into_owned())
-        .map_err(|e| NetError::Http(format!("invalid percent-encoding in proxy auth: {e}")))
-}
-
-/// Connect to `target_host:target_port` via the given `proxy`. Returns
-/// a TcpStream that's already tunneled to the target and ready for the
-/// caller's TLS handshake (caller still passes target SNI to the TLS
-/// layer; the tunnel is bytes-only).
-pub async fn connect(
-    target_host: &str,
-    target_port: u16,
-    timeout: Duration,
-    dns_cache: Option<&DnsCache>,
-    proxy: &ProxyConfig,
-) -> Result<TcpStream, NetError> {
-    // Connect to the proxy itself with happy-eyeballs + DNS cache.
-    // (Proxy hops are direct TCP — no proxy-of-proxy chaining yet.)
-    let mut stream =
-        crate::net::tcp::connect_with_cache(proxy.host(), proxy.port(), timeout, dns_cache).await?;
-
-    match proxy {
-        ProxyConfig::Http { auth, tls, .. } => {
-            if *tls {
-                // TLS-in-TLS: most residential providers don't require
-                // it. Emit a one-shot warning rather than silently failing
-                // the handshake.
-                eprintln!(
-                    "[proxy] WARN: https:// proxy hop requested for {} but \
-                     TLS-in-TLS isn't implemented; trying plain CONNECT \
-                     (works for most providers)",
-                    proxy.host()
-                );
+            .ok_or_else(|| TransportError::InvalidInput("proxy URL is missing a host".into()))?
+            .trim_matches(['[', ']'])
+            .to_owned();
+        let (kind, tls, default_port) = match url.scheme() {
+            "http" => (ProxyKind::Http, false, 80),
+            "https" => (ProxyKind::Http, true, 443),
+            "socks4" => (ProxyKind::Socks4 { remote_dns: false }, false, 1080),
+            "socks4a" => (ProxyKind::Socks4 { remote_dns: true }, false, 1080),
+            "socks5" => (ProxyKind::Socks5 { remote_dns: false }, false, 1080),
+            "socks5h" => (ProxyKind::Socks5 { remote_dns: true }, false, 1080),
+            scheme => {
+                return Err(TransportError::InvalidInput(format!(
+                    "unsupported proxy scheme `{scheme}`"
+                )));
             }
-            http_connect(&mut stream, target_host, target_port, auth).await?;
-        }
-        ProxyConfig::Socks5 { auth, .. } => {
-            socks5_handshake(&mut stream, target_host, target_port, auth).await?;
-        }
+        };
+        let url_auth = if url.username().is_empty() {
+            None
+        } else {
+            Some(TransportAuth {
+                scheme: AuthScheme::Basic,
+                username: decode_userinfo(url.username())?,
+                password: decode_userinfo(url.password().unwrap_or_default())?,
+            })
+        };
+        Ok(Self {
+            kind,
+            host,
+            port: url.port().unwrap_or(default_port),
+            tls,
+            url_auth,
+        })
     }
 
-    Ok(stream)
+    pub(crate) fn kind(&self) -> ProxyKind {
+        self.kind
+    }
+
+    pub(crate) fn host(&self) -> &str {
+        &self.host
+    }
+
+    pub(crate) fn port(&self) -> u16 {
+        self.port
+    }
+
+    pub(crate) fn uses_tls(&self) -> bool {
+        self.tls
+    }
+
+    pub(crate) fn url_auth(&self) -> Option<&TransportAuth> {
+        self.url_auth.as_ref()
+    }
+
+    pub(crate) fn url_credentials(&self) -> Option<(&str, &str)> {
+        self.url_auth
+            .as_ref()
+            .map(|auth| (auth.username.as_str(), auth.password.as_str()))
+    }
 }
 
-/// Send `CONNECT host:port HTTP/1.1` to the upstream proxy and read
-/// the 200 response. The TCP stream is then bytes-pipe to the target.
-async fn http_connect(
-    stream: &mut TcpStream,
+fn decode_userinfo(value: &str) -> Result<String, TransportError> {
+    percent_encoding::percent_decode_str(value)
+        .decode_utf8()
+        .map(|value| value.into_owned())
+        .map_err(|_| TransportError::InvalidInput("proxy credentials contain invalid UTF-8".into()))
+}
+
+pub(crate) async fn establish_http_tunnel<S: IoStream + AsyncBufRead>(
+    stream: &mut S,
+    proxy_host: &str,
     target_host: &str,
     target_port: u16,
-    auth: &ProxyAuth,
-) -> Result<(), NetError> {
-    let mut req = format!(
-        "CONNECT {target_host}:{target_port} HTTP/1.1\r\nHost: {target_host}:{target_port}\r\n"
+    bearer_token: Option<&str>,
+    configured_auth: Option<&TransportAuth>,
+    url_auth: Option<&TransportAuth>,
+) -> Result<(), TransportError> {
+    let authority = format_authority(target_host, target_port);
+    let selected_auth = configured_auth.or(url_auth);
+    let mut session = selected_auth
+        .map(|auth| AuthSession::new(auth, proxy_host))
+        .transpose()?;
+    let mut authorization = if let Some(token) = bearer_token {
+        validate_header_value(token)?;
+        Some(format!("Bearer {token}"))
+    } else if let Some(session) = session.as_mut()
+        && selected_auth.is_some_and(|auth| auth.scheme == AuthScheme::Basic)
+    {
+        session.authorization(None, "CONNECT", &authority)?
+    } else {
+        None
+    };
+
+    for exchange in 0..MAX_AUTH_EXCHANGES {
+        write_connect_request(stream, &authority, authorization.as_deref()).await?;
+        let response = read_proxy_response(stream).await?;
+        if (200..300).contains(&response.status) {
+            return Ok(());
+        }
+        let connection_closes = response.headers.iter().any(|(name, value)| {
+            (name.eq_ignore_ascii_case("connection")
+                || name.eq_ignore_ascii_case("proxy-connection"))
+                && value
+                    .split(',')
+                    .any(|token| token.trim().eq_ignore_ascii_case("close"))
+        });
+        if response.status != 407
+            || bearer_token.is_some()
+            || connection_closes
+            || exchange + 1 == MAX_AUTH_EXCHANGES
+        {
+            return Err(TransportError::ProxyConnect(response));
+        }
+        let Some(session) = session.as_mut() else {
+            return Err(TransportError::ProxyConnect(response));
+        };
+        let Some(challenge) = crate::auth::select_challenge(
+            &response.headers,
+            selected_auth.unwrap().scheme,
+            "proxy-authenticate",
+        ) else {
+            return Err(TransportError::ProxyConnect(response));
+        };
+        authorization = session.authorization(Some(challenge), "CONNECT", &authority)?;
+        if authorization.is_none() {
+            return Err(TransportError::ProxyConnect(response));
+        }
+    }
+    unreachable!("bounded proxy authentication loop always returns")
+}
+
+async fn write_connect_request(
+    stream: &mut dyn IoStream,
+    authority: &str,
+    authorization: Option<&str>,
+) -> Result<(), TransportError> {
+    let mut request = format!(
+        "CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\nProxy-Connection: keep-alive\r\n"
     );
-    if let ProxyAuth::UserPass(user, pass) = auth {
-        let token = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
-        req.push_str(&format!("Proxy-Authorization: Basic {token}\r\n"));
+    if let Some(value) = authorization {
+        validate_header_value(value)?;
+        request.push_str("Proxy-Authorization: ");
+        request.push_str(value);
+        request.push_str("\r\n");
     }
-    req.push_str("Proxy-Connection: keep-alive\r\n\r\n");
-
-    stream
-        .write_all(req.as_bytes())
-        .await
-        .map_err(|e| NetError::Http(format!("proxy CONNECT write failed: {e}")))?;
-
-    // Read response headers until \r\n\r\n. CONNECT replies fit easily
-    // in a few hundred bytes; bound at 8 KiB to defeat a malicious proxy.
-    let mut buf = Vec::with_capacity(512);
-    let mut tmp = [0u8; 256];
-    loop {
-        let n = stream
-            .read(&mut tmp)
-            .await
-            .map_err(|e| NetError::Http(format!("proxy CONNECT read failed: {e}")))?;
-        if n == 0 {
-            return Err(NetError::Http(
-                "proxy CONNECT: server closed before response".into(),
-            ));
-        }
-        buf.extend_from_slice(&tmp[..n]);
-        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
-            break;
-        }
-        if buf.len() > 8192 {
-            return Err(NetError::Http("proxy CONNECT: response too large".into()));
-        }
-    }
-
-    let head = String::from_utf8_lossy(&buf);
-    let status_line = head.lines().next().unwrap_or_default();
-    // Expect "HTTP/1.1 200 ..." (or HTTP/1.0). Anything else is a failure.
-    let ok = status_line
-        .split_whitespace()
-        .nth(1)
-        .map(|c| c == "200")
-        .unwrap_or(false);
-    if !ok {
-        return Err(NetError::Http(format!(
-            "proxy CONNECT denied: {status_line}"
-        )));
-    }
+    request.push_str("\r\n");
+    stream.write_all(request.as_bytes()).await?;
+    stream.flush().await?;
     Ok(())
 }
 
-/// RFC 1928 SOCKS5 + RFC 1929 user/pass auth.
-async fn socks5_handshake(
-    stream: &mut TcpStream,
-    target_host: &str,
-    target_port: u16,
-    auth: &ProxyAuth,
-) -> Result<(), NetError> {
-    // === Phase 1: greeting ===
-    // VER=5, NMETHODS, METHODS...
-    let methods: &[u8] = match auth {
-        ProxyAuth::None => &[0x00],           // NO AUTH
-        ProxyAuth::UserPass(_, _) => &[0x02], // USER/PASS
-    };
-    let mut greet = vec![0x05, methods.len() as u8];
-    greet.extend_from_slice(methods);
-    stream
-        .write_all(&greet)
-        .await
-        .map_err(|e| NetError::Http(format!("SOCKS5 greet write failed: {e}")))?;
-
-    let mut resp = [0u8; 2];
-    stream
-        .read_exact(&mut resp)
-        .await
-        .map_err(|e| NetError::Http(format!("SOCKS5 greet read failed: {e}")))?;
-    if resp[0] != 0x05 {
-        return Err(NetError::Http(format!(
-            "SOCKS5 unexpected version {}",
-            resp[0]
-        )));
-    }
-    if resp[1] == 0xFF {
-        return Err(NetError::Http(
-            "SOCKS5 server rejected all auth methods".into(),
+fn validate_header_value(value: &str) -> Result<(), TransportError> {
+    if value.bytes().any(|byte| matches!(byte, b'\r' | b'\n')) {
+        return Err(TransportError::InvalidInput(
+            "proxy authorization contains a newline".into(),
         ));
     }
-
-    // === Phase 2: auth (if selected) ===
-    if resp[1] == 0x02 {
-        let (user, pass) = match auth {
-            ProxyAuth::UserPass(u, p) => (u.as_bytes(), p.as_bytes()),
-            _ => {
-                return Err(NetError::Http(
-                    "SOCKS5 server selected USER/PASS but no creds configured".into(),
-                ));
-            }
-        };
-        if user.len() > 255 || pass.len() > 255 {
-            return Err(NetError::Http(
-                "SOCKS5 USER/PASS fields must each be ≤255 bytes".into(),
-            ));
-        }
-        let mut auth_req = vec![0x01, user.len() as u8];
-        auth_req.extend_from_slice(user);
-        auth_req.push(pass.len() as u8);
-        auth_req.extend_from_slice(pass);
-        stream
-            .write_all(&auth_req)
-            .await
-            .map_err(|e| NetError::Http(format!("SOCKS5 auth write failed: {e}")))?;
-        let mut auth_resp = [0u8; 2];
-        stream
-            .read_exact(&mut auth_resp)
-            .await
-            .map_err(|e| NetError::Http(format!("SOCKS5 auth read failed: {e}")))?;
-        if auth_resp[1] != 0x00 {
-            return Err(NetError::Http(format!(
-                "SOCKS5 auth denied (status={})",
-                auth_resp[1]
-            )));
-        }
-    }
-
-    // === Phase 3: CONNECT request ===
-    // VER=5, CMD=1 (CONNECT), RSV=0, ATYP, DST.ADDR, DST.PORT
-    // Use ATYP=3 (DOMAINNAME) so the proxy resolves DNS — better for IP
-    // rotation flows where target_host is e.g. "etsy.com" not an IP.
-    if target_host.len() > 255 {
-        return Err(NetError::Http(format!(
-            "SOCKS5 DOMAINNAME must be ≤255 bytes, got {}",
-            target_host.len()
-        )));
-    }
-    let mut req = vec![0x05, 0x01, 0x00, 0x03, target_host.len() as u8];
-    req.extend_from_slice(target_host.as_bytes());
-    req.extend_from_slice(&target_port.to_be_bytes());
-    stream
-        .write_all(&req)
-        .await
-        .map_err(|e| NetError::Http(format!("SOCKS5 CONNECT write failed: {e}")))?;
-
-    // Reply: VER, REP, RSV, ATYP, BND.ADDR, BND.PORT
-    let mut head = [0u8; 4];
-    stream
-        .read_exact(&mut head)
-        .await
-        .map_err(|e| NetError::Http(format!("SOCKS5 CONNECT read failed: {e}")))?;
-    if head[0] != 0x05 {
-        return Err(NetError::Http(format!(
-            "SOCKS5 unexpected reply version {}",
-            head[0]
-        )));
-    }
-    if head[1] != 0x00 {
-        return Err(NetError::Http(format!(
-            "SOCKS5 CONNECT denied (rep=0x{:02x})",
-            head[1]
-        )));
-    }
-    // Drain BND.ADDR + BND.PORT so the stream is positioned at the start
-    // of the tunneled bytes.
-    let bnd_len = match head[3] {
-        0x01 => 4,  // IPv4
-        0x04 => 16, // IPv6
-        0x03 => {
-            let mut len_buf = [0u8; 1];
-            stream
-                .read_exact(&mut len_buf)
-                .await
-                .map_err(|e| NetError::Http(format!("SOCKS5 BND read failed: {e}")))?;
-            len_buf[0] as usize
-        }
-        other => {
-            return Err(NetError::Http(format!(
-                "SOCKS5 unknown ATYP 0x{other:02x} in CONNECT reply"
-            )));
-        }
-    };
-    let mut bnd = vec![0u8; bnd_len + 2];
-    stream
-        .read_exact(&mut bnd)
-        .await
-        .map_err(|e| NetError::Http(format!("SOCKS5 BND tail read failed: {e}")))?;
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_http_no_auth() {
-        let p = ProxyConfig::parse("http://proxy.example.com:8080").unwrap();
-        assert_eq!(
-            p,
-            ProxyConfig::Http {
-                host: "proxy.example.com".into(),
-                port: 8080,
-                auth: ProxyAuth::None,
-                tls: false,
-            }
-        );
-    }
-
-    #[test]
-    fn parse_socks5_with_auth() {
-        let p = ProxyConfig::parse("socks5://alice:s3cret@residential.example.com:1080").unwrap();
-        assert_eq!(
-            p,
-            ProxyConfig::Socks5 {
-                host: "residential.example.com".into(),
-                port: 1080,
-                auth: ProxyAuth::UserPass("alice".into(), "s3cret".into()),
-            }
-        );
-    }
-
-    #[test]
-    fn parse_https_proxy() {
-        let p = ProxyConfig::parse("https://proxy.example.com:443").unwrap();
-        match p {
-            ProxyConfig::Http { tls, .. } => assert!(tls),
-            _ => panic!("expected Http with tls=true"),
+async fn read_proxy_head<S: IoStream + AsyncBufRead>(
+    stream: &mut S,
+) -> Result<(u16, Vec<(String, String)>), TransportError> {
+    let mut raw = Vec::with_capacity(1024);
+    let header_end = loop {
+        if raw.ends_with(b"\r\n\r\n") {
+            break raw.len();
         }
-    }
-
-    #[test]
-    fn parse_rejects_unknown_scheme() {
-        assert!(ProxyConfig::parse("ftp://proxy:21").is_err());
-    }
-
-    #[test]
-    fn parse_uses_scheme_default_port() {
-        // http://...without :port → 80 (scheme default).
-        let p = ProxyConfig::parse("http://proxy.example.com").unwrap();
-        match p {
-            ProxyConfig::Http { port, .. } => assert_eq!(port, 80),
-            _ => panic!("expected Http"),
+        let available = stream.fill_buf().await?;
+        if available.is_empty() {
+            return Err(TransportError::EmptyResponse);
         }
-        // socks5 default is 1080.
-        let p = ProxyConfig::parse("socks5://proxy.example.com").unwrap();
-        match p {
-            ProxyConfig::Socks5 { port, .. } => assert_eq!(port, 1080),
-            _ => panic!("expected Socks5"),
+        let count = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(available.len(), |position| position + 1);
+        if raw.len().saturating_add(count) > MAX_PROXY_HEADERS {
+            return Err(TransportError::InvalidInput(
+                "proxy response headers are too large".into(),
+            ));
         }
+        raw.extend_from_slice(&available[..count]);
+        stream.consume(count);
+    };
+
+    let head = String::from_utf8_lossy(&raw[..header_end - 4]);
+    let mut lines = head.split("\r\n");
+    let status = lines
+        .next()
+        .and_then(|line| line.split_ascii_whitespace().nth(1))
+        .and_then(|status| status.parse::<u16>().ok())
+        .ok_or_else(|| TransportError::InvalidInput("proxy response has invalid status".into()))?;
+    let mut headers = Vec::new();
+    for line in lines {
+        let (name, value) = line.split_once(':').ok_or_else(|| {
+            TransportError::InvalidInput("proxy response contains a malformed header".into())
+        })?;
+        headers.push((name.trim().to_ascii_lowercase(), value.trim().to_owned()));
     }
+    Ok((status, headers))
+}
 
-    #[test]
-    fn parse_percent_decoded_password() {
-        // Password with a colon needs percent-encoding in the URL.
-        let p = ProxyConfig::parse("http://u:a%3Ab@proxy:8080").unwrap();
-        let auth = match &p {
-            ProxyConfig::Http { auth, .. } => auth.clone(),
-            _ => panic!(),
-        };
-        assert_eq!(auth, ProxyAuth::UserPass("u".into(), "a:b".into()));
-    }
-
-    /// Integration test: spin up a fake SOCKS5 proxy server in-process,
-    /// drive a connect through it, and verify the bytes that arrive at
-    /// the proxy match RFC 1928. Catches handshake drift end-to-end
-    /// without depending on a live external proxy.
-    #[tokio::test]
-    async fn socks5_handshake_roundtrip() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let proxy_port = listener.local_addr().unwrap().port();
-
-        // Fake SOCKS5 proxy: greet, accept NO_AUTH, send CONNECT reply
-        // success (BND.ADDR=0.0.0.0:0). Then close.
-        let server = tokio::spawn(async move {
-            let (mut sock, _) = listener.accept().await.unwrap();
-            // Greet: VER=5, NMETHODS=1, METHOD=NO_AUTH(0)
-            let mut greet = [0u8; 3];
-            sock.read_exact(&mut greet).await.unwrap();
-            assert_eq!(greet, [0x05, 0x01, 0x00]);
-            // Reply: VER=5, METHOD=NO_AUTH(0)
-            sock.write_all(&[0x05, 0x00]).await.unwrap();
-            // CONNECT: VER=5, CMD=1, RSV=0, ATYP=3, LEN, host bytes, port (BE)
-            let mut head = [0u8; 5];
-            sock.read_exact(&mut head).await.unwrap();
-            assert_eq!(head[0], 0x05);
-            assert_eq!(head[1], 0x01); // CONNECT
-            assert_eq!(head[3], 0x03); // DOMAINNAME
-            let host_len = head[4] as usize;
-            let mut host_buf = vec![0u8; host_len + 2];
-            sock.read_exact(&mut host_buf).await.unwrap();
-            let host_str = std::str::from_utf8(&host_buf[..host_len])
-                .unwrap()
-                .to_string();
-            assert_eq!(host_str, "target.example.com");
-            // Reply: VER=5, REP=0 (SUCCESS), RSV=0, ATYP=1, BND.ADDR=0.0.0.0, BND.PORT=0
-            sock.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
-                .await
-                .unwrap();
+async fn read_proxy_response<S: IoStream + AsyncBufRead>(
+    stream: &mut S,
+) -> Result<ProxyResponse, TransportError> {
+    let (status, headers) = loop {
+        let (status, headers) = read_proxy_head(stream).await?;
+        if !(100..200).contains(&status) || status == 101 {
+            break (status, headers);
+        }
+    };
+    if (200..300).contains(&status) {
+        // CONNECT 成功即切换为隧道；忽略代理附带的实体长度，保留缓冲中隧道字节。
+        return Ok(ProxyResponse {
+            status,
+            headers,
+            body: Vec::new(),
         });
-
-        let proxy = ProxyConfig::Socks5 {
-            host: "127.0.0.1".into(),
-            port: proxy_port,
-            auth: ProxyAuth::None,
-        };
-        let _stream = connect(
-            "target.example.com",
-            443,
-            std::time::Duration::from_secs(2),
-            None,
-            &proxy,
-        )
-        .await
-        .expect("SOCKS5 round-trip should succeed");
-        server.await.unwrap();
     }
 
-    #[test]
-    fn resolve_uses_profile_or_none() {
-        let r = ProxyConfig::resolve(Some("http://profile.example:8080")).unwrap();
-        assert!(matches!(r, Some(ProxyConfig::Http { .. })));
-        let r = ProxyConfig::resolve(None).unwrap();
-        assert!(r.is_none());
-        let r = ProxyConfig::resolve(Some("")).unwrap();
-        assert!(r.is_none());
+    let declared_length = headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, value)| value.parse::<usize>().ok());
+    if declared_length.is_some_and(|length| length > MAX_PROXY_RESPONSE) {
+        return Err(TransportError::InvalidInput(
+            "proxy response body is too large".into(),
+        ));
+    }
+    let mut body = Vec::new();
+    let chunked = headers.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case("transfer-encoding")
+            && value
+                .split(',')
+                .any(|coding| coding.trim().eq_ignore_ascii_case("chunked"))
+    });
+    if chunked {
+        body = read_chunked_body(stream, body).await?;
+    } else if let Some(declared_length) = declared_length {
+        let mut chunk = [0_u8; 4096];
+        while body.len() < declared_length {
+            let remaining = declared_length - body.len();
+            let count = stream.read(&mut chunk[..remaining.min(4096)]).await?;
+            if count == 0 {
+                return Err(TransportError::EmptyResponse);
+            }
+            body.extend_from_slice(&chunk[..count]);
+        }
+        body.truncate(declared_length);
+    } else if headers.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case("connection") && value.eq_ignore_ascii_case("close")
+    }) {
+        loop {
+            if body.len() >= MAX_PROXY_RESPONSE {
+                return Err(TransportError::InvalidInput(
+                    "proxy response body is too large".into(),
+                ));
+            }
+            let mut chunk = [0_u8; 4096];
+            let count = stream.read(&mut chunk).await?;
+            if count == 0 {
+                break;
+            }
+            body.extend_from_slice(&chunk[..count]);
+            if body.len() > MAX_PROXY_RESPONSE {
+                return Err(TransportError::InvalidInput(
+                    "proxy response body is too large".into(),
+                ));
+            }
+        }
+    }
+    Ok(ProxyResponse {
+        status,
+        headers,
+        body,
+    })
+}
+
+async fn read_chunked_body(
+    stream: &mut dyn IoStream,
+    mut pending: Vec<u8>,
+) -> Result<Vec<u8>, TransportError> {
+    let mut body = Vec::new();
+    let mut chunk = [0_u8; 4096];
+    loop {
+        let line_end = loop {
+            if let Some(position) = pending.windows(2).position(|window| window == b"\r\n") {
+                break position;
+            }
+            if pending.len() > 128 {
+                return Err(TransportError::InvalidInput(
+                    "proxy chunk size line is too large".into(),
+                ));
+            }
+            let count = stream.read(&mut chunk).await?;
+            if count == 0 {
+                return Err(TransportError::EmptyResponse);
+            }
+            pending.extend_from_slice(&chunk[..count]);
+        };
+        let size_text = std::str::from_utf8(&pending[..line_end])
+            .map_err(|_| TransportError::InvalidInput("invalid proxy chunk size".into()))?;
+        let size =
+            usize::from_str_radix(size_text.split(';').next().unwrap_or_default().trim(), 16)
+                .map_err(|_| TransportError::InvalidInput("invalid proxy chunk size".into()))?;
+        drop(pending.drain(..line_end + 2));
+        if size == 0 {
+            loop {
+                if pending.starts_with(b"\r\n") {
+                    return Ok(body);
+                }
+                if let Some(end) = pending.windows(4).position(|window| window == b"\r\n\r\n") {
+                    drop(pending.drain(..end + 4));
+                    return Ok(body);
+                }
+                if pending.len() > MAX_PROXY_RESPONSE {
+                    return Err(TransportError::InvalidInput(
+                        "proxy response trailers are too large".into(),
+                    ));
+                }
+                let count = stream.read(&mut chunk).await?;
+                if count == 0 {
+                    return Err(TransportError::EmptyResponse);
+                }
+                pending.extend_from_slice(&chunk[..count]);
+            }
+        }
+        if body.len().saturating_add(size) > MAX_PROXY_RESPONSE {
+            return Err(TransportError::InvalidInput(
+                "proxy response body is too large".into(),
+            ));
+        }
+        while pending.len() < size + 2 {
+            let count = stream.read(&mut chunk).await?;
+            if count == 0 {
+                return Err(TransportError::EmptyResponse);
+            }
+            pending.extend_from_slice(&chunk[..count]);
+        }
+        if &pending[size..size + 2] != b"\r\n" {
+            return Err(TransportError::InvalidInput(
+                "proxy chunk is missing its terminator".into(),
+            ));
+        }
+        body.extend_from_slice(&pending[..size]);
+        drop(pending.drain(..size + 2));
+    }
+}
+
+pub(crate) async fn establish_socks4_tunnel(
+    stream: &mut dyn IoStream,
+    target_host: &str,
+    target_port: u16,
+    username: Option<&str>,
+) -> Result<(), TransportError> {
+    let username = username.unwrap_or_default();
+    if username.contains('\0') || target_host.contains('\0') {
+        return Err(TransportError::InvalidInput(
+            "SOCKS4 strings contain NUL".into(),
+        ));
+    }
+    let address = target_host.parse::<Ipv4Addr>().ok();
+    if target_host.parse::<Ipv6Addr>().is_ok() {
+        return Err(TransportError::InvalidInput(
+            "SOCKS4 does not support IPv6".into(),
+        ));
+    }
+    let mut request = Vec::with_capacity(10 + username.len() + target_host.len());
+    request.extend_from_slice(&[4, 1]);
+    request.extend_from_slice(&target_port.to_be_bytes());
+    request.extend_from_slice(&address.map_or([0, 0, 0, 1], |ip| ip.octets()));
+    request.extend_from_slice(username.as_bytes());
+    request.push(0);
+    if address.is_none() {
+        request.extend_from_slice(target_host.as_bytes());
+        request.push(0);
+    }
+    stream.write_all(&request).await?;
+    stream.flush().await?;
+    let mut response = [0; 8];
+    stream.read_exact(&mut response).await?;
+    if response[0] != 0 || response[1] != 90 {
+        return Err(TransportError::Io(std::io::Error::other(format!(
+            "SOCKS4 CONNECT failed with status {}",
+            response[1]
+        ))));
+    }
+    Ok(())
+}
+
+pub(crate) async fn establish_socks5_tunnel(
+    stream: &mut dyn IoStream,
+    target_host: &str,
+    target_port: u16,
+    credentials: Option<(&str, &str)>,
+) -> Result<(), TransportError> {
+    let methods: &[u8] = if credentials.is_some() {
+        &[0x00, 0x02]
+    } else {
+        &[0x00]
+    };
+    let mut greeting = vec![0x05, methods.len() as u8];
+    greeting.extend_from_slice(methods);
+    stream.write_all(&greeting).await?;
+    stream.flush().await?;
+
+    let mut selection = [0_u8; 2];
+    stream.read_exact(&mut selection).await?;
+    if selection[0] != 0x05 || selection[1] == 0xff {
+        return Err(TransportError::Authentication(
+            "SOCKS5 proxy rejected authentication methods".into(),
+        ));
+    }
+    if selection[1] == 0x02 {
+        let (username, password) = credentials.ok_or_else(|| {
+            TransportError::Authentication("SOCKS5 proxy requested credentials".into())
+        })?;
+        if username.len() > u8::MAX as usize || password.len() > u8::MAX as usize {
+            return Err(TransportError::InvalidInput(
+                "SOCKS5 proxy credentials are too long".into(),
+            ));
+        }
+        let mut request = vec![0x01, username.len() as u8];
+        request.extend_from_slice(username.as_bytes());
+        request.push(password.len() as u8);
+        request.extend_from_slice(password.as_bytes());
+        stream.write_all(&request).await?;
+        stream.flush().await?;
+        let mut response = [0_u8; 2];
+        stream.read_exact(&mut response).await?;
+        if response[0] != 1 || response[1] != 0 {
+            return Err(TransportError::Authentication(
+                "SOCKS5 proxy rejected credentials".into(),
+            ));
+        }
+    } else if selection[1] != 0x00 {
+        return Err(TransportError::Authentication(format!(
+            "SOCKS5 proxy selected unsupported authentication method {}",
+            selection[1]
+        )));
+    }
+
+    let mut request = vec![0x05, 0x01, 0x00];
+    if let Ok(address) = target_host.parse::<Ipv4Addr>() {
+        request.push(0x01);
+        request.extend_from_slice(&address.octets());
+    } else if let Ok(address) = target_host.parse::<Ipv6Addr>() {
+        request.push(0x04);
+        request.extend_from_slice(&address.octets());
+    } else {
+        if target_host.len() > u8::MAX as usize {
+            return Err(TransportError::InvalidInput(
+                "SOCKS5 target host is too long".into(),
+            ));
+        }
+        request.extend_from_slice(&[0x03, target_host.len() as u8]);
+        request.extend_from_slice(target_host.as_bytes());
+    }
+    request.extend_from_slice(&target_port.to_be_bytes());
+    stream.write_all(&request).await?;
+    stream.flush().await?;
+
+    let mut response = [0_u8; 4];
+    stream.read_exact(&mut response).await?;
+    if response[0] != 0x05 || response[1] != 0x00 {
+        return Err(TransportError::Io(std::io::Error::other(format!(
+            "SOCKS5 CONNECT failed with status {}",
+            response[1]
+        ))));
+    }
+    let address_length = match response[3] {
+        0x01 => 4,
+        0x04 => 16,
+        0x03 => {
+            let mut length = [0_u8; 1];
+            stream.read_exact(&mut length).await?;
+            length[0] as usize
+        }
+        _ => {
+            return Err(TransportError::InvalidInput(
+                "SOCKS5 proxy returned invalid address type".into(),
+            ));
+        }
+    };
+    let mut bound_address_and_port = vec![0_u8; address_length + 2];
+    stream.read_exact(&mut bound_address_and_port).await?;
+    Ok(())
+}
+
+fn format_authority(host: &str, port: u16) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
     }
 }

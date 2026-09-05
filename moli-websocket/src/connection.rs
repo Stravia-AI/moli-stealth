@@ -1,13 +1,16 @@
 use std::collections::VecDeque;
 
-use futures_util::{SinkExt, StreamExt};
+use bytes::BytesMut;
+use ratchet_rs::{
+    CloseCode, CloseReason, Message,
+    deflate::{DeflateDecoder, DeflateEncoder},
+};
 use tokio::sync::mpsc;
-use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Message};
 
 use crate::{
     Command, ConnectOptions, Event, FrameOpcode,
     events::{EventSender, send_error_and_close, send_event},
-    headers::header_map_entries,
+    headers::{header_map_entries, request_header_entries},
     limits::{acquire_pending_websocket_handshake_slot, acquire_websocket_connection_slot},
     request::build_websocket_request,
     stream::open_websocket_stream,
@@ -39,7 +42,7 @@ pub(crate) async fn run_websocket_connection(
         }
     };
 
-    let request_headers = header_map_entries(request.headers());
+    let request_headers = request_header_entries(request.headers());
     let Some(pending_handshake_slot) = acquire_pending_websocket_handshake_slot() else {
         send_error_and_close(
             &event_tx,
@@ -182,21 +185,26 @@ pub(crate) async fn run_websocket_connection(
 
 async fn run_open_websocket_connection(
     socket_id: u64,
-    stream: tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    stream: crate::handshake::BrowserWebSocket,
     command_rx: mpsc::UnboundedReceiver<Command>,
     event_tx: EventSender,
 ) {
-    let (write, mut read) = stream.split();
+    let (write, read) = match stream.split() {
+        Ok(parts) => parts,
+        Err(error) => {
+            send_error_and_close(
+                &event_tx,
+                socket_id,
+                format!("WebSocket codec split failed: {error}"),
+            )
+            .await;
+            return;
+        }
+    };
+    let (reader_event_tx, mut reader_event_rx) = mpsc::channel(1);
+    let reader = tokio::spawn(run_websocket_reader(read, reader_event_tx));
     let (writer_event_tx, mut writer_event_rx) = mpsc::unbounded_channel();
-    let (writer_control_tx, writer_control_rx) = mpsc::unbounded_channel();
-    let writer = tokio::spawn(run_websocket_writer(
-        write,
-        command_rx,
-        writer_control_rx,
-        writer_event_tx,
-    ));
+    let writer = tokio::spawn(run_websocket_writer(write, command_rx, writer_event_tx));
     let mut sent_close: Option<(u16, String)> = None;
     let mut pending_buffered_amount = VecDeque::new();
     let mut writer_done = false;
@@ -205,9 +213,9 @@ async fn run_open_websocket_connection(
             biased;
             // Incoming close/error frames should decide browser-visible state before
             // a concurrent writer-side send failure caused by the same remote close.
-            message = read.next() => {
+            message = reader_event_rx.recv() => {
                 match message {
-                    Some(Ok(Message::Text(text))) => {
+                    Some(ReaderEvent::Text(text)) => {
                         send_next_buffered_amount(
                             &event_tx,
                             socket_id,
@@ -216,11 +224,11 @@ async fn run_open_websocket_connection(
                         .await;
                         let _ = send_event(&event_tx, Event::TextMessage {
                             socket_id,
-                            data: text.to_string(),
+                            data: text,
                         })
                         .await;
                     }
-                    Some(Ok(Message::Binary(data))) => {
+                    Some(ReaderEvent::Binary(data)) => {
                         send_next_buffered_amount(
                             &event_tx,
                             socket_id,
@@ -229,20 +237,17 @@ async fn run_open_websocket_connection(
                         .await;
                         let _ = send_event(&event_tx, Event::BinaryMessage {
                             socket_id,
-                            data: data.to_vec(),
+                            data,
                         })
                         .await;
                     }
-                    Some(Ok(Message::Close(frame))) => {
+                    Some(ReaderEvent::Close { code, reason }) => {
                         flush_pending_buffered_amount(
                             &event_tx,
                             socket_id,
                             &mut pending_buffered_amount,
                         )
                         .await;
-                        let (code, reason) = frame
-                            .map(|frame| (u16::from(frame.code), frame.reason.to_string()))
-                            .unwrap_or((1005, String::new()));
                         let _ = send_event(
                             &event_tx,
                             Event::Close {
@@ -255,13 +260,9 @@ async fn run_open_websocket_connection(
                         .await;
                         break;
                     }
-                    Some(Ok(Message::Ping(payload))) => {
-                        let _ =
-                            writer_control_tx.send(WebSocketWriterControl::Pong(payload.to_vec()));
-                    }
-                    Some(Ok(Message::Pong(_))) | Some(Ok(Message::Frame(_))) => {}
-                    Some(Err(error)) => {
-                        // The main loop's `biased; read.next()` arm wins races with
+                    Some(ReaderEvent::Control) => {}
+                    Some(ReaderEvent::Error(error)) => {
+                        // The main loop's biased reader-event arm wins races with
                         // `writer_event_rx`. Under load the client-initiated
                         // `Command::Close` can already be sitting in
                         // `writer_event_rx` as `WebSocketWriterEvent::Closing` by
@@ -391,7 +392,16 @@ async fn run_open_websocket_connection(
             }
         }
     }
+    reader.abort();
     writer.abort();
+}
+
+enum ReaderEvent {
+    Text(String),
+    Binary(Vec<u8>),
+    Control,
+    Close { code: u16, reason: String },
+    Error(String),
 }
 
 enum WebSocketWriterEvent {
@@ -407,64 +417,73 @@ enum WebSocketWriterEvent {
     Done,
 }
 
-enum WebSocketWriterControl {
-    Pong(Vec<u8>),
-}
-
-async fn run_websocket_writer<S>(
-    mut write: futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<S>, Message>,
-    mut command_rx: mpsc::UnboundedReceiver<Command>,
-    mut control_rx: mpsc::UnboundedReceiver<WebSocketWriterControl>,
-    writer_event_tx: mpsc::UnboundedSender<WebSocketWriterEvent>,
-) where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
-{
-    let mut control_done = false;
+async fn run_websocket_reader(
+    mut read: ratchet_rs::Receiver<moli_stealth_net::BoxedStream, DeflateDecoder>,
+    reader_event_tx: mpsc::Sender<ReaderEvent>,
+) {
+    let mut buffer = BytesMut::new();
     loop {
-        tokio::select! {
-            biased;
-            control = control_rx.recv(), if !control_done => {
-                match control {
-                    Some(WebSocketWriterControl::Pong(payload)) => {
-                        if let Err(error) = write.send(Message::Pong(payload.into())).await {
-                            let _ = writer_event_tx.send(WebSocketWriterEvent::Error(format!(
-                                "WebSocket pong failed: {error}"
-                            )));
-                            return;
-                        }
-                    }
-                    None => {
-                        control_done = true;
-                    }
-                }
+        let event = match read.read(&mut buffer).await {
+            Ok(Message::Text) => match std::str::from_utf8(&buffer) {
+                Ok(text) => ReaderEvent::Text(text.to_owned()),
+                Err(error) => ReaderEvent::Error(format!(
+                    "WebSocket text message is not valid UTF-8: {error}"
+                )),
+            },
+            Ok(Message::Binary) => ReaderEvent::Binary(buffer.to_vec()),
+            Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => ReaderEvent::Control,
+            Ok(Message::Close(reason)) => {
+                let (code, reason) = reason
+                    .map(|reason| {
+                        (
+                            u16::from(reason.code),
+                            reason.description.unwrap_or_default(),
+                        )
+                    })
+                    .unwrap_or((1005, String::new()));
+                ReaderEvent::Close { code, reason }
             }
-            command = command_rx.recv() => {
-                let Some(command) = command else {
-                    let _ = write.send(Message::Close(None)).await;
-                    let _ = write.close().await;
-                    let _ = writer_event_tx.send(WebSocketWriterEvent::Done);
-                    return;
-                };
-                if handle_websocket_writer_command(&mut write, command, &writer_event_tx).await {
-                    return;
-                }
-            }
+            Err(error) => ReaderEvent::Error(error.to_string()),
+        };
+        let terminal = matches!(event, ReaderEvent::Close { .. } | ReaderEvent::Error(_));
+        let completed_message = matches!(event, ReaderEvent::Text(_) | ReaderEvent::Binary(_));
+        if reader_event_tx.send(event).await.is_err() || terminal {
+            return;
+        }
+        if completed_message {
+            buffer.clear();
         }
     }
 }
 
-async fn handle_websocket_writer_command<S>(
-    write: &mut futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<S>, Message>,
+async fn run_websocket_writer(
+    mut write: ratchet_rs::Sender<moli_stealth_net::BoxedStream, DeflateEncoder>,
+    mut command_rx: mpsc::UnboundedReceiver<Command>,
+    writer_event_tx: mpsc::UnboundedSender<WebSocketWriterEvent>,
+) {
+    while let Some(command) = command_rx.recv().await {
+        if handle_websocket_writer_command(&mut write, command, &writer_event_tx).await {
+            return;
+        }
+    }
+    if let Err(error) = write.close(CloseReason::new(CloseCode::Normal, None)).await {
+        let _ = writer_event_tx.send(WebSocketWriterEvent::Error(format!(
+            "WebSocket close failed: {error}"
+        )));
+        return;
+    }
+    let _ = writer_event_tx.send(WebSocketWriterEvent::Done);
+}
+
+async fn handle_websocket_writer_command(
+    write: &mut ratchet_rs::Sender<moli_stealth_net::BoxedStream, DeflateEncoder>,
     command: Command,
     writer_event_tx: &mpsc::UnboundedSender<WebSocketWriterEvent>,
-) -> bool
-where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
-{
+) -> bool {
     match command {
         Command::SendText(text) => {
             let amount = text.len();
-            match write.send(Message::Text(text.into())).await {
+            match write.write_text(&text).await {
                 Ok(()) => {
                     let _ = writer_event_tx.send(WebSocketWriterEvent::FrameSent {
                         opcode: FrameOpcode::Text,
@@ -481,7 +500,7 @@ where
         }
         Command::SendBinary(bytes) => {
             let amount = bytes.len();
-            match write.send(Message::Binary(bytes.into())).await {
+            match write.write_binary(&bytes).await {
                 Ok(()) => {
                     let _ = writer_event_tx.send(WebSocketWriterEvent::FrameSent {
                         opcode: FrameOpcode::Binary,
@@ -506,17 +525,24 @@ where
                 code: close_event_code,
                 reason: close_event_reason,
             });
-            let frame = code.map(|code| CloseFrame {
-                code: code.into(),
-                reason: reason.into(),
-            });
-            if let Err(error) = write.send(Message::Close(frame)).await {
+            let close_code = match code {
+                Some(code) => match CloseCode::try_from(code.to_be_bytes()) {
+                    Ok(code) => code,
+                    Err(error) => {
+                        let _ = writer_event_tx.send(WebSocketWriterEvent::Error(format!(
+                            "WebSocket close failed: {error}"
+                        )));
+                        return true;
+                    }
+                },
+                None => CloseCode::Normal,
+            };
+            let description = code.map(|_| reason);
+            if let Err(error) = write.close(CloseReason::new(close_code, description)).await {
                 let _ = writer_event_tx.send(WebSocketWriterEvent::Error(format!(
                     "WebSocket close failed: {error}"
                 )));
-                return true;
             }
-            let _ = write.close().await;
             return true;
         }
         Command::ContinueOpen { .. } | Command::FailOpen(_) => {}

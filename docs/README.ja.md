@@ -112,6 +112,18 @@ moli fetch --layout --dump pdf https://example.com > page.pdf
 
 `fetch --help` を実行すると、出力形式、ページ読み込みや応答の待機条件、プロファイル（利用者設定）、プロキシ設定、取得対象の設定、動作追跡など、指定できる引数をすべて確認できます。
 
+### ネットワーク転送と Stealth
+
+HTTP/1.x、HTTP/2、送信 WebSocket は、BoringSSL を用いる単一のネイティブ Rust 非同期転送を共有します。Moli は起動時に Chrome **152.0.7977.82** を基準とする Stealth 設定をプロセス全体へ既定で適用します。これはすべての Chrome フィンガープリントや描画面の再現を保証するものではありません。HTTP/3 は未対応です。
+
+- 既定は `--stealth chrome` です。`--stealth off` でも同じ転送、証明書検証、ネットワーク制限を維持し、通常の TLS/HTTP 設定を使います。`moli-stealth-net` ライブラリ単体は、呼び出し側が明示しない限り通常モードです。
+- TLS は `--tls-cipher-list`、`--tls-curves`、`--tls-signature-algorithms`、HTTP/2 は `--http2-header-table-size`、`--http2-enable-push`、`--http2-advertised-max-concurrent-streams`、`--http2-initial-window-size`、`--http2-max-frame-size`、`--http2-max-header-list-size`、`--http2-connection-window-size` で上書きできます。設定は起動時に検証・固定され、変更には再起動が必要です。
+- `--user-agent` と `--user-agent-suffix` は転送フィンガープリントを自動変更しません。`moli fetch` の明示的な `--header 'Name: Value'` は生成されるヘッダー基準より優先されます（Cookie はブラウザーの Cookie 方針に従います）。
+- `--http-proxy` は環境変数より優先し、明示的な空値はフォールバックを無効にします。それ以外では `http_proxy`、`https_proxy`/`HTTPS_PROXY`、`all_proxy`/`ALL_PROXY` と、`--http-no-proxy` または `no_proxy`/`NO_PROXY` を使います。大文字の `HTTP_PROXY` は意図的に無視します。`--http-host-resolve HOST:PORT:ADDR` は承認済み直結先を固定して接続先 DNS を省略し、プロキシ側 DNS は選択した HTTP/SOCKS モードに従います。
+- Basic と Digest のサーバー／プロキシ認証は各プラットフォームで利用できます。Negotiate と NTLM は Windows SSPI 限定です。HTTP プロキシの Bearer 認証には `--proxy-bearer-token` を使い、資格情報はプロキシ交換だけに送信されます。
+
+ローカル CLI/CDP プローブと記録済み証拠は [`moli-cdp-smoke/README.md`](../moli-cdp-smoke/README.md) を参照してください。
+
 ### 自動化サーバーを起動する
 
 ```bash
@@ -200,7 +212,7 @@ Moli では、処理負荷の高い機能は明示的に有効にした場合だ
 
 Moli は、Chromium を外から操作するだけの仕組みではなく、独立したブラウザ実行基盤です。Rust で構築されており、独自の所有権管理と、構成要素の生成から破棄までの規則を持っています。主な構成技術は次のとおりです。
 
-- `libcurl` — 通信と複数要求の同時処理
+- `moli-stealth-net`、BoringSSL、HTTP/2 — TLS/HTTP フィンガープリントを設定できるネイティブ Rust 非同期通信
 - `html5ever` — HTML 解析
 - `rusty_v8` / V8 — JavaScript 実行
 - Servo/Stylo — セレクター、カスケード、計算済みスタイル

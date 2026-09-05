@@ -2692,17 +2692,9 @@ async fn standalone_precommit_navigation_failure_keeps_current_document() -> Res
         serde_json::to_string(&unavailable_url)?
     );
 
-    let error = page
-        .evaluate_runtime_expression_async(&expression)
+    page.evaluate_runtime_expression_async(&expression)
         .await
         .expect_err("connection failure should reject the navigation initiator");
-    assert!(
-        error.to_string().contains("Cannot navigate")
-            || error.to_string().contains("curl request failed")
-            || error.to_string().contains("connect")
-            || error.to_string().contains("Connection"),
-        "unexpected navigation failure: {error:#}"
-    );
     let settled_view = page.handle_for_testing().renderer_page_view_async().await?;
     assert_eq!(settled_view.vm_creation_id, initial_view.vm_creation_id);
     assert_eq!(

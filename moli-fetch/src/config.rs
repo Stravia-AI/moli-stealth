@@ -20,11 +20,11 @@ pub struct FetchConfig {
     proxy_bearer_token: Option<String>,
     http_max_concurrent: Option<NonZeroU32>,
     // Scheduler cap for simultaneously active transfers to one origin. This is
-    // intentionally separate from the libcurl per-host connection-pool cap so
+    // intentionally separate from the per-host connection-pool cap so
     // HTTP/2 can use multiple streams without being limited by the HTTP/1
     // socket default.
     http_max_host_open: Option<NonZeroU32>,
-    // Transport cap passed to libcurl's per-host connection pool. When unset,
+    // Transport cap applied to the per-host connection pool. When unset,
     // Moli uses Chromium's HTTP/1-style default of six connections per
     // host/group.
     http_max_host_connections: Option<u8>,
@@ -119,7 +119,7 @@ impl FetchConfig {
     ) {
         // These are fetch-runtime scheduler limits. In particular,
         // `http_max_host_open` limits active work per origin and does not
-        // configure libcurl's connection pool.
+        // configure the transport connection pool.
         self.http_max_concurrent = http_max_concurrent;
         self.http_max_host_open = http_max_host_open;
         self.http_max_response_size = http_max_response_size;
@@ -131,7 +131,7 @@ impl FetchConfig {
         http_max_total_connections: Option<u16>,
         http2_max_concurrent_streams: Option<u16>,
     ) {
-        // These are transport-level limits handed to curl. Keep them out of the
+        // These are transport-level limits. Keep them out of the
         // runtime scheduler so a Chromium-like HTTP/1 connection default does
         // not accidentally throttle HTTP/2 streams or queued browser work.
         self.http_max_host_connections = http_max_host_connections;
@@ -224,7 +224,7 @@ impl FetchConfig {
         self.http_max_host_open
     }
 
-    /// Effective libcurl per-host connection cap.
+    /// Effective per-host transport connection cap.
     ///
     /// The default only applies to the transport connection pool. It must not be
     /// reused as a scheduler per-origin active-transfer cap, because that would

@@ -258,14 +258,6 @@ impl ResourceRequestClient {
         cancel_handle: FetchCancelHandle,
     ) -> Result<NetworkFetchResult<Response>> {
         let request = self.apply_network_policy(request)?;
-        if request.auth_requires_buffered_transport() || !request.follow_redirects {
-            return self
-                .resource_runtime
-                .client()
-                .fetch_with_cancel_and_network_metadata(request, cancel_handle)
-                .await;
-        }
-
         let observed = self
             .fetch_raw_stream_with_cancel_after_policy_and_network_metadata(request, cancel_handle)
             .await?;
@@ -634,19 +626,6 @@ impl ResourceRequestClient {
         request: Request,
         cancel_handle: FetchCancelHandle,
     ) -> Result<Response> {
-        if request.auth_requires_buffered_transport() || !request.follow_redirects {
-            // Challenge-response schemes still need libcurl's buffered auth
-            // retry behavior until the streaming collector models
-            // intermediate authentication challenges explicitly. Manual
-            // redirect callers need the intermediate 3xx response before raw
-            // streaming starts.
-            return self
-                .resource_runtime
-                .client()
-                .fetch_with_cancel(request, cancel_handle)
-                .await;
-        }
-
         let response = self
             .fetch_raw_stream_with_cancel_after_policy(request, cancel_handle)
             .await?;
@@ -919,23 +898,6 @@ impl ResourceRequestClient {
         cancel_handle: Option<FetchCancelHandle>,
     ) -> Result<Response> {
         let request = self.apply_network_policy(request)?;
-        if request.auth_requires_buffered_transport() || !request.follow_redirects {
-            // Digest auth retries are still completed inside libcurl on the
-            // buffered path. Keep auth requests there until the streaming
-            // collector can distinguish intermediate auth challenges from
-            // final responses. Manual redirect callers also need buffered
-            // access to intermediate 3xx responses.
-            return match cancel_handle {
-                Some(cancel_handle) => {
-                    self.resource_runtime
-                        .client()
-                        .fetch_with_cancel(request, cancel_handle)
-                        .await
-                }
-                None => self.resource_runtime.client().fetch(request).await,
-            };
-        }
-
         let cancel_handle = cancel_handle.unwrap_or_default();
         let response = self
             .fetch_raw_stream_with_cancel_after_policy(request, cancel_handle)
@@ -945,6 +907,10 @@ impl ResourceRequestClient {
 
     pub fn user_agent(&self) -> &str {
         self.resource_runtime.client().user_agent()
+    }
+
+    pub(crate) fn tls_session_cache(&self) -> moli_stealth_net::TlsSessionCache {
+        self.resource_runtime.client().tls_session_cache()
     }
 
     pub fn browser_identity(&self) -> &moli_browser_profile::BrowserIdentityProfile {

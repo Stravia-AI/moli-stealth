@@ -15,7 +15,6 @@ members = [
     "moli-content-type",
     "moli-css-parse",
     "moli-crypto",
-    "moli-curl",
     "moli-dns-resolver",
     "moli-protocol",
     "moli-encoding",
@@ -82,15 +81,15 @@ members = [
     "moli-http-cache",
     "moli-wpt-compat"
 ]
-exclude = ["vendor/xml5ever-0.39.0"]
+exclude = ["vendor/xml5ever-0.39.0", "vendor/http2-0.5.17", "vendor/ratchet_deflate-1.2.1", "vendor/btls-windows-prefix"]
 
 [workspace.package]
 license = "MIT OR Apache-2.0"
 
 [patch.crates-io]
 xml5ever = { path = "vendor/xml5ever-0.39.0" }
-curl = { git = "https://github.com/ldm0/curl-rust", branch = "moli" }
-curl-sys = { git = "https://github.com/ldm0/curl-rust", branch = "moli" }
+http2 = { path = "vendor/http2-0.5.17" }
+ratchet_deflate = { path = "vendor/ratchet_deflate-1.2.1" }
 cookie = { git = "https://github.com/ldm0/cookie-rs", branch = "priority" }
 v8 = { path = "vendor/v8-152.2.0" }
 deno_v8 = { path = "vendor/deno_v8-0.3.0" }
@@ -101,6 +100,9 @@ stylo_dom = { git = "https://github.com/ldm0/stylo", rev = "671d13d31b3b00e7b1e0
 stylo_static_prefs = { git = "https://github.com/ldm0/stylo", rev = "671d13d31b3b00e7b1e0088ba2b36a4e35c0858c" }
 stylo_traits = { git = "https://github.com/ldm0/stylo", rev = "671d13d31b3b00e7b1e0088ba2b36a4e35c0858c" }
 taffy = { git = "https://github.com/ldm0/taffy", rev = "71bc149ce5358406cdabba66da853ceb11ac74ee" }
+
+[patch."https://github.com/0x676e67/btls.git"]
+btls-sys = { path = "vendor/btls-windows-prefix/btls-sys" }
 
 [workspace.lints.clippy]
 disallowed_methods = "deny"

@@ -143,6 +143,125 @@ workers can partition that selected list with the one-based
 
 ## Current Coverage
 
+### Transport Fingerprint Evidence
+
+The transport cutover was measured on **2026-09-05**, using Windows x64 desktop
+Chrome **152.0.7977.82**, revision
+`d04cdb24d67b081f6cf80200ffc5233f44b61109`, V8 `15.2.124.21`.
+The executable was
+`C:\Program Files\Google\Chrome\Application\chrome.exe`, with an isolated
+temporary profile, `--lang=en-US`, `--no-proxy-server`, and background component
+updates disabled. This is the specific desktop baseline behind Moli's preset,
+not a claim about every Chrome installation or browser-visible surface.
+
+The checked-in [direct capture](evidence/transport/chrome-152-windows-direct.json),
+[CONNECT capture](evidence/transport/chrome-152-windows-proxy.json), and
+[acceptance summary](evidence/transport/acceptance.json) retain the reference
+version, ordered wire observations, and the measured scope. Chrome and Moli each
+completed three direct and three proxy repetitions with zero semantic
+differences. The fixture observes fresh HTTPS connections, reused HTTP/2
+connections, and successful HTTPS-to-WSS TLS session resumption.
+
+The scenario uses a local self-signed TLS endpoint and a local CONNECT proxy.
+Only the probe explicitly ignores certificate errors; this is not a production
+TLS configuration. Python's SSL MemoryBIO captures the raw ClientHello before
+decryption and HTTP/2 frames plus HPACK headers after decryption. The server
+also records the negotiated cipher, ALPN, and whether a session resumed.
+The document declares an inline icon so an unrelated favicon request cannot
+race the explicit scenario and change its HTTP/2 dependency tree.
+
+The measured matrix covers navigation; sequential Fetch reuse; binary PATCH
+upload/download; HEAD; and WSS subprotocol, text, binary, compressed messages,
+and clean close. A separate ten-case browser exercise verified document Fetch,
+worker Fetch, and XHR binary bodies, explicit empty `Content-Type`, and the
+existing String, URLSearchParams, Blob, and FormData MIME rules. An authored
+empty header is preserved; the removed curl-only suppression sentinel is not
+sent as a header.
+
+Stale pooled HTTP/1 recovery is limited to one replacement and safe methods
+without a body; fresh-connection errors and non-replayable requests are not
+retried. A redirect status without `Location` retains its raw body, including
+cached responses and navigation preload. Failed HTTPS upgrade probes do not
+commit a synthetic redirect to the failed document's URL.
+
+Classic session deletion waits for actor and renderer-owner cleanup, rather
+than acknowledging receipt of the shutdown command. This prevents Windows
+process-exit crypto cleanup from racing native thread-local destructors.
+Verification includes a gated owner-completion regression, twenty repeated
+unassisted test-process exits, and ten real Moli WebDriver session lifecycles.
+
+The comparator preserves cipher order, extension presence, ALPN, SETTINGS
+order/values, connection-window updates, request priority, header order,
+UA/Client Hints, and JavaScript identity. It normalizes GREASE values and
+permuted extension order while retaining their raw observations. Trust-anchor
+IDs are compared as an exact multiset because the measured browser permutes
+their order. PSK ticket bytes, age, and opaque encoded length belong to the
+fixture server; the comparison instead retains PSK presence, identity count,
+binder lengths, and the server's actual resumption result. Both 208- and
+224-byte tickets were observed from Chrome, with the same 48-byte binder.
+
+From the repository root, start an isolated desktop Chrome with a CDP endpoint
+on port 9222, then start Moli:
+
+```bash
+target/debug/moli serve --port 9223 --http-proxy "" --insecure-disable-tls-host-verification
+```
+
+On Windows, use `target/debug/moli.exe`. Run the exact same local scenario:
+
+```bash
+uv run --project moli-cdp-smoke python -m moli_cdp_smoke.transport_probe \
+  --endpoint http://127.0.0.1:9222 --repeats 3 \
+  --output target/transport/chrome.json
+uv run --project moli-cdp-smoke python -m moli_cdp_smoke.transport_probe \
+  --endpoint http://127.0.0.1:9223 --repeats 3 \
+  --reference target/transport/chrome.json \
+  --output target/transport/moli.json
+```
+
+Repeat both commands with `--proxy` and separate output files to cover CONNECT.
+The probe creates and disposes isolated proxy browser contexts itself. OpenSSL
+must be available for the fixture certificate; use `--openssl PATH` when it is
+not on `PATH`. A completed capture with differences exits nonzero. Older raw
+captures without a recorded server resumption result need a fresh reference
+for the current comparison.
+
+Explicit overrides were also measured in a separate Moli process:
+`--tls-curves X25519 --http2-initial-window-size 32768
+--user-agent Moli-Transport-Override/1`. The ClientHello advertised only
+X25519 plus GREASE, SETTINGS carried window 32768, and HTTP, WSS, and
+`navigator.userAgent` all exposed the requested UA. A third process using
+`--stealth off` retained working HTTP/2/WSS and binary behavior with ordinary
+TLS/HTTP defaults rather than the Chrome fingerprint. Changing UA does not
+select a different TLS preset.
+
+#### Maintained Transport Patches
+
+Moli owns its HTTP policy, async transport/pool, browser observation, and
+outbound WebSocket integration. The imported transport provenance remains in
+`moli-stealth-net/Cargo.toml`; the following narrowly scoped dependency patches
+are maintained locally, with upstream licenses retained:
+
+| Dependency | Local ownership boundary |
+| --- | --- |
+| `http2 0.5.17` in `vendor/http2-0.5.17` | Per-request HEADERS priority, including different priorities on one reused connection. |
+| `ratchet_deflate 1.2.1` in `vendor/ratchet_deflate-1.2.1` | Final-fragment flushing, per-message compression state, and bounded decoded output. |
+| `btls-sys 0.5.6` in `vendor/btls-windows-prefix` | Stable `btls_sys` native/FFI prefixes, patched exports, and opaque C++ type identities so BoringSSL safely coexists with the existing AWS-LC/OpenSSL consumers. |
+
+The btls source is pinned to
+`de7ab84fdb58641a2bdfdf9d8ebd7db1dcf4b29b`; its BoringSSL source is pinned to
+`f1f2556a5dfa59e147d9d47279cc3f7f8a18b433`. A clean native build needs Git and
+network access to fetch that source unless it is already supplied. A prebuilt
+BoringSSL override must use the same namespace. Updating btls patches or the
+BoringSSL revision requires reviewing added exports and the public type
+registry, then linking the complete Moli executable—not only the transport
+crate—to catch cross-backend native collisions. The vendored patch files are
+pinned to LF line endings for reproducible `git apply` on Windows checkouts.
+
+The recorded executable validation is Windows x64. Other target platforms,
+HTTP/3, arbitrary browser variants, and full rendering/OS impersonation are
+not established by these captures.
+
 The current suite is a strong core smoke gate, not a complete Playwright compatibility suite.
 
 Covered well:

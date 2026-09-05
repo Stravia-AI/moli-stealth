@@ -6,7 +6,6 @@ use crate::{
         MAX_PENDING_WEBSOCKET_HANDSHAKES, MAX_WEBSOCKET_CONNECTIONS_PER_RUNTIME,
         acquire_limited_websocket_slot,
     },
-    proxy::{append_proxy_connect_header, no_proxy_matches},
     request::build_websocket_request,
     test_support::*,
 };
@@ -205,125 +204,6 @@ fn websocket_request_builder_rejects_blocked_ports() {
 }
 
 #[test]
-fn websocket_no_proxy_matches_hosts_domains_ports_and_wildcard() {
-    assert!(no_proxy_matches("example.com", None, Some("example.com")));
-    assert!(no_proxy_matches(
-        "api.example.com",
-        None,
-        Some(".example.com")
-    ));
-    assert!(no_proxy_matches(
-        "api.example.com",
-        Some(8080),
-        Some("example.com:8080")
-    ));
-    assert!(no_proxy_matches("anything.test", None, Some("*")));
-    assert!(!no_proxy_matches(
-        "api.example.com",
-        Some(8081),
-        Some("example.com:8080")
-    ));
-    assert!(!no_proxy_matches(
-        "notexample.com",
-        None,
-        Some("example.com")
-    ));
-}
-
-#[test]
-fn websocket_proxy_url_uses_env_http_proxy_for_ws_when_unset() {
-    let context = test_websocket_context();
-    let uri = "ws://target.test/socket".parse().unwrap();
-    let proxy = test_websocket_proxy_url_with_env(
-        &uri,
-        &context,
-        &[("http_proxy", "http://127.0.0.1:8080")],
-    );
-
-    assert_eq!(proxy.as_deref(), Some("http://127.0.0.1:8080/"));
-}
-
-#[test]
-fn websocket_proxy_url_uses_env_https_proxy_for_wss_when_unset() {
-    let context = test_websocket_context();
-    let uri = "wss://target.test/socket".parse().unwrap();
-    let proxy = test_websocket_proxy_url_with_env(
-        &uri,
-        &context,
-        &[("HTTPS_PROXY", "http://127.0.0.1:8443")],
-    );
-
-    assert_eq!(proxy.as_deref(), Some("http://127.0.0.1:8443/"));
-}
-
-#[test]
-fn websocket_proxy_url_ignores_uppercase_http_proxy_for_ws() {
-    let context = test_websocket_context();
-    let uri = "ws://target.test/socket".parse().unwrap();
-    let proxy = test_websocket_proxy_url_with_env(
-        &uri,
-        &context,
-        &[("HTTP_PROXY", "http://127.0.0.1:8080")],
-    );
-
-    assert_eq!(proxy, None);
-}
-
-#[test]
-fn websocket_proxy_url_uses_all_proxy_fallback() {
-    let context = test_websocket_context();
-    let uri = "wss://target.test/socket".parse().unwrap();
-    let proxy = test_websocket_proxy_url_with_env(
-        &uri,
-        &context,
-        &[("ALL_PROXY", "http://127.0.0.1:9000")],
-    );
-
-    assert_eq!(proxy.as_deref(), Some("http://127.0.0.1:9000/"));
-}
-
-#[test]
-fn websocket_proxy_url_respects_env_no_proxy() {
-    let context = test_websocket_context();
-    let uri = "ws://api.example.com/socket".parse().unwrap();
-    let proxy = test_websocket_proxy_url_with_env(
-        &uri,
-        &context,
-        &[
-            ("http_proxy", "http://127.0.0.1:8080"),
-            ("NO_PROXY", ".example.com"),
-        ],
-    );
-
-    assert_eq!(proxy, None);
-}
-
-#[test]
-fn websocket_proxy_url_explicit_empty_proxy_disables_env_fallback() {
-    let mut context = test_websocket_context();
-    context.http_proxy = Some(String::new());
-    let uri = "ws://target.test/socket".parse().unwrap();
-    let proxy = test_websocket_proxy_url_with_env(
-        &uri,
-        &context,
-        &[("http_proxy", "http://127.0.0.1:8080")],
-    );
-
-    assert_eq!(proxy, None);
-}
-
-#[test]
-fn websocket_proxy_connect_header_rejects_newline_values() {
-    let mut request = String::new();
-    assert!(append_proxy_connect_header(&mut request, "User-Agent", "Moli").is_ok());
-    assert_eq!(request, "User-Agent: Moli\r\n");
-    assert!(
-        append_proxy_connect_header(&mut request, "Proxy-Authorization", "Bearer good\nbad")
-            .is_err()
-    );
-}
-
-#[test]
 fn websocket_request_builder_applies_context_protocols_and_cookie() {
     let mut context = test_websocket_context();
     context.extra_headers = vec![
@@ -364,6 +244,27 @@ fn websocket_request_builder_applies_context_protocols_and_cookie() {
     assert_eq!(
         request
             .headers()
+            .get(http::header::ACCEPT_LANGUAGE)
+            .and_then(|value| value.to_str().ok()),
+        Some("en-US,en;q=0.9")
+    );
+    assert_eq!(
+        request
+            .headers()
+            .get(http::header::ACCEPT_ENCODING)
+            .and_then(|value| value.to_str().ok()),
+        Some("gzip, deflate, br, zstd")
+    );
+    assert_eq!(
+        request
+            .headers()
+            .get(http::header::SEC_WEBSOCKET_EXTENSIONS)
+            .and_then(|value| value.to_str().ok()),
+        Some("permessage-deflate; client_max_window_bits")
+    );
+    assert_eq!(
+        request
+            .headers()
             .get(http::header::COOKIE)
             .and_then(|value| value.to_str().ok()),
         Some("sid=server")
@@ -374,6 +275,58 @@ fn websocket_request_builder_applies_context_protocols_and_cookie() {
             .get("x-moli-trace")
             .and_then(|value| value.to_str().ok()),
         Some("socket")
+    );
+}
+
+#[test]
+fn websocket_request_builder_explicit_headers_override_browser_defaults() {
+    let mut context = test_websocket_context();
+    context.extra_headers = vec![
+        ("Accept-Language".to_owned(), "zh-CN,zh;q=0.9".to_owned()),
+        ("Accept-Encoding".to_owned(), "identity".to_owned()),
+        ("Pragma".to_owned(), "custom".to_owned()),
+    ];
+    let request = build_websocket_request("ws://example.com/socket", &[], &context)
+        .expect("websocket request should build");
+
+    assert_eq!(
+        request.headers()[http::header::ACCEPT_LANGUAGE],
+        "zh-CN,zh;q=0.9"
+    );
+    assert_eq!(request.headers()[http::header::ACCEPT_ENCODING], "identity");
+    assert_eq!(request.headers()[http::header::PRAGMA], "custom");
+}
+
+#[test]
+fn websocket_request_builder_matches_chrome_header_order() {
+    let request = build_websocket_request(
+        "wss://example.com/socket",
+        &["probe".to_owned()],
+        &test_websocket_context(),
+    )
+    .expect("websocket request should build");
+    let names = crate::headers::request_header_entries(request.headers())
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        names,
+        [
+            "Host",
+            "Connection",
+            "Pragma",
+            "Cache-Control",
+            "User-Agent",
+            "Upgrade",
+            "Origin",
+            "Sec-WebSocket-Version",
+            "Accept-Encoding",
+            "Accept-Language",
+            "Sec-WebSocket-Key",
+            "Sec-WebSocket-Extensions",
+            "Sec-WebSocket-Protocol",
+        ]
     );
 }
 
@@ -692,7 +645,7 @@ async fn websocket_transport_handshake_applies_context_headers_and_preserves_con
     let mut context = test_websocket_context();
     context.extra_headers = vec![
         ("X-Moli-Trace".to_owned(), "socket".to_owned()),
-        // Protocol control headers are generated by tungstenite and should not
+        // Protocol control headers are generated by the transport and should not
         // be overridden by embedding-layer extra headers.
         ("Sec-WebSocket-Version".to_owned(), "999".to_owned()),
     ];
@@ -789,9 +742,51 @@ async fn websocket_transport_uses_explicit_http_proxy_connect_without_forwarding
 }
 
 #[tokio::test]
-async fn websocket_transport_rejects_non_200_http_proxy_connect() {
-    let (proxy_url, proxy_request_rx, proxy) =
-        spawn_http_connect_proxy_response(b"HTTP/1.1 204 No Content\r\n\r\n").await;
+async fn websocket_transport_wss_over_connect_uses_shared_tls_without_leaking_proxy_auth() {
+    let (url, headers_rx, server) = spawn_tls_header_capture_websocket_server().await;
+    let (proxy_url, proxy_request_rx, proxy) = spawn_http_connect_proxy().await;
+    let (event_tx, mut event_rx) = mpsc::channel(32);
+    let mut context = test_websocket_context();
+    context.http_proxy = Some(proxy_url);
+    context.http_no_proxy = Some(String::new());
+    context.proxy_bearer_token = Some("wss-proxy-token".to_owned());
+    context.tls_verify_host = false;
+
+    let command_tx = spawn_connection(3, url.clone(), Vec::new(), context, event_tx);
+    let proxy_request = timeout(Duration::from_secs(3), proxy_request_rx)
+        .await
+        .expect("proxy CONNECT should arrive")
+        .expect("proxy request sender should stay alive");
+    let headers = timeout(Duration::from_secs(3), headers_rx)
+        .await
+        .expect("proxied WSS headers should arrive")
+        .expect("WSS header sender should stay alive");
+    let open = recv_open_event(&mut event_rx).await;
+    let _ = command_tx.send(Command::Close {
+        code: Some(1000),
+        reason: "done".to_owned(),
+    });
+    server.await.expect("WSS server should finish");
+    proxy.await.expect("WebSocket proxy should finish");
+
+    let target = Url::parse(&url).expect("WSS target URL");
+    let expected_connect = format!(
+        "CONNECT {}:{} HTTP/1.1",
+        target.host_str().expect("target host"),
+        target.port_or_known_default().expect("target port")
+    );
+    assert_eq!(open.socket_id, 3);
+    assert!(proxy_request.starts_with(&expected_connect));
+    assert!(proxy_request.contains("\r\nProxy-Authorization: Bearer wss-proxy-token\r\n"));
+    assert_eq!(header_value(&headers, "proxy-authorization"), None);
+}
+
+#[tokio::test]
+async fn websocket_transport_reports_http_proxy_connect_rejection() {
+    let (proxy_url, proxy_request_rx, proxy) = spawn_http_connect_proxy_response(
+        b"HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\n\r\n",
+    )
+    .await;
     let (event_tx, mut event_rx) = mpsc::channel(32);
     let mut context = test_websocket_context();
     context.http_proxy = Some(proxy_url);
@@ -816,7 +811,7 @@ async fn websocket_transport_rejects_non_200_http_proxy_connect() {
         "unexpected CONNECT request: {proxy_request:?}"
     );
     assert!(
-        message.contains("HTTP/1.1 204 No Content"),
+        message.contains("407"),
         "unexpected proxy CONNECT error: {message}"
     );
 }
@@ -986,6 +981,31 @@ async fn websocket_transport_rejects_invalid_response_subprotocols() {
 }
 
 #[tokio::test]
+async fn websocket_transport_rejects_invalid_extension_negotiation() {
+    for (path, extension) in [
+        (
+            "unsupported-extension",
+            "Sec-WebSocket-Extensions: x-unknown",
+        ),
+        (
+            "invalid-deflate-param",
+            "Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits=99",
+        ),
+        (
+            "valueless-response-window",
+            "Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits",
+        ),
+    ] {
+        websocket_computed_accept_handshake_failure_message(
+            path,
+            vec!["Upgrade: websocket", "Connection: Upgrade", extension],
+            Vec::new(),
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
 async fn websocket_transport_allows_server_to_omit_response_subprotocol() {
     let (url, server) = spawn_text_binary_echo_websocket_server().await;
     let (event_tx, mut event_rx) = mpsc::channel(32);
@@ -1022,6 +1042,7 @@ async fn websocket_transport_sends_text_binary_and_reports_buffered_amount_consu
 
     let open = recv_open_event(&mut event_rx).await;
     assert_eq!(open.socket_id, 4);
+    assert_eq!(open.extensions, "");
 
     command_tx
         .send(Command::SendText("hello".to_owned()))
@@ -1046,6 +1067,117 @@ async fn websocket_transport_sends_text_binary_and_reports_buffered_amount_consu
     assert_closing(&mut event_rx, 4).await;
     assert_close(&mut event_rx, 4, 1000, "done", true).await;
     server.await.expect("websocket echo server should finish");
+}
+
+#[tokio::test]
+async fn websocket_compression_state_does_not_leak_into_plain_fragments() {
+    // RFC 7692 §7.2.3: compressed Hello, plain fragmented World, then
+    // another compressed Hello referencing the retained LZ77 dictionary.
+    let (url, server) = spawn_computed_accept_websocket_response_with_body_server(
+        "mixed-compression",
+        vec![
+            "Upgrade: websocket",
+            "Connection: Upgrade",
+            "Sec-WebSocket-Extensions: permessage-deflate; server_max_window_bits=12",
+        ],
+        b"\xc1\x07\xf2\x48\xcd\xc9\xc9\x07\x00\x01\x02Wo\x80\x03rld\xc1\x05\xf2\x00\x11\x00\x00\x88\x02\x03\xe8",
+    ).await;
+    let (event_tx, mut event_rx) = mpsc::channel(32);
+    let _command_tx = spawn_connection(42, url, Vec::new(), test_websocket_context(), event_tx);
+    recv_open_event(&mut event_rx).await;
+    assert_text_message(&mut event_rx, 42, "Hello").await;
+    assert_text_message(&mut event_rx, 42, "World").await;
+    assert_text_message(&mut event_rx, 42, "Hello").await;
+    assert_close(&mut event_rx, 42, 1000, "", true).await;
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn websocket_rejects_messages_exceeding_the_decoded_size_limit() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/oversized", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let upgrade = ratchet_rs::accept_with(
+            stream,
+            ratchet_rs::WebSocketConfig::default(),
+            ratchet_rs::deflate::DeflateExtProvider::default(),
+            ratchet_rs::SubprotocolRegistry::default(),
+        )
+        .await
+        .unwrap();
+        let mut socket = upgrade.upgrade().await.unwrap().into_websocket();
+        socket
+            .write_binary(vec![0; 64 * 1024 * 1024 + 1])
+            .await
+            .unwrap();
+        let mut buffer = bytes::BytesMut::new();
+        let _ = socket.read(&mut buffer).await;
+    });
+    let (event_tx, mut event_rx) = mpsc::channel(32);
+    let _command_tx = spawn_connection(43, url, Vec::new(), test_websocket_context(), event_tx);
+    recv_open_event(&mut event_rx).await;
+    match timeout(Duration::from_secs(3), event_rx.recv())
+        .await
+        .unwrap()
+    {
+        Some(Event::Error { socket_id: 43, .. }) => {}
+        Some(Event::BinaryMessage { .. }) => panic!("oversized decoded message was delivered"),
+        _ => panic!("oversized decoded message did not fail the connection"),
+    }
+    assert_close(&mut event_rx, 43, 1006, "", false).await;
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn websocket_transport_negotiates_and_round_trips_compressed_messages() {
+    let (url, server) = spawn_compressed_websocket_server().await;
+    let (event_tx, mut event_rx) = mpsc::channel(32);
+    let command_tx = spawn_connection(41, url, Vec::new(), test_websocket_context(), event_tx);
+
+    let open = recv_open_event(&mut event_rx).await;
+    assert_eq!(open.socket_id, 41);
+    assert_eq!(open.extensions, "permessage-deflate");
+    assert_text_message(
+        &mut event_rx,
+        41,
+        "fragmented compressed context takeover message",
+    )
+    .await;
+    assert_binary_message(
+        &mut event_rx,
+        41,
+        b"fragmented compressed context takeover message",
+    )
+    .await;
+
+    let text = "client compressed text ".repeat(128);
+    command_tx
+        .send(Command::SendText(text.clone()))
+        .expect("send compressed text command");
+    assert_frame_sent(&mut event_rx, 41, FrameOpcode::Text, text.len()).await;
+    assert_buffered_amount_consumed(&mut event_rx, 41, text.len()).await;
+    assert_text_message(&mut event_rx, 41, &text).await;
+
+    let binary = text.as_bytes().to_vec();
+    command_tx
+        .send(Command::SendBinary(binary.clone()))
+        .expect("send compressed binary command");
+    assert_frame_sent(&mut event_rx, 41, FrameOpcode::Binary, binary.len()).await;
+    assert_buffered_amount_consumed(&mut event_rx, 41, binary.len()).await;
+    assert_binary_message(&mut event_rx, 41, &binary).await;
+
+    command_tx
+        .send(Command::Close {
+            code: Some(1000),
+            reason: "compressed-done".to_owned(),
+        })
+        .expect("send compressed close command");
+    assert_closing(&mut event_rx, 41).await;
+    assert_close(&mut event_rx, 41, 1000, "compressed-done", true).await;
+    server
+        .await
+        .expect("compressed websocket server should finish");
 }
 
 #[tokio::test]

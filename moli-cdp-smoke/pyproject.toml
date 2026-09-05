@@ -20,3 +20,12 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["moli_cdp_smoke"]
+
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple/"
+default = true
+
+[dependency-groups]
+dev = [
+    "hpack>=4.2.0",
+]

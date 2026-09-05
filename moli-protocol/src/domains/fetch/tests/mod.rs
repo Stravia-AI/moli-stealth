@@ -19,7 +19,7 @@ use axum::{
     extract::ws::{Message, WebSocketUpgrade},
     http::{
         HeaderMap, Method, StatusCode,
-        header::{CONTENT_TYPE, PROXY_AUTHENTICATE, WWW_AUTHENTICATE},
+        header::{CONTENT_TYPE, WWW_AUTHENTICATE},
     },
     response::IntoResponse,
     routing::{any, get},

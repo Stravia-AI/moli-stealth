@@ -4,7 +4,14 @@
 
 use std::sync::Arc;
 
+#[cfg(test)]
+use bytes::BytesMut;
 use futures_util::{SinkExt, StreamExt};
+#[cfg(test)]
+use ratchet_rs::{
+    Message as RatchetMessage, MessageType, SubprotocolRegistry, WebSocketConfig, accept_with,
+    deflate::{DeflateConfig, DeflateExtProvider},
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -16,9 +23,7 @@ use tokio_tungstenite::tungstenite::{
     protocol::{CloseFrame, Message},
 };
 
-use crate::{
-    ConnectOptions, Event, FrameOpcode, proxy::websocket_proxy_url_with_env, spawn_connection,
-};
+use crate::{ConnectOptions, Event, FrameOpcode, spawn_connection};
 
 struct InfallibleHandshakeCallback<F>(F);
 
@@ -35,27 +40,87 @@ pub fn test_websocket_context() -> ConnectOptions {
     ConnectOptions {
         origin: "https://example.com".to_owned(),
         user_agent: "Moli-WebSocket-Test/1.0".to_owned(),
+        accept_language: "en-US,en;q=0.9".to_owned(),
         extra_headers: Vec::new(),
         http_proxy: None,
         http_no_proxy: None,
         proxy_bearer_token: None,
         tls_verify_host: true,
+        tls_session_cache: None,
         cookie_header: None,
         pause_after_handshake: false,
     }
 }
 
-pub fn test_websocket_proxy_url_with_env(
-    uri: &http::Uri,
-    context: &ConnectOptions,
-    env: &[(&str, &str)],
-) -> Option<String> {
-    websocket_proxy_url_with_env(uri, context, |name| {
-        env.iter()
-            .find_map(|(env_name, value)| (*env_name == name).then(|| (*value).to_owned()))
-    })
-    .expect("websocket proxy url should resolve")
-    .map(|url| url.to_string())
+#[cfg(test)]
+pub(crate) async fn spawn_compressed_websocket_server() -> (String, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind compressed websocket server");
+    let address = listener
+        .local_addr()
+        .expect("read compressed websocket server address");
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener
+            .accept()
+            .await
+            .expect("accept compressed websocket client");
+        let provider = DeflateExtProvider::with_config(DeflateConfig {
+            request_server_no_context_takeover: false,
+            request_client_no_context_takeover: false,
+            accept_no_context_takeover: false,
+            ..DeflateConfig::default()
+        });
+        let upgrader = accept_with(
+            stream,
+            WebSocketConfig::default(),
+            provider,
+            SubprotocolRegistry::default(),
+        )
+        .await
+        .expect("negotiate compressed websocket");
+        let mut socket = upgrader
+            .upgrade()
+            .await
+            .expect("upgrade compressed websocket")
+            .into_websocket();
+
+        socket
+            .write_fragmented(
+                "fragmented compressed context takeover message",
+                MessageType::Text,
+                7,
+            )
+            .await
+            .expect("send fragmented compressed text");
+        socket
+            .write_binary(b"fragmented compressed context takeover message")
+            .await
+            .expect("send subsequent compressed binary with the same deflate context");
+
+        let mut buffer = BytesMut::new();
+        loop {
+            match socket.read(&mut buffer).await {
+                Ok(RatchetMessage::Text) => {
+                    socket
+                        .write_text(std::str::from_utf8(&buffer).expect("client text is UTF-8"))
+                        .await
+                        .expect("echo compressed text");
+                    buffer.clear();
+                }
+                Ok(RatchetMessage::Binary) => {
+                    socket
+                        .write_binary(&buffer)
+                        .await
+                        .expect("echo compressed binary");
+                    buffer.clear();
+                }
+                Ok(RatchetMessage::Ping(_)) | Ok(RatchetMessage::Pong(_)) => {}
+                Ok(RatchetMessage::Close(_)) | Err(_) => break,
+            }
+        }
+    });
+    (format!("ws://{address}/compressed"), server)
 }
 
 pub async fn websocket_raw_handshake_failure_message(
@@ -92,6 +157,7 @@ async fn websocket_handshake_failure_message(url: String, protocols: Vec<String>
 pub struct OpenEvent {
     pub socket_id: u64,
     pub protocol: String,
+    pub extensions: String,
 }
 
 pub async fn recv_open_event(event_rx: &mut mpsc::Receiver<Event>) -> OpenEvent {
@@ -104,11 +170,13 @@ pub async fn recv_open_event(event_rx: &mut mpsc::Receiver<Event>) -> OpenEvent 
             Event::Open {
                 socket_id,
                 protocol,
+                extensions,
                 ..
             } => {
                 return OpenEvent {
                     socket_id,
                     protocol,
+                    extensions,
                 };
             }
             Event::Error { message, .. } => {

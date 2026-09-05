@@ -1,5 +1,21 @@
 use super::*;
 
+async fn take_auth_required_for_request(
+    ctx: &mut TestContext,
+    request_id: &str,
+    description: &str,
+) -> Value {
+    wait_until_message(ctx, "SID-1", description, |message| {
+        message["method"] == json!("Fetch.authRequired")
+            && message["params"]["requestId"] == json!(request_id)
+    })
+    .await;
+    ctx.take_first_matching(description, |message| {
+        message["method"] == json!("Fetch.authRequired")
+            && message["params"]["requestId"] == json!(request_id)
+    })
+}
+
 async fn wait_for_navigation_subresource_pause(
     ctx: &mut TestContext,
     subresource_url: &str,
@@ -3413,36 +3429,53 @@ async fn continue_with_auth_success_clears_pending_auth_navigation() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn continue_with_auth_retries_navigation_with_basic_proxy_credentials() {
-    async fn handler(headers: HeaderMap) -> impl IntoResponse {
-        let authorization = headers
-            .get("proxy-authorization")
-            .and_then(|value| value.to_str().ok());
-        if authorization != Some("Basic YWxhZGRpbjpvcGVuc2VzYW1l") {
-            return (
-                StatusCode::PROXY_AUTHENTICATION_REQUIRED,
-                [
-                    (PROXY_AUTHENTICATE.as_str(), r#"Basic realm="proxy-area""#),
-                    (CONTENT_TYPE.as_str(), "text/plain"),
-                ],
-                "proxy auth required",
-            )
-                .into_response();
-        }
-
-        (
-            StatusCode::OK,
-            [(CONTENT_TYPE.as_str(), "text/html")],
-            "<!doctype html><html><body><main>proxy authorized</main></body></html>",
-        )
-            .into_response()
-    }
-
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
-        axum::serve(listener, Router::new().route("/auth", get(handler)))
-            .await
-            .unwrap();
+    let proxy_addr = listener.local_addr().unwrap();
+    let proxy_server = tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let mut buf = [0u8; 8192];
+                let mut request = Vec::new();
+                loop {
+                    let Ok(read) = stream.read(&mut buf).await else {
+                        return;
+                    };
+                    if read == 0 {
+                        return;
+                    }
+                    request.extend_from_slice(&buf[..read]);
+                    if request.windows(4).any(|part| part == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let request = String::from_utf8_lossy(&request);
+                let has_proxy_auth = request.lines().any(|line| {
+                    line.split_once(':').is_some_and(|(name, value)| {
+                        name.eq_ignore_ascii_case("proxy-authorization")
+                            && value.trim() == "Basic YWxhZGRpbjpvcGVuc2VzYW1l"
+                    })
+                });
+                let response = if has_proxy_auth {
+                    let body =
+                        "<!doctype html><html><body><main>proxy authorized</main></body></html>";
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                } else {
+                    let body = "proxy auth required";
+                    format!(
+                        "HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"proxy-area\"\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                };
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            });
+        }
     });
 
     let mut ctx = TestContext::new();
@@ -3451,7 +3484,10 @@ async fn continue_with_auth_retries_navigation_with_basic_proxy_credentials() {
         .runtime_slot
         .enable_primary_network_events();
     ctx.conn.install_browser_context_fixture_for_test(bc);
-    let url = format!("http://{addr}/auth");
+    ctx.conn
+        .set_http_proxy_override_async(Some(format!("http://{proxy_addr}")))
+        .await;
+    let url = "http://example.test/auth";
 
     ctx.process_async(json!({
         "id": 84,
@@ -3485,12 +3521,13 @@ async fn continue_with_auth_retries_navigation_with_basic_proxy_credentials() {
     .await;
     ctx.expect_result(86, json!({}), Some("SID-1"));
 
-    let auth_required = ctx.take_one();
+    let auth_required =
+        take_auth_required_for_request(&mut ctx, &request_id, "authentication challenge").await;
     assert_eq!(auth_required["method"], "Fetch.authRequired");
     assert_eq!(auth_required["params"]["authChallenge"]["source"], "Proxy");
     assert_eq!(
         auth_required["params"]["authChallenge"]["origin"],
-        format!("http://{addr}")
+        format!("http://{proxy_addr}")
     );
     assert_eq!(
         auth_required["params"]["authChallenge"]["realm"],
@@ -3527,7 +3564,7 @@ async fn continue_with_auth_retries_navigation_with_basic_proxy_credentials() {
         .expect("network response event");
     assert_eq!(response["params"]["response"]["status"], 200);
 
-    server.abort();
+    proxy_server.abort();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -3725,7 +3762,8 @@ async fn cancel_https_proxy_connect_auth_emits_407_without_extra_info_and_fails_
     .await;
     ctx.expect_result(882, json!({}), Some("SID-1"));
 
-    let auth_required = ctx.take_one();
+    let auth_required =
+        take_auth_required_for_request(&mut ctx, &request_id, "authentication challenge").await;
     assert_eq!(auth_required["method"], "Fetch.authRequired");
     assert_eq!(auth_required["params"]["authChallenge"]["source"], "Proxy");
     assert_eq!(
@@ -3872,7 +3910,8 @@ async fn continue_with_auth_handles_multi_round_basic_navigation_challenge() {
     .await;
     ctx.expect_result(692, json!({}), Some("SID-1"));
 
-    let auth_required = ctx.take_one();
+    let auth_required =
+        take_auth_required_for_request(&mut ctx, &request_id, "authentication challenge").await;
     assert_eq!(auth_required["method"], "Fetch.authRequired");
     assert_eq!(auth_required["params"]["requestId"], "INT-1");
     assert!(auth_required["params"].get("networkId").is_none());
@@ -3894,7 +3933,9 @@ async fn continue_with_auth_handles_multi_round_basic_navigation_challenge() {
     .await;
     ctx.expect_result(693, json!({}), Some("SID-1"));
 
-    let second_auth_required = ctx.take_one();
+    let second_auth_required =
+        take_auth_required_for_request(&mut ctx, &request_id, "second authentication challenge")
+            .await;
     assert_eq!(second_auth_required["method"], "Fetch.authRequired");
     assert_eq!(second_auth_required["params"]["requestId"], "INT-1");
     assert!(second_auth_required["params"].get("networkId").is_none());
@@ -4004,7 +4045,8 @@ async fn continue_with_auth_handles_digest_navigation_challenge() {
     .await;
     ctx.expect_result(705, json!({}), Some("SID-1"));
 
-    let auth_required = ctx.take_one();
+    let auth_required =
+        take_auth_required_for_request(&mut ctx, &request_id, "authentication challenge").await;
     assert_eq!(auth_required["method"], "Fetch.authRequired");
     assert_eq!(auth_required["params"]["requestId"], "INT-1");
     assert!(auth_required["params"].get("networkId").is_none());
@@ -4135,7 +4177,8 @@ async fn continue_with_auth_handles_multi_round_digest_navigation_challenge() {
     .await;
     ctx.expect_result(709, json!({}), Some("SID-1"));
 
-    let auth_required = ctx.take_one();
+    let auth_required =
+        take_auth_required_for_request(&mut ctx, &request_id, "first digest challenge").await;
     assert_eq!(auth_required["method"], "Fetch.authRequired");
     assert_eq!(auth_required["params"]["requestId"], "INT-1");
     assert!(auth_required["params"].get("networkId").is_none());
@@ -4161,7 +4204,9 @@ async fn continue_with_auth_handles_multi_round_digest_navigation_challenge() {
     .await;
     ctx.expect_result(710, json!({}), Some("SID-1"));
 
-    let second_auth_required = ctx.take_one();
+    let second_auth_required =
+        take_auth_required_for_request(&mut ctx, &request_id, "second authentication challenge")
+            .await;
     assert_eq!(second_auth_required["method"], "Fetch.authRequired");
     assert_eq!(second_auth_required["params"]["requestId"], "INT-1");
     assert!(second_auth_required["params"].get("networkId").is_none());

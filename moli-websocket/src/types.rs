@@ -4,13 +4,33 @@ use tokio::sync::mpsc;
 pub struct ConnectOptions {
     pub origin: String,
     pub user_agent: String,
+    pub accept_language: String,
     pub extra_headers: Vec<(String, String)>,
     pub http_proxy: Option<String>,
     pub http_no_proxy: Option<String>,
     pub proxy_bearer_token: Option<String>,
     pub tls_verify_host: bool,
+    pub tls_session_cache: Option<moli_stealth_net::TlsSessionCache>,
     pub cookie_header: Option<String>,
     pub pause_after_handshake: bool,
+}
+
+impl Default for ConnectOptions {
+    fn default() -> Self {
+        Self {
+            origin: String::new(),
+            user_agent: String::new(),
+            accept_language: "en-US,en;q=0.9".to_owned(),
+            extra_headers: Vec::new(),
+            http_proxy: None,
+            http_no_proxy: None,
+            proxy_bearer_token: None,
+            tls_verify_host: true,
+            tls_session_cache: None,
+            cookie_header: None,
+            pause_after_handshake: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -57,7 +57,7 @@ pub(crate) fn local_url_response(url: &url::Url) -> Option<Response> {
 ///
 /// `None` means that the URL is not owned by this resolver. `Some(Err(..))`
 /// means that it is a local URL and therefore must fail locally instead of
-/// being handed to libcurl.
+/// being handed to the network transport.
 pub(crate) fn local_url_response_result(url: &url::Url) -> Option<Result<Response, String>> {
     match url.scheme() {
         "blob" => {

@@ -1,0 +1,4925 @@
+{
+  "measurement": {
+    "date": "2026-09-05",
+    "platform": "Windows x64",
+    "browser_mode": "desktop",
+    "executable": "C:/Program Files/Google/Chrome/Application/chrome.exe",
+    "launch_flags": [
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--disable-background-networking",
+      "--disable-component-update",
+      "--disable-sync",
+      "--no-proxy-server",
+      "--lang=en-US"
+    ],
+    "profile": "isolated temporary user-data directory",
+    "repeatability_comparison": {
+      "repetitions": 3,
+      "semantic_differences": 0
+    }
+  },
+  "repeats": 3,
+  "proxy": true,
+  "observations": [
+    {
+      "repetition": 0,
+      "connections": [
+        {
+          "connection": 0,
+          "requests": [],
+          "frames": [],
+          "peer_port": 62537,
+          "client_hello": {
+            "records": [
+              [
+                22,
+                769,
+                1996
+              ]
+            ],
+            "legacy_version": 771,
+            "session_id_length": 32,
+            "ciphers": [
+              "GREASE",
+              4865,
+              4866,
+              4867,
+              49195,
+              49199,
+              49196,
+              49200,
+              52393,
+              52392,
+              49171,
+              49172,
+              156,
+              157,
+              47,
+              53
+            ],
+            "compression": [
+              0
+            ],
+            "extensions": [
+              {
+                "type": "GREASE",
+                "length": 0
+              },
+              {
+                "type": 27,
+                "length": 3,
+                "values": [
+                  2
+                ]
+              },
+              {
+                "type": 51764,
+                "length": 206,
+                "trust_anchor_ids": [
+                  "d679090b",
+                  "82df130214",
+                  "839a648c9b2d010b",
+                  "d6790907",
+                  "d6790902",
+                  "d6790904",
+                  "839a648c9b2d0109",
+                  "839a648c9b2d0108",
+                  "82df130201",
+                  "d679090a",
+                  "d6790909",
+                  "d6790906",
+                  "839a648c9b2d010d",
+                  "839a648c9b2d010c",
+                  "839a648c9b2d0107",
+                  "82df130213",
+                  "82df130206",
+                  "d679090e",
+                  "839a648c9b2d0112",
+                  "82df13020f",
+                  "d6790908",
+                  "82df130212",
+                  "d6790905",
+                  "82df13020e",
+                  "d6790901",
+                  "d679090d",
+                  "839a648c9b2d0113",
+                  "839a648c9b2d010a",
+                  "d679090c",
+                  "82df13020d",
+                  "d6790903",
+                  "d679090f"
+                ]
+              },
+              {
+                "type": 18,
+                "length": 0,
+                "hex": ""
+              },
+              {
+                "type": 45,
+                "length": 2,
+                "values": [
+                  1
+                ]
+              },
+              {
+                "type": 65037,
+                "length": 250
+              },
+              {
+                "type": 10,
+                "length": 12,
+                "values": [
+                  "GREASE",
+                  4588,
+                  29,
+                  23,
+                  24
+                ]
+              },
+              {
+                "type": 13,
+                "length": 26,
+                "values": [
+                  "GREASE",
+                  2308,
+                  2309,
+                  2310,
+                  1027,
+                  2052,
+                  1025,
+                  1283,
+                  2053,
+                  1281,
+                  2054,
+                  1537
+                ]
+              },
+              {
+                "type": 16,
+                "length": 14,
+                "protocols": [
+                  "h2",
+                  "http/1.1"
+                ]
+              },
+              {
+                "type": 23,
+                "length": 0,
+                "hex": ""
+              },
+              {
+                "type": 0,
+                "length": 14
+              },
+              {
+                "type": 11,
+                "length": 2,
+                "values": [
+                  0
+                ]
+              },
+              {
+                "type": 43,
+                "length": 7,
+                "values": [
+                  "GREASE",
+                  772,
+                  771
+                ]
+              },
+              {
+                "type": 17613,
+                "length": 5,
+                "protocols": [
+                  "h2"
+                ]
+              },
+              {
+                "type": 51,
+                "length": 1263,
+                "shares": [
+                  [
+                    "GREASE",
+                    1
+                  ],
+                  [
+                    4588,
+                    1216
+                  ],
+                  [
+                    29,
+                    32
+                  ]
+                ]
+              },
+              {
+                "type": 35,
+                "length": 0,
+                "hex": ""
+              },
+              {
+                "type": 5,
+                "length": 5,
+                "hex": "0100000000"
+              },
+              {
+                "type": 65281,
+                "length": 1,
+                "hex": "00"
+              },
+              {
+                "type": "GREASE",
+                "length": 1
+              }
+            ],
+            "raw_client_hello_base64": "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"
+          },
+          "tls_error": "[SSL: SSLV3_ALERT_CERTIFICATE_UNKNOWN] ssl/tls alert certificate unknown (_ssl.c:1010)"
+        },
+        {
+          "connection": 1,
+          "requests": [
+            {
+              "stream": 1,
+              "method": "GET",
+              "path": "/page",
+              "headers": [
+                [
+                  ":method",
+                  "GET"
+                ],
+                [
+                  ":authority",
+                  "localhost:50307"
+                ],
+                [
+                  ":scheme",
+                  "https"
+                ],
+                [
+                  ":path",
+                  "/page"
+                ],
+                [
+                  "sec-ch-ua",
+                  "\"Chromium\";v=\"152\", \"Not?A_Brand\";v=\"24\", \"Google Chrome\";v=\"152\""
+                ],
+                [
+                  "sec-ch-ua-mobile",
+                  "?0"
+                ],
+                [
+                  "sec-ch-ua-platform",
+                  "\"Windows\""
+                ],
+                [
+                  "upgrade-insecure-requests",
+                  "1"
+                ],
+                [
+                  "user-agent",
+                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+                ],
+                [
+                  "accept",
+                  "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"
+                ],
+                [
+                  "sec-fetch-site",
+                  "none"
+                ],
+                [
+                  "sec-fetch-mode",
+                  "navigate"
+                ],
+                [
+                  "sec-fetch-user",
+                  "?1"
+                ],
+                [
+                  "sec-fetch-dest",
+                  "document"
+                ],
+                [
+                  "accept-encoding",
+                  "gzip, deflate, br, zstd"
+                ],
+                [
+                  "accept-language",
+                  "en-US,en;q=0.9"
+                ],
+                [
+                  "priority",
+                  "u=0, i"
+                ]
+              ]
+            },
+            {
+              "stream": 3,
+              "method": "GET",
+              "path": "/first",
+              "headers": [
+                [
+                  ":method",
+                  "GET"
+                ],
+                [
+                  ":authority",
+                  "localhost:50307"
+                ],
+                [
+                  ":scheme",
+                  "https"
+                ],
+                [
+                  ":path",
+                  "/first"
+                ],
+                [
+                  "sec-ch-ua-platform",
+                  "\"Windows\""
+                ],
+                [
+                  "user-agent",
+                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+                ],
+                [
+                  "sec-ch-ua",
+                  "\"Chromium\";v=\"152\", \"Not?A_Brand\";v=\"24\", \"Google Chrome\";v=\"152\""
+                ],
+                [
+                  "sec-ch-ua-mobile",
+                  "?0"
+                ],
+                [
+                  "accept",
+                  "*/*"
+                ],
+                [
+                  "sec-fetch-site",
+                  "same-origin"
+                ],
+                [
+                  "sec-fetch-mode",
+                  "cors"
+                ],
+                [
+                  "sec-fetch-dest",
+                  "empty"
+                ],
+                [
+                  "referer",
+                  "https://localhost:50307/page"
+                ],
+                [
+                  "accept-encoding",
+                  "gzip, deflate, br, zstd"
+                ],
+                [
+                  "accept-language",
+                  "en-US,en;q=0.9"
+                ],
+                [
+                  "priority",
+                  "u=1, i"
+                ]
+              ]
+            },
+            {
+              "stream": 5,
+              "method": "GET",
+              "path": "/reused",
+              "headers": [
+                [
+                  ":method",
+                  "GET"
+                ],
+                [
+                  ":authority",
+                  "localhost:50307"
+                ],
+                [
+                  ":scheme",
+                  "https"
+                ],
+                [
+                  ":path",
+                  "/reused"
+                ],
+                [
+                  "sec-ch-ua-platform",
+                  "\"Windows\""
+                ],
+                [
+                  "user-agent",
+                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+                ],
+                [
+                  "sec-ch-ua",
+                  "\"Chromium\";v=\"152\", \"Not?A_Brand\";v=\"24\", \"Google Chrome\";v=\"152\""
+                ],
+                [
+                  "sec-ch-ua-mobile",
+                  "?0"
+                ],
+                [
+                  "accept",
+                  "*/*"
+                ],
+                [
+                  "sec-fetch-site",
+                  "same-origin"
+                ],
+                [
+                  "sec-fetch-mode",
+                  "cors"
+                ],
+                [
+                  "sec-fetch-dest",
+                  "empty"
+                ],
+                [
+                  "referer",
+                  "https://localhost:50307/page"
+                ],
+                [
+                  "accept-encoding",
+                  "gzip, deflate, br, zstd"
+                ],
+                [
+                  "accept-language",
+                  "en-US,en;q=0.9"
+                ],
+                [
+                  "priority",
+                  "u=1, i"
+                ]
+              ]
+            },
+            {
+              "stream": 7,
+              "method": "PATCH",
+              "path": "/binary",
+              "headers": [
+                [
+                  ":method",
+                  "PATCH"
+                ],
+                [
+                  ":authority",
+                  "localhost:50307"
+                ],
+                [
+                  ":scheme",
+                  "https"
+                ],
+                [
+                  ":path",
+                  "/binary"
+                ],
+                [
+                  "content-length",
+                  "4"
+                ],
+                [
+                  "sec-ch-ua-platform",
+                  "\"Windows\""
+                ],
+                [
+                  "user-agent",
+                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+                ],
+                [
+                  "sec-ch-ua",
+                  "\"Chromium\";v=\"152\", \"Not?A_Brand\";v=\"24\", \"Google Chrome\";v=\"152\""
+                ],
+                [
+                  "sec-ch-ua-mobile",
+                  "?0"
+                ],
+                [
+                  "accept",
+                  "*/*"
+                ],
+                [
+                  "origin",
+                  "https://localhost:50307"
+                ],
+                [
+                  "sec-fetch-site",
+                  "same-origin"
+                ],
+                [
+                  "sec-fetch-mode",
+                  "cors"
+                ],
+                [
+                  "sec-fetch-dest",
+                  "empty"
+                ],
+                [
+                  "referer",
+                  "https://localhost:50307/page"
+                ],
+                [
+                  "accept-encoding",
+                  "gzip, deflate, br, zstd"
+                ],
+                [
+                  "accept-language",
+                  "en-US,en;q=0.9"
+                ],
+                [
+                  "priority",
+                  "u=1, i"
+                ]
+              ],
+              "body_base64": "AP+AAQ=="
+            },
+            {
+              "stream": 9,
+              "method": "HEAD",
+              "path": "/head",
+              "headers": [
+                [
+                  ":method",
+                  "HEAD"
+                ],
+                [
+                  ":authority",
+                  "localhost:50307"
+                ],
+                [
+                  ":scheme",
+                  "https"
+                ],
+                [
+                  ":path",
+                  "/head"
+                ],
+                [
+                  "sec-ch-ua-platform",
+                  "\"Windows\""
+                ],
+                [
+                  "user-agent",
+                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+                ],
+                [
+                  "sec-ch-ua",
+                  "\"Chromium\";v=\"152\", \"Not?A_Brand\";v=\"24\", \"Google Chrome\";v=\"152\""
+                ],
+                [
+                  "sec-ch-ua-mobile",
+                  "?0"
+                ],
+                [
+                  "accept",
+                  "*/*"
+                ],
+                [
+                  "sec-fetch-site",
+                  "same-origin"
+                ],
+                [
+                  "sec-fetch-mode",
+                  "cors"
+                ],
+                [
+                  "sec-fetch-dest",
+                  "empty"
+                ],
+                [
+                  "referer",
+                  "https://localhost:50307/page"
+                ],
+                [
+                  "accept-encoding",
+                  "gzip, deflate, br, zstd"
+                ],
+                [
+                  "accept-language",
+                  "en-US,en;q=0.9"
+                ],
+                [
+                  "priority",
+                  "u=1, i"
+                ]
+              ]
+            }
+          ],
+          "frames": [
+            {
+              "type": 4,
+              "flags": 0,
+              "stream": 0,
+              "length": 24,
+              "settings": [
+                [
+                  1,
+                  65536
+                ],
+                [
+                  2,
+                  0
+                ],
+                [
+                  4,
+                  6291456
+                ],
+                [
+                  6,
+                  262144
+                ]
+              ]
+            },
+            {
+              "type": 8,
+              "flags": 0,
+              "stream": 0,
+              "length": 4,
+              "increment": 15663105
+            },
+            {
+              "type": 1,
+              "flags": 37,
+              "stream": 1,
+              "length": 460,
+              "priority": {
+                "exclusive": true,
+                "dependency": 0,
+                "weight": 256
+              }
+            },
+            {
+              "type": 4,
+              "flags": 1,
+              "stream": 0,
+              "length": 0
+            },
+            {
+              "type": 1,
+              "flags": 37,
+              "stream": 3,
+              "length": 80,
+              "priority": {
+                "exclusive": true,
+                "dependency": 0,
+                "weight": 220
+              }
+            },
+            {
+              "type": 1,
+              "flags": 37,
+              "stream": 5,
+              "length": 27,
+              "priority": {
+                "exclusive": true,
+                "dependency": 0,
+                "weight": 220
+              }
+            },
+            {
+              "type": 1,
+              "flags": 36,
+              "stream": 7,
+              "length": 62,
+              "priority": {
+                "exclusive": true,
+                "dependency": 0,
+                "weight": 220
+              }
+            },
+            {
+              "type": 0,
+              "flags": 1,
+              "stream": 7,
+              "length": 4
+            },
+            {
+              "type": 1,
+              "flags": 37,
+              "stream": 9,
+              "length": 31,
+              "priority": {
+                "exclusive": true,
+                "dependency": 0,
+                "weight": 220
+              }
+            }
+          ],
+          "peer_port": 51673,
+          "client_hello": {
+            "records": [
+              [
+                22,
+                769,
+                1996
+              ]
+            ],
+            "legacy_version": 771,
+            "session_id_length": 32,
+            "ciphers": [
+              "GREASE",
+              4865,
+              4866,
+              4867,
+              49195,
+              49199,
+              49196,
+              49200,
+              52393,
+              52392,
+              49171,
+              49172,
+              156,
+              157,
+              47,
+              53
+            ],
+            "compression": [
+              0
+            ],
+            "extensions": [
+              {
+                "type": "GREASE",
+                "length": 0
+              },
+              {
+                "type": 35,
+                "length": 0,
+                "hex": ""
+              },
+              {
+                "type": 5,
+                "length": 5,
+                "hex": "0100000000"
+              },
+              {
+                "type": 13,
+                "length": 26,
+                "values": [
+                  "GREASE",
+                  2308,
+                  2309,
+                  2310,
+                  1027,
+                  2052,
+                  1025,
+                  1283,
+                  2053,
+                  1281,
+                  2054,
+                  1537
+                ]
+              },
+              {
+                "type": 11,
+                "length": 2,
+                "values": [
+                  0
+                ]
+              },
+              {
+                "type": 51764,
+                "length": 206,
+                "trust_anchor_ids": [
+                  "d679090b",
+                  "82df130214",
+                  "839a648c9b2d010b",
+                  "d6790907",
+                  "d6790902",
+                  "d6790904",
+                  "839a648c9b2d0109",
+                  "839a648c9b2d0108",
+                  "82df130201",
+                  "d679090a",
+                  "d6790909",
+                  "d6790906",
+                  "839a648c9b2d010d",
+                  "839a648c9b2d010c",
+                  "839a648c9b2d0107",
+                  "82df130213",
+                  "82df130206",
+                  "d679090e",
+                  "839a648c9b2d0112",
+                  "82df13020f",
+                  "d6790908",
+                  "82df130212",
+                  "d6790905",
+                  "82df13020e",
+                  "d6790901",
+                  "d679090d",
+                  "839a648c9b2d0113",
+                  "839a648c9b2d010a",
+                  "d679090c",
+                  "82df13020d",
+                  "d6790903",
+                  "d679090f"
+                ]
+              },
+              {
+                "type": 16,
+                "length": 14,
+                "protocols": [
+                  "h2",
+                  "http/1.1"
+                ]
+              },
+              {
+                "type": 23,
+                "length": 0,
+                "hex": ""
+              },
+              {
+                "type": 43,
+                "length": 7,
+                "values": [
+                  "GREASE",
+                  772,
+                  771
+                ]
+              },
+              {
+                "type": 0,
+                "length": 14
+              },
+              {
+                "type": 45,
+                "length": 2,
+                "values": [
+                  1
+                ]
+              },
+              {
+                "type": 65281,
+                "length": 1,
+                "hex": "00"
+              },
+              {
+                "type": 10,
+                "length": 12,
+                "values": [
+                  "GREASE",
+                  4588,
+                  29,
+                  23,
+                  24
+                ]
+              },
+              {
+                "type": 18,
+                "length": 0,
+                "hex": ""
+              },
+              {
+                "type": 17613,
+                "length": 5,
+                "protocols": [
+                  "h2"
+                ]
+              },
+              {
+                "type": 51,
+                "length": 1263,
+                "shares": [
+                  [
+                    "GREASE",
+                    1
+                  ],
+                  [
+                    4588,
+                    1216
+                  ],
+                  [
+                    29,
+                    32
+                  ]
+                ]
+              },
+              {
+                "type": 27,
+                "length": 3,
+                "values": [
+                  2
+                ]
+              },
+              {
+                "type": 65037,
+                "length": 250
+              },
+              {
+                "type": "GREASE",
+                "length": 1
+              }
+            ],
+            "raw_client_hello_base64": "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"
+          },
+          "alpn": "h2",
+          "tls_version": "TLSv1.3",
+          "cipher": [
+            "TLS_AES_256_GCM_SHA384",
+            "TLSv1.3",
+            256
+          ],
+          "session_reused": false
+        },
+        {
+          "connection": 2,
+          "requests": [],
+          "frames": [],
+          "peer_port": 56300,
+          "client_hello": {
+            "records": [
+              [
+                22,
+                769,
+                2303
+              ]
+            ],
+            "legacy_version": 771,
+            "session_id_length": 32,
+            "ciphers": [
+              "GREASE",
+              4865,
+              4866,
+              4867,
+              49195,
+              49199,
+              49196,
+              49200,
+              52393,
+              52392,
+              49171,
+              49172,
+              156,
+              157,
+              47,
+              53
+            ],
+            "compression": [
+              0
+            ],
+            "extensions": [
+              {
+                "type": "GREASE",
+                "length": 0
+              },
+              {
+                "type": 18,
+                "length": 0,
+                "hex": ""
+              },
+              {
+                "type": 65037,
+                "length": 282
+              },
+              {
+                "type": 27,
+                "length": 3,
+                "values": [
+                  2
+                ]
+              },
+              {
+                "type": 16,
+                "length": 11,
+                "protocols": [
+                  "http/1.1"
+                ]
+              },
+              {
+                "type": 5,
+                "length": 5,
+                "hex": "0100000000"
+              },
+              {
+                "type": 43,
+                "length": 7,
+                "values": [
+                  "GREASE",
+                  772,
+                  771
+                ]
+              },
+              {
+                "type": 35,
+                "length": 0,
+                "hex": ""
+              },
+              {
+                "type": 65281,
+                "length": 1,
+                "hex": "00"
+              },
+              {
+                "type": 51764,
+                "length": 206,
+                "trust_anchor_ids": [
+                  "d679090b",
+                  "82df130214",
+                  "839a648c9b2d010b",
+                  "d6790907",
+                  "d6790902",
+                  "d6790904",
+                  "839a648c9b2d0109",
+                  "839a648c9b2d0108",
+                  "82df130201",
+                  "d679090a",
+                  "d6790909",
+                  "d6790906",
+                  "839a648c9b2d010d",
+                  "839a648c9b2d010c",
+                  "839a648c9b2d0107",
+                  "82df130213",
+                  "82df130206",
+                  "d679090e",
+                  "839a648c9b2d0112",
+                  "82df13020f",
+                  "d6790908",
+                  "82df130212",
+                  "d6790905",
+                  "82df13020e",
+                  "d6790901",
+                  "d679090d",
+                  "839a648c9b2d0113",
+                  "839a648c9b2d010a",
+                  "d679090c",
+                  "82df13020d",
+                  "d6790903",
+                  "d679090f"
+                ]
+              },
+              {
+                "type": 0,
+                "length": 14
+              },
+              {
+                "type": 13,
+                "length": 26,
+                "values": [
+                  "GREASE",
+                  2308,
+                  2309,
+                  2310,
+                  1027,
+                  2052,
+                  1025,
+                  1283,
+                  2053,
+                  1281,
+                  2054,
+                  1537
+                ]
+              },
+              {
+                "type": 10,
+                "length": 12,
+                "values": [
+                  "GREASE",
+                  4588,
+                  29,
+                  23,
+                  24
+                ]
+              },
+              {
+                "type": 51,
+                "length": 1263,
+                "shares": [
+                  [
+                    "GREASE",
+                    1
+                  ],
+                  [
+                    4588,
+                    1216
+                  ],
+                  [
+                    29,
+                    32
+                  ]
+                ]
+              },
+              {
+                "type": 45,
+                "length": 2,
+                "values": [
+                  1
+                ]
+              },
+              {
+                "type": 11,
+                "length": 2,
+                "values": [
+                  0
+                ]
+              },
+              {
+                "type": 23,
+                "length": 0,
+                "hex": ""
+              },
+              {
+                "type": "GREASE",
+                "length": 1
+              },
+              {
+                "type": 41,
+                "length": 283,
+                "offered_psks": {
+                  "identities": [
+                    {
+                      "length": 224,
+                      "sha256": "4748468a2bb8e5430dd97c77b21da3d5b3b21e42f5c226f05068d163cd4f0f29",
+                      "obfuscated_ticket_age": 3049173142
+                    }
+                  ],
+                  "binder_lengths": [
+                    48
+                  ]
+                }
+              }
+            ],
+            "raw_client_hello_base64": "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"
+          },
+          "tls_error": "[SSL: SSLV3_ALERT_CERTIFICATE_UNKNOWN] ssl/tls alert certificate unknown (_ssl.c:1010)"
+        },
+        {
+          "connection": 3,
+          "requests": [
+            {
+              "method": "GET",
+              "path": "/socket",
+              "version": "HTTP/1.1",
+              "headers": [
+                [
+                  "Host",
+                  "localhost:50307"
+                ],
+                [
+                  "Connection",
+                  "Upgrade"
+                ],
+                [
+                  "Pragma",
+                  "no-cache"
+                ],
+                [
+                  "Cache-Control",
+                  "no-cache"
+                ],
+                [
+                  "User-Agent",
+                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+                ],
+                [
+                  "Upgrade",
+                  "websocket"
+                ],
+                [
+                  "Origin",
+                  "https://localhost:50307"
+                ],
+                [
+                  "Sec-WebSocket-Version",
+                  "13"
+                ],
+                [
+                  "Accept-Encoding",
+                  "gzip, deflate, br, zstd"
+                ],
+                [
+                  "Accept-Language",
+                  "en-US,en;q=0.9"
+                ],
+                [
+                  "Sec-WebSocket-Key",
+                  "4FnH+iOxuL4V7qPE+Z8sKw=="
+                ],
+                [
+                  "Sec-WebSocket-Extensions",
+                  "permessage-deflate; client_max_window_bits"
+                ],
+                [
+                  "Sec-WebSocket-Protocol",
+                  "probe"
+                ]
+              ]
+            }
+          ],
+          "frames": [],
+          "peer_port": 53702,
+          "client_hello": {
+            "records": [
+              [
+                22,
+                769,
+                2223
+              ]
+            ],
+            "legacy_version": 771,
+            "session_id_length": 32,
+            "ciphers": [
+              "GREASE",
+              4865,
+              4866,
+              4867,
+              49195,
+              49199,
+              49196,
+              49200,
+              52393,
+              52392,
+              49171,
+              49172,
+              156,
+              157,
+              47,
+              53
+            ],
+            "compression": [
+              0
+            ],
+            "extensions": [
+              {
+                "type": "GREASE",
+                "length": 0
+              },
+              {
+                "type": 10,
+                "length": 12,
+                "values": [
+                  "GREASE",
+                  4588,
+                  29,
+                  23,
+                  24
+                ]
+              },
+              {
+                "type": 51,
+                "length": 1263,
+                "shares": [
+                  [
+                    "GREASE",
+                    1
+                  ],
+                  [
+                    4588,
+                    1216
+                  ],
+                  [
+                    29,
+                    32
+                  ]
+                ]
+              },
+              {
+                "type": 51764,
+                "length": 206,
+                "trust_anchor_ids": [
+                  "d679090b",
+                  "82df130214",
+                  "839a648c9b2d010b",
+                  "d6790907",
+                  "d6790902",
+                  "d6790904",
+                  "839a648c9b2d0109",
+                  "839a648c9b2d0108",
+                  "82df130201",
+                  "d679090a",
+                  "d6790909",
+                  "d6790906",
+                  "839a648c9b2d010d",
+                  "839a648c9b2d010c",
+                  "839a648c9b2d0107",
+                  "82df130213",
+                  "82df130206",
+                  "d679090e",
+                  "839a648c9b2d0112",
+                  "82df13020f",
+                  "d6790908",
+                  "82df130212",
+                  "d6790905",
+                  "82df13020e",
+                  "d6790901",
+                  "d679090d",
+                  "839a648c9b2d0113",
+                  "839a648c9b2d010a",
+                  "d679090c",
+                  "82df13020d",
+                  "d6790903",
+                  "d679090f"
+                ]
+              },
+              {
+                "type": 16,
+                "length": 11,
+                "protocols": [
+                  "http/1.1"
+                ]
+              },
+              {
+                "type": 35,
+                "length": 0,
+                "hex": ""
+              },
+              {
+                "type": 27,
+                "length": 3,
+                "values": [
+                  2
+                ]
+              },
+              {
+                "type": 13,
+                "length": 26,
+                "values": [
+                  "GREASE",
+                  2308,
+                  2309,
+                  2310,
+                  1027,
+                  2052,
+                  1025,
+                  1283,
+                  2053,
+                  1281,
+                  2054,
+                  1537
+                ]
+              },
+              {
+                "type": 23,
+                "length": 0,
+                "hex": ""
+              },
+              {
+                "type": 11,
+                "length": 2,
+                "values": [
+                  0
+                ]
+              },
+              {
+                "type": 43,
+                "length": 7,
+                "values": [
+                  "GREASE",
+                  772,
+                  771
+                ]
+              },
+              {
+                "type": 18,
+                "length": 0,
+                "hex": ""
+              },
+              {
+                "type": 45,
+                "length": 2,
+                "values": [
+                  1
+                ]
+              },
+              {
+                "type": 0,
+                "length": 14
+              },
+              {
+                "type": 5,
+                "length": 5,
+                "hex": "0100000000"
+              },
+              {
+                "type": 65037,
+                "length": 218
+              },
+              {
+                "type": 65281,
+                "length": 1,
+                "hex": "00"
+              },
+              {
+                "type": "GREASE",
+                "length": 1
+              },
+              {
+                "type": 41,
+                "length": 267,
+                "offered_psks": {
+                  "identities": [
+                    {
+                      "length": 208,
+                      "sha256": "6ecd707bbca37599584a48e761da99f3172f79d90201f67a6b1e7187547eb187",
+                      "obfuscated_ticket_age": 323015567
+                    }
+                  ],
+                  "binder_lengths": [
+                    48
+                  ]
+                }
+              }
+            ],
+            "raw_client_hello_base64": "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"
+          },
+          "alpn": "http/1.1",
+          "tls_version": "TLSv1.3",
+          "cipher": [
+            "TLS_AES_256_GCM_SHA384",
+            "TLSv1.3",
+            256
+          ],
+          "session_reused": true,
+          "websocket_compression": true,
+          "websocket": [
+            {
+              "opcode": 1,
+              "compressed": true,
+              "data_base64": "dHJhbnNwb3J0LWVjaG8="
+            },
+            {
+              "opcode": 2,
+              "compressed": true,
+              "data_base64": "AP+AAQ=="
+            },
+            {
+              "opcode": 1,
+              "compressed": true,
+              "data_base64": "dHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNobw=="
+            },
+            {
+              "opcode": 8,
+              "compressed": false,
+              "data_base64": "A+hkb25l"
+            }
+          ]
+        }
+      ],
+      "identity": {
+        "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
+        "platform": "Win32",
+        "languages": [
+          "en-US",
+          "en"
+        ],
+        "metadata": {
+          "architecture": "x86",
+          "bitness": "64",
+          "brands": [
+            {
+              "brand": "Chromium",
+              "version": "152"
+            },
+            {
+              "brand": "Not?A_Brand",
+              "version": "24"
+            },
+            {
+              "brand": "Google Chrome",
+              "version": "152"
+            }
+          ],
+          "fullVersionList": [
+            {
+              "brand": "Chromium",
+              "version": "152.0.7977.82"
+            },
+            {
+              "brand": "Not?A_Brand",
+              "version": "24.0.0.0"
+            },
+            {
+              "brand": "Google Chrome",
+              "version": "152.0.7977.82"
+            }
+          ],
+          "mobile": false,
+          "model": "",
+          "platform": "Windows",
+          "platformVersion": "19.0.0",
+          "uaFullVersion": "152.0.7977.82",
+          "wow64": false
+        }
+      },
+      "responses": [
+        {
+          "method": "GET",
+          "path": "/first",
+          "status": 200,
+          "bytes": [
+            0,
+            255,
+            1,
+            128,
+            47,
+            102,
+            105,
+            114,
+            115,
+            116
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/reused",
+          "status": 200,
+          "bytes": [
+            0,
+            255,
+            1,
+            128,
+            47,
+            114,
+            101,
+            117,
+            115,
+            101,
+            100
+          ]
+        },
+        {
+          "method": "PATCH",
+          "path": "/binary",
+          "status": 200,
+          "bytes": [
+            0,
+            255,
+            1,
+            128,
+            47,
+            98,
+            105,
+            110,
+            97,
+            114,
+            121
+          ]
+        },
+        {
+          "method": "HEAD",
+          "path": "/head",
+          "status": 200,
+          "bytes": []
+        }
+      ],
+      "websocket": {
+        "events": [
+          "open:probe",
+          "text:transport-echo",
+          "binary:[0,255,128,1]",
+          "text:transport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echo",
+          "close:1000:true"
+        ],
+        "extensions": "permessage-deflate"
+      },
+      "proxy_tunnels": [
+        {
+          "request_line": "CONNECT localhost:50307 HTTP/1.1",
+          "headers": [
+            [
+              "Host",
+              " localhost:50307"
+            ],
+            [
+              "Proxy-Connection",
+              " keep-alive"
+            ],
+            [
+              "User-Agent",
+              " Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+            ]
+          ],
+          "source_port": 62537
+        },
+        {
+          "request_line": "CONNECT localhost:50307 HTTP/1.1",
+          "headers": [
+            [
+              "Host",
+              " localhost:50307"
+            ],
+            [
+              "Proxy-Connection",
+              " keep-alive"
+            ],
+            [
+              "User-Agent",
+              " Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+            ]
+          ],
+          "source_port": 51673
+        },
+        {
+          "request_line": "CONNECT localhost:50307 HTTP/1.1",
+          "headers": [
+            [
+              "Host",
+              " localhost:50307"
+            ],
+            [
+              "Proxy-Connection",
+              " keep-alive"
+            ],
+            [
+              "User-Agent",
+              " Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+            ]
+          ],
+          "source_port": 56300
+        },
+        {
+          "request_line": "CONNECT localhost:50307 HTTP/1.1",
+          "headers": [
+            [
+              "Host",
+              " localhost:50307"
+            ],
+            [
+              "Proxy-Connection",
+              " keep-alive"
+            ],
+            [
+              "User-Agent",
+              " Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+            ]
+          ],
+          "source_port": 53702
+        }
+      ],
+      "completed": true
+    },
+    {
+      "repetition": 1,
+      "connections": [
+        {
+          "connection": 0,
+          "requests": [],
+          "frames": [],
+          "peer_port": 58694,
+          "client_hello": {
+            "records": [
+              [
+                22,
+                769,
+                1964
+              ]
+            ],
+            "legacy_version": 771,
+            "session_id_length": 32,
+            "ciphers": [
+              "GREASE",
+              4865,
+              4866,
+              4867,
+              49195,
+              49199,
+              49196,
+              49200,
+              52393,
+              52392,
+              49171,
+              49172,
+              156,
+              157,
+              47,
+              53
+            ],
+            "compression": [
+              0
+            ],
+            "extensions": [
+              {
+                "type": "GREASE",
+                "length": 0
+              },
+              {
+                "type": 0,
+                "length": 14
+              },
+              {
+                "type": 17613,
+                "length": 5,
+                "protocols": [
+                  "h2"
+                ]
+              },
+              {
+                "type": 65281,
+                "length": 1,
+                "hex": "00"
+              },
+              {
+                "type": 23,
+                "length": 0,
+                "hex": ""
+              },
+              {
+                "type": 11,
+                "length": 2,
+                "values": [
+                  0
+                ]
+              },
+              {
+                "type": 13,
+                "length": 26,
+                "values": [
+                  "GREASE",
+                  2308,
+                  2309,
+                  2310,
+                  1027,
+                  2052,
+                  1025,
+                  1283,
+                  2053,
+                  1281,
+                  2054,
+                  1537
+                ]
+              },
+              {
+                "type": 5,
+                "length": 5,
+                "hex": "0100000000"
+              },
+              {
+                "type": 35,
+                "length": 0,
+                "hex": ""
+              },
+              {
+                "type": 43,
+                "length": 7,
+                "values": [
+                  "GREASE",
+                  772,
+                  771
+                ]
+              },
+              {
+                "type": 16,
+                "length": 14,
+                "protocols": [
+                  "h2",
+                  "http/1.1"
+                ]
+              },
+              {
+                "type": 65037,
+                "length": 218
+              },
+              {
+                "type": 27,
+                "length": 3,
+                "values": [
+                  2
+                ]
+              },
+              {
+                "type": 45,
+                "length": 2,
+                "values": [
+                  1
+                ]
+              },
+              {
+                "type": 51764,
+                "length": 206,
+                "trust_anchor_ids": [
+                  "839a648c9b2d010a",
+                  "82df13020e",
+                  "d6790909",
+                  "d679090a",
+                  "839a648c9b2d0113",
+                  "82df13020d",
+                  "839a648c9b2d010c",
+                  "d6790907",
+                  "d679090e",
+                  "d6790906",
+                  "839a648c9b2d010b",
+                  "d6790908",
+                  "d6790905",
+                  "d6790901",
+                  "839a648c9b2d0109",
+                  "839a648c9b2d0108",
+                  "82df130201",
+                  "82df130214",
+                  "d679090d",
+                  "839a648c9b2d010d",
+                  "d6790903",
+                  "839a648c9b2d0107",
+                  "d679090f",
+                  "82df130206",
+                  "d679090b",
+                  "82df130213",
+                  "d679090c",
+                  "82df13020f",
+                  "82df130212",
+                  "839a648c9b2d0112",
+                  "d6790902",
+                  "d6790904"
+                ]
+              },
+              {
+                "type": 51,
+                "length": 1263,
+                "shares": [
+                  [
+                    "GREASE",
+                    1
+                  ],
+                  [
+                    4588,
+                    1216
+                  ],
+                  [
+                    29,
+                    32
+                  ]
+                ]
+              },
+              {
+                "type": 18,
+                "length": 0,
+                "hex": ""
+              },
+              {
+                "type": 10,
+                "length": 12,
+                "values": [
+                  "GREASE",
+                  4588,
+                  29,
+                  23,
+                  24
+                ]
+              },
+              {
+                "type": "GREASE",
+                "length": 1
+              }
+            ],
+            "raw_client_hello_base64": "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"
+          },
+          "tls_error": "[SSL: SSLV3_ALERT_CERTIFICATE_UNKNOWN] ssl/tls alert certificate unknown (_ssl.c:1010)"
+        },
+        {
+          "connection": 1,
+          "requests": [
+            {
+              "stream": 1,
+              "method": "GET",
+              "path": "/page",
+              "headers": [
+                [
+                  ":method",
+                  "GET"
+                ],
+                [
+                  ":authority",
+                  "localhost:49280"
+                ],
+                [
+                  ":scheme",
+                  "https"
+                ],
+                [
+                  ":path",
+                  "/page"
+                ],
+                [
+                  "sec-ch-ua",
+                  "\"Chromium\";v=\"152\", \"Not?A_Brand\";v=\"24\", \"Google Chrome\";v=\"152\""
+                ],
+                [
+                  "sec-ch-ua-mobile",
+                  "?0"
+                ],
+                [
+                  "sec-ch-ua-platform",
+                  "\"Windows\""
+                ],
+                [
+                  "upgrade-insecure-requests",
+                  "1"
+                ],
+                [
+                  "user-agent",
+                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+                ],
+                [
+                  "accept",
+                  "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"
+                ],
+                [
+                  "sec-fetch-site",
+                  "none"
+                ],
+                [
+                  "sec-fetch-mode",
+                  "navigate"
+                ],
+                [
+                  "sec-fetch-user",
+                  "?1"
+                ],
+                [
+                  "sec-fetch-dest",
+                  "document"
+                ],
+                [
+                  "accept-encoding",
+                  "gzip, deflate, br, zstd"
+                ],
+                [
+                  "accept-language",
+                  "en-US,en;q=0.9"
+                ],
+                [
+                  "priority",
+                  "u=0, i"
+                ]
+              ]
+            },
+            {
+              "stream": 3,
+              "method": "GET",
+              "path": "/first",
+              "headers": [
+                [
+                  ":method",
+                  "GET"
+                ],
+                [
+                  ":authority",
+                  "localhost:49280"
+                ],
+                [
+                  ":scheme",
+                  "https"
+                ],
+                [
+                  ":path",
+                  "/first"
+                ],
+                [
+                  "sec-ch-ua-platform",
+                  "\"Windows\""
+                ],
+                [
+                  "user-agent",
+                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+                ],
+                [
+                  "sec-ch-ua",
+                  "\"Chromium\";v=\"152\", \"Not?A_Brand\";v=\"24\", \"Google Chrome\";v=\"152\""
+                ],
+                [
+                  "sec-ch-ua-mobile",
+                  "?0"
+                ],
+                [
+                  "accept",
+                  "*/*"
+                ],
+                [
+                  "sec-fetch-site",
+                  "same-origin"
+                ],
+                [
+                  "sec-fetch-mode",
+                  "cors"
+                ],
+                [
+                  "sec-fetch-dest",
+                  "empty"
+                ],
+                [
+                  "referer",
+                  "https://localhost:49280/page"
+                ],
+                [
+                  "accept-encoding",
+                  "gzip, deflate, br, zstd"
+                ],
+                [
+                  "accept-language",
+                  "en-US,en;q=0.9"
+                ],
+                [
+                  "priority",
+                  "u=1, i"
+                ]
+              ]
+            },
+            {
+              "stream": 5,
+              "method": "GET",
+              "path": "/reused",
+              "headers": [
+                [
+                  ":method",
+                  "GET"
+                ],
+                [
+                  ":authority",
+                  "localhost:49280"
+                ],
+                [
+                  ":scheme",
+                  "https"
+                ],
+                [
+                  ":path",
+                  "/reused"
+                ],
+                [
+                  "sec-ch-ua-platform",
+                  "\"Windows\""
+                ],
+                [
+                  "user-agent",
+                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+                ],
+                [
+                  "sec-ch-ua",
+                  "\"Chromium\";v=\"152\", \"Not?A_Brand\";v=\"24\", \"Google Chrome\";v=\"152\""
+                ],
+                [
+                  "sec-ch-ua-mobile",
+                  "?0"
+                ],
+                [
+                  "accept",
+                  "*/*"
+                ],
+                [
+                  "sec-fetch-site",
+                  "same-origin"
+                ],
+                [
+                  "sec-fetch-mode",
+                  "cors"
+                ],
+                [
+                  "sec-fetch-dest",
+                  "empty"
+                ],
+                [
+                  "referer",
+                  "https://localhost:49280/page"
+                ],
+                [
+                  "accept-encoding",
+                  "gzip, deflate, br, zstd"
+                ],
+                [
+                  "accept-language",
+                  "en-US,en;q=0.9"
+                ],
+                [
+                  "priority",
+                  "u=1, i"
+                ]
+              ]
+            },
+            {
+              "stream": 7,
+              "method": "PATCH",
+              "path": "/binary",
+              "headers": [
+                [
+                  ":method",
+                  "PATCH"
+                ],
+                [
+                  ":authority",
+                  "localhost:49280"
+                ],
+                [
+                  ":scheme",
+                  "https"
+                ],
+                [
+                  ":path",
+                  "/binary"
+                ],
+                [
+                  "content-length",
+                  "4"
+                ],
+                [
+                  "sec-ch-ua-platform",
+                  "\"Windows\""
+                ],
+                [
+                  "user-agent",
+                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+                ],
+                [
+                  "sec-ch-ua",
+                  "\"Chromium\";v=\"152\", \"Not?A_Brand\";v=\"24\", \"Google Chrome\";v=\"152\""
+                ],
+                [
+                  "sec-ch-ua-mobile",
+                  "?0"
+                ],
+                [
+                  "accept",
+                  "*/*"
+                ],
+                [
+                  "origin",
+                  "https://localhost:49280"
+                ],
+                [
+                  "sec-fetch-site",
+                  "same-origin"
+                ],
+                [
+                  "sec-fetch-mode",
+                  "cors"
+                ],
+                [
+                  "sec-fetch-dest",
+                  "empty"
+                ],
+                [
+                  "referer",
+                  "https://localhost:49280/page"
+                ],
+                [
+                  "accept-encoding",
+                  "gzip, deflate, br, zstd"
+                ],
+                [
+                  "accept-language",
+                  "en-US,en;q=0.9"
+                ],
+                [
+                  "priority",
+                  "u=1, i"
+                ]
+              ],
+              "body_base64": "AP+AAQ=="
+            },
+            {
+              "stream": 9,
+              "method": "HEAD",
+              "path": "/head",
+              "headers": [
+                [
+                  ":method",
+                  "HEAD"
+                ],
+                [
+                  ":authority",
+                  "localhost:49280"
+                ],
+                [
+                  ":scheme",
+                  "https"
+                ],
+                [
+                  ":path",
+                  "/head"
+                ],
+                [
+                  "sec-ch-ua-platform",
+                  "\"Windows\""
+                ],
+                [
+                  "user-agent",
+                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+                ],
+                [
+                  "sec-ch-ua",
+                  "\"Chromium\";v=\"152\", \"Not?A_Brand\";v=\"24\", \"Google Chrome\";v=\"152\""
+                ],
+                [
+                  "sec-ch-ua-mobile",
+                  "?0"
+                ],
+                [
+                  "accept",
+                  "*/*"
+                ],
+                [
+                  "sec-fetch-site",
+                  "same-origin"
+                ],
+                [
+                  "sec-fetch-mode",
+                  "cors"
+                ],
+                [
+                  "sec-fetch-dest",
+                  "empty"
+                ],
+                [
+                  "referer",
+                  "https://localhost:49280/page"
+                ],
+                [
+                  "accept-encoding",
+                  "gzip, deflate, br, zstd"
+                ],
+                [
+                  "accept-language",
+                  "en-US,en;q=0.9"
+                ],
+                [
+                  "priority",
+                  "u=1, i"
+                ]
+              ]
+            }
+          ],
+          "frames": [
+            {
+              "type": 4,
+              "flags": 0,
+              "stream": 0,
+              "length": 24,
+              "settings": [
+                [
+                  1,
+                  65536
+                ],
+                [
+                  2,
+                  0
+                ],
+                [
+                  4,
+                  6291456
+                ],
+                [
+                  6,
+                  262144
+                ]
+              ]
+            },
+            {
+              "type": 8,
+              "flags": 0,
+              "stream": 0,
+              "length": 4,
+              "increment": 15663105
+            },
+            {
+              "type": 1,
+              "flags": 37,
+              "stream": 1,
+              "length": 460,
+              "priority": {
+                "exclusive": true,
+                "dependency": 0,
+                "weight": 256
+              }
+            },
+            {
+              "type": 4,
+              "flags": 1,
+              "stream": 0,
+              "length": 0
+            },
+            {
+              "type": 1,
+              "flags": 37,
+              "stream": 3,
+              "length": 80,
+              "priority": {
+                "exclusive": true,
+                "dependency": 0,
+                "weight": 220
+              }
+            },
+            {
+              "type": 1,
+              "flags": 37,
+              "stream": 5,
+              "length": 27,
+              "priority": {
+                "exclusive": true,
+                "dependency": 0,
+                "weight": 220
+              }
+            },
+            {
+              "type": 1,
+              "flags": 36,
+              "stream": 7,
+              "length": 62,
+              "priority": {
+                "exclusive": true,
+                "dependency": 0,
+                "weight": 220
+              }
+            },
+            {
+              "type": 0,
+              "flags": 1,
+              "stream": 7,
+              "length": 4
+            },
+            {
+              "type": 1,
+              "flags": 37,
+              "stream": 9,
+              "length": 31,
+              "priority": {
+                "exclusive": true,
+                "dependency": 0,
+                "weight": 220
+              }
+            }
+          ],
+          "peer_port": 54316,
+          "client_hello": {
+            "records": [
+              [
+                22,
+                769,
+                1964
+              ]
+            ],
+            "legacy_version": 771,
+            "session_id_length": 32,
+            "ciphers": [
+              "GREASE",
+              4865,
+              4866,
+              4867,
+              49195,
+              49199,
+              49196,
+              49200,
+              52393,
+              52392,
+              49171,
+              49172,
+              156,
+              157,
+              47,
+              53
+            ],
+            "compression": [
+              0
+            ],
+            "extensions": [
+              {
+                "type": "GREASE",
+                "length": 0
+              },
+              {
+                "type": 45,
+                "length": 2,
+                "values": [
+                  1
+                ]
+              },
+              {
+                "type": 65037,
+                "length": 218
+              },
+              {
+                "type": 17613,
+                "length": 5,
+                "protocols": [
+                  "h2"
+                ]
+              },
+              {
+                "type": 65281,
+                "length": 1,
+                "hex": "00"
+              },
+              {
+                "type": 5,
+                "length": 5,
+                "hex": "0100000000"
+              },
+              {
+                "type": 51764,
+                "length": 206,
+                "trust_anchor_ids": [
+                  "839a648c9b2d010a",
+                  "82df13020e",
+                  "d6790909",
+                  "d679090a",
+                  "839a648c9b2d0113",
+                  "82df13020d",
+                  "839a648c9b2d010c",
+                  "d6790907",
+                  "d679090e",
+                  "d6790906",
+                  "839a648c9b2d010b",
+                  "d6790908",
+                  "d6790905",
+                  "d6790901",
+                  "839a648c9b2d0109",
+                  "839a648c9b2d0108",
+                  "82df130201",
+                  "82df130214",
+                  "d679090d",
+                  "839a648c9b2d010d",
+                  "d6790903",
+                  "839a648c9b2d0107",
+                  "d679090f",
+                  "82df130206",
+                  "d679090b",
+                  "82df130213",
+                  "d679090c",
+                  "82df13020f",
+                  "82df130212",
+                  "839a648c9b2d0112",
+                  "d6790902",
+                  "d6790904"
+                ]
+              },
+              {
+                "type": 10,
+                "length": 12,
+                "values": [
+                  "GREASE",
+                  4588,
+                  29,
+                  23,
+                  24
+                ]
+              },
+              {
+                "type": 23,
+                "length": 0,
+                "hex": ""
+              },
+              {
+                "type": 27,
+                "length": 3,
+                "values": [
+                  2
+                ]
+              },
+              {
+                "type": 13,
+                "length": 26,
+                "values": [
+                  "GREASE",
+                  2308,
+                  2309,
+                  2310,
+                  1027,
+                  2052,
+                  1025,
+                  1283,
+                  2053,
+                  1281,
+                  2054,
+                  1537
+                ]
+              },
+              {
+                "type": 0,
+                "length": 14
+              },
+              {
+                "type": 16,
+                "length": 14,
+                "protocols": [
+                  "h2",
+                  "http/1.1"
+                ]
+              },
+              {
+                "type": 18,
+                "length": 0,
+                "hex": ""
+              },
+              {
+                "type": 43,
+                "length": 7,
+                "values": [
+                  "GREASE",
+                  772,
+                  771
+                ]
+              },
+              {
+                "type": 35,
+                "length": 0,
+                "hex": ""
+              },
+              {
+                "type": 51,
+                "length": 1263,
+                "shares": [
+                  [
+                    "GREASE",
+                    1
+                  ],
+                  [
+                    4588,
+                    1216
+                  ],
+                  [
+                    29,
+                    32
+                  ]
+                ]
+              },
+              {
+                "type": 11,
+                "length": 2,
+                "values": [
+                  0
+                ]
+              },
+              {
+                "type": "GREASE",
+                "length": 1
+              }
+            ],
+            "raw_client_hello_base64": "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"
+          },
+          "alpn": "h2",
+          "tls_version": "TLSv1.3",
+          "cipher": [
+            "TLS_AES_256_GCM_SHA384",
+            "TLSv1.3",
+            256
+          ],
+          "session_reused": false
+        },
+        {
+          "connection": 2,
+          "requests": [],
+          "frames": [],
+          "peer_port": 59863,
+          "client_hello": {
+            "records": [
+              [
+                22,
+                769,
+                2287
+              ]
+            ],
+            "legacy_version": 771,
+            "session_id_length": 32,
+            "ciphers": [
+              "GREASE",
+              4865,
+              4866,
+              4867,
+              49195,
+              49199,
+              49196,
+              49200,
+              52393,
+              52392,
+              49171,
+              49172,
+              156,
+              157,
+              47,
+              53
+            ],
+            "compression": [
+              0
+            ],
+            "extensions": [
+              {
+                "type": "GREASE",
+                "length": 0
+              },
+              {
+                "type": 45,
+                "length": 2,
+                "values": [
+                  1
+                ]
+              },
+              {
+                "type": 23,
+                "length": 0,
+                "hex": ""
+              },
+              {
+                "type": 51,
+                "length": 1263,
+                "shares": [
+                  [
+                    "GREASE",
+                    1
+                  ],
+                  [
+                    4588,
+                    1216
+                  ],
+                  [
+                    29,
+                    32
+                  ]
+                ]
+              },
+              {
+                "type": 5,
+                "length": 5,
+                "hex": "0100000000"
+              },
+              {
+                "type": 51764,
+                "length": 206,
+                "trust_anchor_ids": [
+                  "839a648c9b2d010a",
+                  "82df13020e",
+                  "d6790909",
+                  "d679090a",
+                  "839a648c9b2d0113",
+                  "82df13020d",
+                  "839a648c9b2d010c",
+                  "d6790907",
+                  "d679090e",
+                  "d6790906",
+                  "839a648c9b2d010b",
+                  "d6790908",
+                  "d6790905",
+                  "d6790901",
+                  "839a648c9b2d0109",
+                  "839a648c9b2d0108",
+                  "82df130201",
+                  "82df130214",
+                  "d679090d",
+                  "839a648c9b2d010d",
+                  "d6790903",
+                  "839a648c9b2d0107",
+                  "d679090f",
+                  "82df130206",
+                  "d679090b",
+                  "82df130213",
+                  "d679090c",
+                  "82df13020f",
+                  "82df130212",
+                  "839a648c9b2d0112",
+                  "d6790902",
+                  "d6790904"
+                ]
+              },
+              {
+                "type": 0,
+                "length": 14
+              },
+              {
+                "type": 43,
+                "length": 7,
+                "values": [
+                  "GREASE",
+                  772,
+                  771
+                ]
+              },
+              {
+                "type": 16,
+                "length": 11,
+                "protocols": [
+                  "http/1.1"
+                ]
+              },
+              {
+                "type": 35,
+                "length": 0,
+                "hex": ""
+              },
+              {
+                "type": 11,
+                "length": 2,
+                "values": [
+                  0
+                ]
+              },
+              {
+                "type": 10,
+                "length": 12,
+                "values": [
+                  "GREASE",
+                  4588,
+                  29,
+                  23,
+                  24
+                ]
+              },
+              {
+                "type": 65037,
+                "length": 282
+              },
+              {
+                "type": 27,
+                "length": 3,
+                "values": [
+                  2
+                ]
+              },
+              {
+                "type": 18,
+                "length": 0,
+                "hex": ""
+              },
+              {
+                "type": 65281,
+                "length": 1,
+                "hex": "00"
+              },
+              {
+                "type": 13,
+                "length": 26,
+                "values": [
+                  "GREASE",
+                  2308,
+                  2309,
+                  2310,
+                  1027,
+                  2052,
+                  1025,
+                  1283,
+                  2053,
+                  1281,
+                  2054,
+                  1537
+                ]
+              },
+              {
+                "type": "GREASE",
+                "length": 1
+              },
+              {
+                "type": 41,
+                "length": 267,
+                "offered_psks": {
+                  "identities": [
+                    {
+                      "length": 208,
+                      "sha256": "cdbc1a9843b8c7fda35fc7e633c225644e8acee50ce173f1c21f0cec06ea3e15",
+                      "obfuscated_ticket_age": 428754258
+                    }
+                  ],
+                  "binder_lengths": [
+                    48
+                  ]
+                }
+              }
+            ],
+            "raw_client_hello_base64": "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"
+          },
+          "tls_error": "[SSL: SSLV3_ALERT_CERTIFICATE_UNKNOWN] ssl/tls alert certificate unknown (_ssl.c:1010)"
+        },
+        {
+          "connection": 3,
+          "requests": [
+            {
+              "method": "GET",
+              "path": "/socket",
+              "version": "HTTP/1.1",
+              "headers": [
+                [
+                  "Host",
+                  "localhost:49280"
+                ],
+                [
+                  "Connection",
+                  "Upgrade"
+                ],
+                [
+                  "Pragma",
+                  "no-cache"
+                ],
+                [
+                  "Cache-Control",
+                  "no-cache"
+                ],
+                [
+                  "User-Agent",
+                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+                ],
+                [
+                  "Upgrade",
+                  "websocket"
+                ],
+                [
+                  "Origin",
+                  "https://localhost:49280"
+                ],
+                [
+                  "Sec-WebSocket-Version",
+                  "13"
+                ],
+                [
+                  "Accept-Encoding",
+                  "gzip, deflate, br, zstd"
+                ],
+                [
+                  "Accept-Language",
+                  "en-US,en;q=0.9"
+                ],
+                [
+                  "Sec-WebSocket-Key",
+                  "sFYVzYxZNrRtid1tmKnCzw=="
+                ],
+                [
+                  "Sec-WebSocket-Extensions",
+                  "permessage-deflate; client_max_window_bits"
+                ],
+                [
+                  "Sec-WebSocket-Protocol",
+                  "probe"
+                ]
+              ]
+            }
+          ],
+          "frames": [],
+          "peer_port": 58047,
+          "client_hello": {
+            "records": [
+              [
+                22,
+                769,
+                2255
+              ]
+            ],
+            "legacy_version": 771,
+            "session_id_length": 32,
+            "ciphers": [
+              "GREASE",
+              4865,
+              4866,
+              4867,
+              49195,
+              49199,
+              49196,
+              49200,
+              52393,
+              52392,
+              49171,
+              49172,
+              156,
+              157,
+              47,
+              53
+            ],
+            "compression": [
+              0
+            ],
+            "extensions": [
+              {
+                "type": "GREASE",
+                "length": 0
+              },
+              {
+                "type": 27,
+                "length": 3,
+                "values": [
+                  2
+                ]
+              },
+              {
+                "type": 11,
+                "length": 2,
+                "values": [
+                  0
+                ]
+              },
+              {
+                "type": 65037,
+                "length": 250
+              },
+              {
+                "type": 35,
+                "length": 0,
+                "hex": ""
+              },
+              {
+                "type": 23,
+                "length": 0,
+                "hex": ""
+              },
+              {
+                "type": 51764,
+                "length": 206,
+                "trust_anchor_ids": [
+                  "839a648c9b2d010a",
+                  "82df13020e",
+                  "d6790909",
+                  "d679090a",
+                  "839a648c9b2d0113",
+                  "82df13020d",
+                  "839a648c9b2d010c",
+                  "d6790907",
+                  "d679090e",
+                  "d6790906",
+                  "839a648c9b2d010b",
+                  "d6790908",
+                  "d6790905",
+                  "d6790901",
+                  "839a648c9b2d0109",
+                  "839a648c9b2d0108",
+                  "82df130201",
+                  "82df130214",
+                  "d679090d",
+                  "839a648c9b2d010d",
+                  "d6790903",
+                  "839a648c9b2d0107",
+                  "d679090f",
+                  "82df130206",
+                  "d679090b",
+                  "82df130213",
+                  "d679090c",
+                  "82df13020f",
+                  "82df130212",
+                  "839a648c9b2d0112",
+                  "d6790902",
+                  "d6790904"
+                ]
+              },
+              {
+                "type": 65281,
+                "length": 1,
+                "hex": "00"
+              },
+              {
+                "type": 0,
+                "length": 14
+              },
+              {
+                "type": 10,
+                "length": 12,
+                "values": [
+                  "GREASE",
+                  4588,
+                  29,
+                  23,
+                  24
+                ]
+              },
+              {
+                "type": 45,
+                "length": 2,
+                "values": [
+                  1
+                ]
+              },
+              {
+                "type": 13,
+                "length": 26,
+                "values": [
+                  "GREASE",
+                  2308,
+                  2309,
+                  2310,
+                  1027,
+                  2052,
+                  1025,
+                  1283,
+                  2053,
+                  1281,
+                  2054,
+                  1537
+                ]
+              },
+              {
+                "type": 5,
+                "length": 5,
+                "hex": "0100000000"
+              },
+              {
+                "type": 18,
+                "length": 0,
+                "hex": ""
+              },
+              {
+                "type": 16,
+                "length": 11,
+                "protocols": [
+                  "http/1.1"
+                ]
+              },
+              {
+                "type": 51,
+                "length": 1263,
+                "shares": [
+                  [
+                    "GREASE",
+                    1
+                  ],
+                  [
+                    4588,
+                    1216
+                  ],
+                  [
+                    29,
+                    32
+                  ]
+                ]
+              },
+              {
+                "type": 43,
+                "length": 7,
+                "values": [
+                  "GREASE",
+                  772,
+                  771
+                ]
+              },
+              {
+                "type": "GREASE",
+                "length": 1
+              },
+              {
+                "type": 41,
+                "length": 267,
+                "offered_psks": {
+                  "identities": [
+                    {
+                      "length": 208,
+                      "sha256": "f5fd120246acc0e554f4d946020aac19bd1188c66e27cbbce30b65bbb759f2c1",
+                      "obfuscated_ticket_age": 2019120894
+                    }
+                  ],
+                  "binder_lengths": [
+                    48
+                  ]
+                }
+              }
+            ],
+            "raw_client_hello_base64": "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"
+          },
+          "alpn": "http/1.1",
+          "tls_version": "TLSv1.3",
+          "cipher": [
+            "TLS_AES_256_GCM_SHA384",
+            "TLSv1.3",
+            256
+          ],
+          "session_reused": true,
+          "websocket_compression": true,
+          "websocket": [
+            {
+              "opcode": 1,
+              "compressed": true,
+              "data_base64": "dHJhbnNwb3J0LWVjaG8="
+            },
+            {
+              "opcode": 2,
+              "compressed": true,
+              "data_base64": "AP+AAQ=="
+            },
+            {
+              "opcode": 1,
+              "compressed": true,
+              "data_base64": "dHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNobw=="
+            },
+            {
+              "opcode": 8,
+              "compressed": false,
+              "data_base64": "A+hkb25l"
+            }
+          ]
+        }
+      ],
+      "identity": {
+        "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
+        "platform": "Win32",
+        "languages": [
+          "en-US",
+          "en"
+        ],
+        "metadata": {
+          "architecture": "x86",
+          "bitness": "64",
+          "brands": [
+            {
+              "brand": "Chromium",
+              "version": "152"
+            },
+            {
+              "brand": "Not?A_Brand",
+              "version": "24"
+            },
+            {
+              "brand": "Google Chrome",
+              "version": "152"
+            }
+          ],
+          "fullVersionList": [
+            {
+              "brand": "Chromium",
+              "version": "152.0.7977.82"
+            },
+            {
+              "brand": "Not?A_Brand",
+              "version": "24.0.0.0"
+            },
+            {
+              "brand": "Google Chrome",
+              "version": "152.0.7977.82"
+            }
+          ],
+          "mobile": false,
+          "model": "",
+          "platform": "Windows",
+          "platformVersion": "19.0.0",
+          "uaFullVersion": "152.0.7977.82",
+          "wow64": false
+        }
+      },
+      "responses": [
+        {
+          "method": "GET",
+          "path": "/first",
+          "status": 200,
+          "bytes": [
+            0,
+            255,
+            1,
+            128,
+            47,
+            102,
+            105,
+            114,
+            115,
+            116
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/reused",
+          "status": 200,
+          "bytes": [
+            0,
+            255,
+            1,
+            128,
+            47,
+            114,
+            101,
+            117,
+            115,
+            101,
+            100
+          ]
+        },
+        {
+          "method": "PATCH",
+          "path": "/binary",
+          "status": 200,
+          "bytes": [
+            0,
+            255,
+            1,
+            128,
+            47,
+            98,
+            105,
+            110,
+            97,
+            114,
+            121
+          ]
+        },
+        {
+          "method": "HEAD",
+          "path": "/head",
+          "status": 200,
+          "bytes": []
+        }
+      ],
+      "websocket": {
+        "events": [
+          "open:probe",
+          "text:transport-echo",
+          "binary:[0,255,128,1]",
+          "text:transport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echo",
+          "close:1000:true"
+        ],
+        "extensions": "permessage-deflate"
+      },
+      "proxy_tunnels": [
+        {
+          "request_line": "CONNECT localhost:49280 HTTP/1.1",
+          "headers": [
+            [
+              "Host",
+              " localhost:49280"
+            ],
+            [
+              "Proxy-Connection",
+              " keep-alive"
+            ],
+            [
+              "User-Agent",
+              " Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+            ]
+          ],
+          "source_port": 58694
+        },
+        {
+          "request_line": "CONNECT localhost:49280 HTTP/1.1",
+          "headers": [
+            [
+              "Host",
+              " localhost:49280"
+            ],
+            [
+              "Proxy-Connection",
+              " keep-alive"
+            ],
+            [
+              "User-Agent",
+              " Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+            ]
+          ],
+          "source_port": 54316
+        },
+        {
+          "request_line": "CONNECT localhost:49280 HTTP/1.1",
+          "headers": [
+            [
+              "Host",
+              " localhost:49280"
+            ],
+            [
+              "Proxy-Connection",
+              " keep-alive"
+            ],
+            [
+              "User-Agent",
+              " Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+            ]
+          ],
+          "source_port": 59863
+        },
+        {
+          "request_line": "CONNECT localhost:49280 HTTP/1.1",
+          "headers": [
+            [
+              "Host",
+              " localhost:49280"
+            ],
+            [
+              "Proxy-Connection",
+              " keep-alive"
+            ],
+            [
+              "User-Agent",
+              " Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+            ]
+          ],
+          "source_port": 58047
+        }
+      ],
+      "completed": true
+    },
+    {
+      "repetition": 2,
+      "connections": [
+        {
+          "connection": 0,
+          "requests": [],
+          "frames": [],
+          "peer_port": 54318,
+          "client_hello": {
+            "records": [
+              [
+                22,
+                769,
+                1932
+              ]
+            ],
+            "legacy_version": 771,
+            "session_id_length": 32,
+            "ciphers": [
+              "GREASE",
+              4865,
+              4866,
+              4867,
+              49195,
+              49199,
+              49196,
+              49200,
+              52393,
+              52392,
+              49171,
+              49172,
+              156,
+              157,
+              47,
+              53
+            ],
+            "compression": [
+              0
+            ],
+            "extensions": [
+              {
+                "type": "GREASE",
+                "length": 0
+              },
+              {
+                "type": 65281,
+                "length": 1,
+                "hex": "00"
+              },
+              {
+                "type": 23,
+                "length": 0,
+                "hex": ""
+              },
+              {
+                "type": 27,
+                "length": 3,
+                "values": [
+                  2
+                ]
+              },
+              {
+                "type": 43,
+                "length": 7,
+                "values": [
+                  "GREASE",
+                  772,
+                  771
+                ]
+              },
+              {
+                "type": 17613,
+                "length": 5,
+                "protocols": [
+                  "h2"
+                ]
+              },
+              {
+                "type": 45,
+                "length": 2,
+                "values": [
+                  1
+                ]
+              },
+              {
+                "type": 35,
+                "length": 0,
+                "hex": ""
+              },
+              {
+                "type": 18,
+                "length": 0,
+                "hex": ""
+              },
+              {
+                "type": 51,
+                "length": 1263,
+                "shares": [
+                  [
+                    "GREASE",
+                    1
+                  ],
+                  [
+                    4588,
+                    1216
+                  ],
+                  [
+                    29,
+                    32
+                  ]
+                ]
+              },
+              {
+                "type": 11,
+                "length": 2,
+                "values": [
+                  0
+                ]
+              },
+              {
+                "type": 5,
+                "length": 5,
+                "hex": "0100000000"
+              },
+              {
+                "type": 16,
+                "length": 14,
+                "protocols": [
+                  "h2",
+                  "http/1.1"
+                ]
+              },
+              {
+                "type": 51764,
+                "length": 206,
+                "trust_anchor_ids": [
+                  "d679090b",
+                  "82df130214",
+                  "839a648c9b2d010b",
+                  "d6790907",
+                  "d6790902",
+                  "d6790904",
+                  "839a648c9b2d0109",
+                  "839a648c9b2d0108",
+                  "82df130201",
+                  "d679090a",
+                  "d6790909",
+                  "d6790906",
+                  "839a648c9b2d010d",
+                  "839a648c9b2d010c",
+                  "839a648c9b2d0107",
+                  "82df130213",
+                  "82df130206",
+                  "d679090e",
+                  "839a648c9b2d0112",
+                  "82df13020f",
+                  "d6790908",
+                  "82df130212",
+                  "d6790905",
+                  "82df13020e",
+                  "d6790901",
+                  "d679090d",
+                  "839a648c9b2d0113",
+                  "839a648c9b2d010a",
+                  "d679090c",
+                  "82df13020d",
+                  "d6790903",
+                  "d679090f"
+                ]
+              },
+              {
+                "type": 13,
+                "length": 26,
+                "values": [
+                  "GREASE",
+                  2308,
+                  2309,
+                  2310,
+                  1027,
+                  2052,
+                  1025,
+                  1283,
+                  2053,
+                  1281,
+                  2054,
+                  1537
+                ]
+              },
+              {
+                "type": 0,
+                "length": 14
+              },
+              {
+                "type": 65037,
+                "length": 186
+              },
+              {
+                "type": 10,
+                "length": 12,
+                "values": [
+                  "GREASE",
+                  4588,
+                  29,
+                  23,
+                  24
+                ]
+              },
+              {
+                "type": "GREASE",
+                "length": 1
+              }
+            ],
+            "raw_client_hello_base64": "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"
+          },
+          "tls_error": "[SSL: SSLV3_ALERT_CERTIFICATE_UNKNOWN] ssl/tls alert certificate unknown (_ssl.c:1010)"
+        },
+        {
+          "connection": 1,
+          "requests": [
+            {
+              "stream": 1,
+              "method": "GET",
+              "path": "/page",
+              "headers": [
+                [
+                  ":method",
+                  "GET"
+                ],
+                [
+                  ":authority",
+                  "localhost:61613"
+                ],
+                [
+                  ":scheme",
+                  "https"
+                ],
+                [
+                  ":path",
+                  "/page"
+                ],
+                [
+                  "sec-ch-ua",
+                  "\"Chromium\";v=\"152\", \"Not?A_Brand\";v=\"24\", \"Google Chrome\";v=\"152\""
+                ],
+                [
+                  "sec-ch-ua-mobile",
+                  "?0"
+                ],
+                [
+                  "sec-ch-ua-platform",
+                  "\"Windows\""
+                ],
+                [
+                  "upgrade-insecure-requests",
+                  "1"
+                ],
+                [
+                  "user-agent",
+                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+                ],
+                [
+                  "accept",
+                  "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"
+                ],
+                [
+                  "sec-fetch-site",
+                  "none"
+                ],
+                [
+                  "sec-fetch-mode",
+                  "navigate"
+                ],
+                [
+                  "sec-fetch-user",
+                  "?1"
+                ],
+                [
+                  "sec-fetch-dest",
+                  "document"
+                ],
+                [
+                  "accept-encoding",
+                  "gzip, deflate, br, zstd"
+                ],
+                [
+                  "accept-language",
+                  "en-US,en;q=0.9"
+                ],
+                [
+                  "priority",
+                  "u=0, i"
+                ]
+              ]
+            },
+            {
+              "stream": 3,
+              "method": "GET",
+              "path": "/first",
+              "headers": [
+                [
+                  ":method",
+                  "GET"
+                ],
+                [
+                  ":authority",
+                  "localhost:61613"
+                ],
+                [
+                  ":scheme",
+                  "https"
+                ],
+                [
+                  ":path",
+                  "/first"
+                ],
+                [
+                  "sec-ch-ua-platform",
+                  "\"Windows\""
+                ],
+                [
+                  "user-agent",
+                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+                ],
+                [
+                  "sec-ch-ua",
+                  "\"Chromium\";v=\"152\", \"Not?A_Brand\";v=\"24\", \"Google Chrome\";v=\"152\""
+                ],
+                [
+                  "sec-ch-ua-mobile",
+                  "?0"
+                ],
+                [
+                  "accept",
+                  "*/*"
+                ],
+                [
+                  "sec-fetch-site",
+                  "same-origin"
+                ],
+                [
+                  "sec-fetch-mode",
+                  "cors"
+                ],
+                [
+                  "sec-fetch-dest",
+                  "empty"
+                ],
+                [
+                  "referer",
+                  "https://localhost:61613/page"
+                ],
+                [
+                  "accept-encoding",
+                  "gzip, deflate, br, zstd"
+                ],
+                [
+                  "accept-language",
+                  "en-US,en;q=0.9"
+                ],
+                [
+                  "priority",
+                  "u=1, i"
+                ]
+              ]
+            },
+            {
+              "stream": 5,
+              "method": "GET",
+              "path": "/reused",
+              "headers": [
+                [
+                  ":method",
+                  "GET"
+                ],
+                [
+                  ":authority",
+                  "localhost:61613"
+                ],
+                [
+                  ":scheme",
+                  "https"
+                ],
+                [
+                  ":path",
+                  "/reused"
+                ],
+                [
+                  "sec-ch-ua-platform",
+                  "\"Windows\""
+                ],
+                [
+                  "user-agent",
+                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+                ],
+                [
+                  "sec-ch-ua",
+                  "\"Chromium\";v=\"152\", \"Not?A_Brand\";v=\"24\", \"Google Chrome\";v=\"152\""
+                ],
+                [
+                  "sec-ch-ua-mobile",
+                  "?0"
+                ],
+                [
+                  "accept",
+                  "*/*"
+                ],
+                [
+                  "sec-fetch-site",
+                  "same-origin"
+                ],
+                [
+                  "sec-fetch-mode",
+                  "cors"
+                ],
+                [
+                  "sec-fetch-dest",
+                  "empty"
+                ],
+                [
+                  "referer",
+                  "https://localhost:61613/page"
+                ],
+                [
+                  "accept-encoding",
+                  "gzip, deflate, br, zstd"
+                ],
+                [
+                  "accept-language",
+                  "en-US,en;q=0.9"
+                ],
+                [
+                  "priority",
+                  "u=1, i"
+                ]
+              ]
+            },
+            {
+              "stream": 7,
+              "method": "PATCH",
+              "path": "/binary",
+              "headers": [
+                [
+                  ":method",
+                  "PATCH"
+                ],
+                [
+                  ":authority",
+                  "localhost:61613"
+                ],
+                [
+                  ":scheme",
+                  "https"
+                ],
+                [
+                  ":path",
+                  "/binary"
+                ],
+                [
+                  "content-length",
+                  "4"
+                ],
+                [
+                  "sec-ch-ua-platform",
+                  "\"Windows\""
+                ],
+                [
+                  "user-agent",
+                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+                ],
+                [
+                  "sec-ch-ua",
+                  "\"Chromium\";v=\"152\", \"Not?A_Brand\";v=\"24\", \"Google Chrome\";v=\"152\""
+                ],
+                [
+                  "sec-ch-ua-mobile",
+                  "?0"
+                ],
+                [
+                  "accept",
+                  "*/*"
+                ],
+                [
+                  "origin",
+                  "https://localhost:61613"
+                ],
+                [
+                  "sec-fetch-site",
+                  "same-origin"
+                ],
+                [
+                  "sec-fetch-mode",
+                  "cors"
+                ],
+                [
+                  "sec-fetch-dest",
+                  "empty"
+                ],
+                [
+                  "referer",
+                  "https://localhost:61613/page"
+                ],
+                [
+                  "accept-encoding",
+                  "gzip, deflate, br, zstd"
+                ],
+                [
+                  "accept-language",
+                  "en-US,en;q=0.9"
+                ],
+                [
+                  "priority",
+                  "u=1, i"
+                ]
+              ],
+              "body_base64": "AP+AAQ=="
+            },
+            {
+              "stream": 9,
+              "method": "HEAD",
+              "path": "/head",
+              "headers": [
+                [
+                  ":method",
+                  "HEAD"
+                ],
+                [
+                  ":authority",
+                  "localhost:61613"
+                ],
+                [
+                  ":scheme",
+                  "https"
+                ],
+                [
+                  ":path",
+                  "/head"
+                ],
+                [
+                  "sec-ch-ua-platform",
+                  "\"Windows\""
+                ],
+                [
+                  "user-agent",
+                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+                ],
+                [
+                  "sec-ch-ua",
+                  "\"Chromium\";v=\"152\", \"Not?A_Brand\";v=\"24\", \"Google Chrome\";v=\"152\""
+                ],
+                [
+                  "sec-ch-ua-mobile",
+                  "?0"
+                ],
+                [
+                  "accept",
+                  "*/*"
+                ],
+                [
+                  "sec-fetch-site",
+                  "same-origin"
+                ],
+                [
+                  "sec-fetch-mode",
+                  "cors"
+                ],
+                [
+                  "sec-fetch-dest",
+                  "empty"
+                ],
+                [
+                  "referer",
+                  "https://localhost:61613/page"
+                ],
+                [
+                  "accept-encoding",
+                  "gzip, deflate, br, zstd"
+                ],
+                [
+                  "accept-language",
+                  "en-US,en;q=0.9"
+                ],
+                [
+                  "priority",
+                  "u=1, i"
+                ]
+              ]
+            }
+          ],
+          "frames": [
+            {
+              "type": 4,
+              "flags": 0,
+              "stream": 0,
+              "length": 24,
+              "settings": [
+                [
+                  1,
+                  65536
+                ],
+                [
+                  2,
+                  0
+                ],
+                [
+                  4,
+                  6291456
+                ],
+                [
+                  6,
+                  262144
+                ]
+              ]
+            },
+            {
+              "type": 8,
+              "flags": 0,
+              "stream": 0,
+              "length": 4,
+              "increment": 15663105
+            },
+            {
+              "type": 1,
+              "flags": 37,
+              "stream": 1,
+              "length": 460,
+              "priority": {
+                "exclusive": true,
+                "dependency": 0,
+                "weight": 256
+              }
+            },
+            {
+              "type": 4,
+              "flags": 1,
+              "stream": 0,
+              "length": 0
+            },
+            {
+              "type": 1,
+              "flags": 37,
+              "stream": 3,
+              "length": 80,
+              "priority": {
+                "exclusive": true,
+                "dependency": 0,
+                "weight": 220
+              }
+            },
+            {
+              "type": 1,
+              "flags": 37,
+              "stream": 5,
+              "length": 27,
+              "priority": {
+                "exclusive": true,
+                "dependency": 0,
+                "weight": 220
+              }
+            },
+            {
+              "type": 1,
+              "flags": 36,
+              "stream": 7,
+              "length": 62,
+              "priority": {
+                "exclusive": true,
+                "dependency": 0,
+                "weight": 220
+              }
+            },
+            {
+              "type": 0,
+              "flags": 1,
+              "stream": 7,
+              "length": 4
+            },
+            {
+              "type": 1,
+              "flags": 37,
+              "stream": 9,
+              "length": 31,
+              "priority": {
+                "exclusive": true,
+                "dependency": 0,
+                "weight": 220
+              }
+            }
+          ],
+          "peer_port": 51547,
+          "client_hello": {
+            "records": [
+              [
+                22,
+                769,
+                1964
+              ]
+            ],
+            "legacy_version": 771,
+            "session_id_length": 32,
+            "ciphers": [
+              "GREASE",
+              4865,
+              4866,
+              4867,
+              49195,
+              49199,
+              49196,
+              49200,
+              52393,
+              52392,
+              49171,
+              49172,
+              156,
+              157,
+              47,
+              53
+            ],
+            "compression": [
+              0
+            ],
+            "extensions": [
+              {
+                "type": "GREASE",
+                "length": 0
+              },
+              {
+                "type": 35,
+                "length": 0,
+                "hex": ""
+              },
+              {
+                "type": 16,
+                "length": 14,
+                "protocols": [
+                  "h2",
+                  "http/1.1"
+                ]
+              },
+              {
+                "type": 13,
+                "length": 26,
+                "values": [
+                  "GREASE",
+                  2308,
+                  2309,
+                  2310,
+                  1027,
+                  2052,
+                  1025,
+                  1283,
+                  2053,
+                  1281,
+                  2054,
+                  1537
+                ]
+              },
+              {
+                "type": 43,
+                "length": 7,
+                "values": [
+                  "GREASE",
+                  772,
+                  771
+                ]
+              },
+              {
+                "type": 11,
+                "length": 2,
+                "values": [
+                  0
+                ]
+              },
+              {
+                "type": 65281,
+                "length": 1,
+                "hex": "00"
+              },
+              {
+                "type": 0,
+                "length": 14
+              },
+              {
+                "type": 23,
+                "length": 0,
+                "hex": ""
+              },
+              {
+                "type": 51764,
+                "length": 206,
+                "trust_anchor_ids": [
+                  "d679090b",
+                  "82df130214",
+                  "839a648c9b2d010b",
+                  "d6790907",
+                  "d6790902",
+                  "d6790904",
+                  "839a648c9b2d0109",
+                  "839a648c9b2d0108",
+                  "82df130201",
+                  "d679090a",
+                  "d6790909",
+                  "d6790906",
+                  "839a648c9b2d010d",
+                  "839a648c9b2d010c",
+                  "839a648c9b2d0107",
+                  "82df130213",
+                  "82df130206",
+                  "d679090e",
+                  "839a648c9b2d0112",
+                  "82df13020f",
+                  "d6790908",
+                  "82df130212",
+                  "d6790905",
+                  "82df13020e",
+                  "d6790901",
+                  "d679090d",
+                  "839a648c9b2d0113",
+                  "839a648c9b2d010a",
+                  "d679090c",
+                  "82df13020d",
+                  "d6790903",
+                  "d679090f"
+                ]
+              },
+              {
+                "type": 5,
+                "length": 5,
+                "hex": "0100000000"
+              },
+              {
+                "type": 10,
+                "length": 12,
+                "values": [
+                  "GREASE",
+                  4588,
+                  29,
+                  23,
+                  24
+                ]
+              },
+              {
+                "type": 27,
+                "length": 3,
+                "values": [
+                  2
+                ]
+              },
+              {
+                "type": 51,
+                "length": 1263,
+                "shares": [
+                  [
+                    "GREASE",
+                    1
+                  ],
+                  [
+                    4588,
+                    1216
+                  ],
+                  [
+                    29,
+                    32
+                  ]
+                ]
+              },
+              {
+                "type": 65037,
+                "length": 218
+              },
+              {
+                "type": 17613,
+                "length": 5,
+                "protocols": [
+                  "h2"
+                ]
+              },
+              {
+                "type": 18,
+                "length": 0,
+                "hex": ""
+              },
+              {
+                "type": 45,
+                "length": 2,
+                "values": [
+                  1
+                ]
+              },
+              {
+                "type": "GREASE",
+                "length": 1
+              }
+            ],
+            "raw_client_hello_base64": "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"
+          },
+          "alpn": "h2",
+          "tls_version": "TLSv1.3",
+          "cipher": [
+            "TLS_AES_256_GCM_SHA384",
+            "TLSv1.3",
+            256
+          ],
+          "session_reused": false
+        },
+        {
+          "connection": 2,
+          "requests": [],
+          "frames": [],
+          "peer_port": 55197,
+          "client_hello": {
+            "records": [
+              [
+                22,
+                769,
+                2303
+              ]
+            ],
+            "legacy_version": 771,
+            "session_id_length": 32,
+            "ciphers": [
+              "GREASE",
+              4865,
+              4866,
+              4867,
+              49195,
+              49199,
+              49196,
+              49200,
+              52393,
+              52392,
+              49171,
+              49172,
+              156,
+              157,
+              47,
+              53
+            ],
+            "compression": [
+              0
+            ],
+            "extensions": [
+              {
+                "type": "GREASE",
+                "length": 0
+              },
+              {
+                "type": 0,
+                "length": 14
+              },
+              {
+                "type": 65281,
+                "length": 1,
+                "hex": "00"
+              },
+              {
+                "type": 11,
+                "length": 2,
+                "values": [
+                  0
+                ]
+              },
+              {
+                "type": 10,
+                "length": 12,
+                "values": [
+                  "GREASE",
+                  4588,
+                  29,
+                  23,
+                  24
+                ]
+              },
+              {
+                "type": 27,
+                "length": 3,
+                "values": [
+                  2
+                ]
+              },
+              {
+                "type": 18,
+                "length": 0,
+                "hex": ""
+              },
+              {
+                "type": 16,
+                "length": 11,
+                "protocols": [
+                  "http/1.1"
+                ]
+              },
+              {
+                "type": 13,
+                "length": 26,
+                "values": [
+                  "GREASE",
+                  2308,
+                  2309,
+                  2310,
+                  1027,
+                  2052,
+                  1025,
+                  1283,
+                  2053,
+                  1281,
+                  2054,
+                  1537
+                ]
+              },
+              {
+                "type": 65037,
+                "length": 282
+              },
+              {
+                "type": 43,
+                "length": 7,
+                "values": [
+                  "GREASE",
+                  772,
+                  771
+                ]
+              },
+              {
+                "type": 51764,
+                "length": 206,
+                "trust_anchor_ids": [
+                  "d679090b",
+                  "82df130214",
+                  "839a648c9b2d010b",
+                  "d6790907",
+                  "d6790902",
+                  "d6790904",
+                  "839a648c9b2d0109",
+                  "839a648c9b2d0108",
+                  "82df130201",
+                  "d679090a",
+                  "d6790909",
+                  "d6790906",
+                  "839a648c9b2d010d",
+                  "839a648c9b2d010c",
+                  "839a648c9b2d0107",
+                  "82df130213",
+                  "82df130206",
+                  "d679090e",
+                  "839a648c9b2d0112",
+                  "82df13020f",
+                  "d6790908",
+                  "82df130212",
+                  "d6790905",
+                  "82df13020e",
+                  "d6790901",
+                  "d679090d",
+                  "839a648c9b2d0113",
+                  "839a648c9b2d010a",
+                  "d679090c",
+                  "82df13020d",
+                  "d6790903",
+                  "d679090f"
+                ]
+              },
+              {
+                "type": 35,
+                "length": 0,
+                "hex": ""
+              },
+              {
+                "type": 51,
+                "length": 1263,
+                "shares": [
+                  [
+                    "GREASE",
+                    1
+                  ],
+                  [
+                    4588,
+                    1216
+                  ],
+                  [
+                    29,
+                    32
+                  ]
+                ]
+              },
+              {
+                "type": 45,
+                "length": 2,
+                "values": [
+                  1
+                ]
+              },
+              {
+                "type": 23,
+                "length": 0,
+                "hex": ""
+              },
+              {
+                "type": 5,
+                "length": 5,
+                "hex": "0100000000"
+              },
+              {
+                "type": "GREASE",
+                "length": 1
+              },
+              {
+                "type": 41,
+                "length": 283,
+                "offered_psks": {
+                  "identities": [
+                    {
+                      "length": 224,
+                      "sha256": "70bdbe05cb4250276ddbd2630281f0617e8cc1b148e8923f2173f874001fdd46",
+                      "obfuscated_ticket_age": 2446298146
+                    }
+                  ],
+                  "binder_lengths": [
+                    48
+                  ]
+                }
+              }
+            ],
+            "raw_client_hello_base64": "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"
+          },
+          "tls_error": "[SSL: SSLV3_ALERT_CERTIFICATE_UNKNOWN] ssl/tls alert certificate unknown (_ssl.c:1010)"
+        },
+        {
+          "connection": 3,
+          "requests": [
+            {
+              "method": "GET",
+              "path": "/socket",
+              "version": "HTTP/1.1",
+              "headers": [
+                [
+                  "Host",
+                  "localhost:61613"
+                ],
+                [
+                  "Connection",
+                  "Upgrade"
+                ],
+                [
+                  "Pragma",
+                  "no-cache"
+                ],
+                [
+                  "Cache-Control",
+                  "no-cache"
+                ],
+                [
+                  "User-Agent",
+                  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+                ],
+                [
+                  "Upgrade",
+                  "websocket"
+                ],
+                [
+                  "Origin",
+                  "https://localhost:61613"
+                ],
+                [
+                  "Sec-WebSocket-Version",
+                  "13"
+                ],
+                [
+                  "Accept-Encoding",
+                  "gzip, deflate, br, zstd"
+                ],
+                [
+                  "Accept-Language",
+                  "en-US,en;q=0.9"
+                ],
+                [
+                  "Sec-WebSocket-Key",
+                  "jVyZxNI9AfYP6JfSmMu01g=="
+                ],
+                [
+                  "Sec-WebSocket-Extensions",
+                  "permessage-deflate; client_max_window_bits"
+                ],
+                [
+                  "Sec-WebSocket-Protocol",
+                  "probe"
+                ]
+              ]
+            }
+          ],
+          "frames": [],
+          "peer_port": 51129,
+          "client_hello": {
+            "records": [
+              [
+                22,
+                769,
+                2191
+              ]
+            ],
+            "legacy_version": 771,
+            "session_id_length": 32,
+            "ciphers": [
+              "GREASE",
+              4865,
+              4866,
+              4867,
+              49195,
+              49199,
+              49196,
+              49200,
+              52393,
+              52392,
+              49171,
+              49172,
+              156,
+              157,
+              47,
+              53
+            ],
+            "compression": [
+              0
+            ],
+            "extensions": [
+              {
+                "type": "GREASE",
+                "length": 0
+              },
+              {
+                "type": 65281,
+                "length": 1,
+                "hex": "00"
+              },
+              {
+                "type": 0,
+                "length": 14
+              },
+              {
+                "type": 11,
+                "length": 2,
+                "values": [
+                  0
+                ]
+              },
+              {
+                "type": 16,
+                "length": 11,
+                "protocols": [
+                  "http/1.1"
+                ]
+              },
+              {
+                "type": 10,
+                "length": 12,
+                "values": [
+                  "GREASE",
+                  4588,
+                  29,
+                  23,
+                  24
+                ]
+              },
+              {
+                "type": 43,
+                "length": 7,
+                "values": [
+                  "GREASE",
+                  772,
+                  771
+                ]
+              },
+              {
+                "type": 35,
+                "length": 0,
+                "hex": ""
+              },
+              {
+                "type": 51764,
+                "length": 206,
+                "trust_anchor_ids": [
+                  "d679090b",
+                  "82df130214",
+                  "839a648c9b2d010b",
+                  "d6790907",
+                  "d6790902",
+                  "d6790904",
+                  "839a648c9b2d0109",
+                  "839a648c9b2d0108",
+                  "82df130201",
+                  "d679090a",
+                  "d6790909",
+                  "d6790906",
+                  "839a648c9b2d010d",
+                  "839a648c9b2d010c",
+                  "839a648c9b2d0107",
+                  "82df130213",
+                  "82df130206",
+                  "d679090e",
+                  "839a648c9b2d0112",
+                  "82df13020f",
+                  "d6790908",
+                  "82df130212",
+                  "d6790905",
+                  "82df13020e",
+                  "d6790901",
+                  "d679090d",
+                  "839a648c9b2d0113",
+                  "839a648c9b2d010a",
+                  "d679090c",
+                  "82df13020d",
+                  "d6790903",
+                  "d679090f"
+                ]
+              },
+              {
+                "type": 23,
+                "length": 0,
+                "hex": ""
+              },
+              {
+                "type": 27,
+                "length": 3,
+                "values": [
+                  2
+                ]
+              },
+              {
+                "type": 13,
+                "length": 26,
+                "values": [
+                  "GREASE",
+                  2308,
+                  2309,
+                  2310,
+                  1027,
+                  2052,
+                  1025,
+                  1283,
+                  2053,
+                  1281,
+                  2054,
+                  1537
+                ]
+              },
+              {
+                "type": 5,
+                "length": 5,
+                "hex": "0100000000"
+              },
+              {
+                "type": 65037,
+                "length": 186
+              },
+              {
+                "type": 45,
+                "length": 2,
+                "values": [
+                  1
+                ]
+              },
+              {
+                "type": 51,
+                "length": 1263,
+                "shares": [
+                  [
+                    "GREASE",
+                    1
+                  ],
+                  [
+                    4588,
+                    1216
+                  ],
+                  [
+                    29,
+                    32
+                  ]
+                ]
+              },
+              {
+                "type": 18,
+                "length": 0,
+                "hex": ""
+              },
+              {
+                "type": "GREASE",
+                "length": 1
+              },
+              {
+                "type": 41,
+                "length": 267,
+                "offered_psks": {
+                  "identities": [
+                    {
+                      "length": 208,
+                      "sha256": "d4fa38131471963a0ccefde6912706117915d7876cb23d88d23141963b970689",
+                      "obfuscated_ticket_age": 1127493793
+                    }
+                  ],
+                  "binder_lengths": [
+                    48
+                  ]
+                }
+              }
+            ],
+            "raw_client_hello_base64": "AQAIiwMDHqzGbLTmcQxT7acSLdkbCUNlGEkxMqnTLdQi7mbH16MgrHyMZxNE8VedkhGIgt+rQUTmCGNgCrSIXKJs6mgixL0AILq6EwETAhMDwCvAL8AswDDMqcyowBPAFACcAJ0ALwA1AQAIIgoKAAD/AQABAAAAAA4ADAAACWxvY2FsaG9zdAALAAIBAAAQAAsACQhodHRwLzEuMQAKAAwACjo6EewAHQAXABgAKwAHBvr6AwQDAwAjAADKNADOAMwE1nkJCwWC3xMCFAiDmmSMmy0BCwTWeQkHBNZ5CQIE1nkJBAiDmmSMmy0BCQiDmmSMmy0BCAWC3xMCAQTWeQkKBNZ5CQkE1nkJBgiDmmSMmy0BDQiDmmSMmy0BDAiDmmSMmy0BBwWC3xMCEwWC3xMCBgTWeQkOCIOaZIybLQESBYLfEwIPBNZ5CQgFgt8TAhIE1nkJBQWC3xMCDgTWeQkBBNZ5CQ0Ig5pkjJstARMIg5pkjJstAQoE1nkJDAWC3xMCDQTWeQkDBNZ5CQ8AFwAAABsAAwIAAgANABoAGOrqCQQJBQkGBAMIBAQBBQMIBQUBCAYGAQAFAAUBAAAAAP4NALoAAAEAAYUAIBijL5VADEDboyF5v7eXXu6Mrd+9v226pkGraifHUK5UAJD4hCYMiQwsFaQvJR2zZgkVFMBS1HjCIIxOaEvYfN+wjusHXou3PwyYP+X4w1ipp/WiYF4MyqMNkCFrgOwzGOYzMFt76NOKmWgKLhh7PnPcRs6xSkW9EMYH9WcIxTyMrWbUTMhsDN1OnMlx761XMjUt93PZtAieaE8i+w11ieho5QPy8C0Hh4rvkd05dHZSbycALQACAQEAMwTvBO06OgABABHsBMAw2wZV4yw9U3o7JSW9B0cSxAoKrFb2EC9CWb0vln6WurmRN27uySYfwLjPOiXeci1WsXZcGZWlhmu3aAYvFE7uaq2afMi6cSlvg2hju5y7uIc7s6QsNU8oiTnH4ADqK2dhwYzy4w5cK4jqOad2tVKmlrI2Jn1bDBDHYoMc5kMEKrt2U7Qg6w8xEnBeoiOrCQ2/E0yugEaxYmxUmnUHJSU/GXzLOTLMNE0VtLkFymna0LXeh5zcUFjokm0tmIstmCNHplOecq6xJoSIIKylRwWNdKSPaUJS4l9lyHnfPLMEaZR74G9DCJB1VDkX22wjp3p7xgYAcQAQxpx6oz6xCKAogbO4fM4B5bGro7HkynugsJ3XVpSAssNktTDBcJNYOiHV2gBtqynkSoFFi4LcdEzDDJAqm5OkxhVoCcUtKYX00p6ko59/Y1auBVxlA5SWEczwQa46sIBzxDYI/Idjs4pYdhkeWADCq3VfeoprFA+m2mkmA8WjA87f5obBlMZkJLabtL5BYAxrqZLOi8AXCXwFup2r4CST5YvcGQrthQjX4qJp6XHp6gGQMxX24UbXh6sn0JG6q8ln/HgoobhTlb+395fKJRqj8mm4ta2fqU2P6HcQ4mAaB7CpQFBrtR1nIVpgdE6m8mhYmQvlRQVRGZtrvInFJVB0iEVm6k6SOHmNq6hRKgp6AnxxhMZalb7xGSM4+LEIAIoLCjWqLA/7A1hMZZWOVkNgw2IbIh20sqnZY1YEOzgsM2kvy8wLEmn79Mof66UMKDdDxGVFFc9a559ou55TUrOHw3BDtkeYYYKZ51hhXJMqOLyV0BjweSammT2NeajaqUw0V0c4K2DawQqNymWKq6R25H8IIH5ONM1pIJgwFZHmdB7q6Hf+t5n2hHpRmCvmol+1prHlwTfNC0nXVVIE1WRzFRe8Ib4M0qIL2GCJtAqnI2bG2m5kh2+Zi8F+0FZg0jbsSDAjI6IbI41jk1OQYkXp+iP4t3rdkjR668eEyTpfMGN0HIGqpxdZ1a/lk2u8sQUs9ClJO6Azh1qlygXEkg35N4aIdIy2on71V5Bv+ioliX0bAmodbGdt8ZA5xTMew2gs0RefpCAgDIyHmsfk8baQNMS8OaAyYpeToBfxeiAed2RuGmwUWs6b1UjAkCe64DkHFZgxRiswC3zDFmr24aAcJYcq8gqCSXFalZHG4WjkA6wfcc3nYJXed1kV2oM9OkJ8UYXa1y8w+sgTClAbch4XNMXWdXfJKKsq8EJfJX6RaJs0koqi4bFykk0Np8IzNToXMm4naFEy+Zs/QlDaQwgvgGFbdz6qU1ve1mknRaKhtB24K0tSdxqI9X1FXL4n2LWVqCk8K500tb0b2AK7EEbTaBBGE4AV+xhPQW845CiaaK/S2FD84XoCUCIe8WdsoMDYBchbRn0u9jL4d33NjCBgPDVXVap2s21laYmgcqjXI0T68xlNd0yuSnFF2Xx1NWrdsCPqyg4VQBWlqV8iEiCm680F8L2IOWz5PAOscWC85me6TDR+OqzWso5keQIRK6wgPr8vBt0pjRLu+hf9c04ck4B6i3XIU0F7BsoAbjF3+jHZ+OGwtPtwxa8FKS0mBA/+woQXTf7HdCY6AB0AIH3M7RuaZTqFu/C1ILBn2AZx95V7sXFQKerjBzzxtPBRABIAAGpqAAEAACkBCwDWAND4r/EhVV3srdY1ua9BDU/FUnKwq4jZ9Cj+dWA1eVV/vxbRcoHY1skr1iFldoaPVFu2FAGyQ3hzHCUSb9MsE7+PHP8ruVbml9+Ojg0cYHdoXC+NdxK+dtclX1CBSuehKLVFUNRziOxaqLKeNQ4jbEgYzXOHYaVMNfYIduf5fil9eVPUZ3JL64vMWXDLC6STp1yX96IsR61FSoYuawz7+7v4NaQYEm+P1nnk8+rH81EO72nYVwDvLR3cmkcUceWXgBn56EI3D30PxRQOZQQDi065QzQwoQAxMHxiV0qXGKLzujBaMkjxSdIucEasFB2uo/WeXVomIOP2YJbdEAlTvF/rFgD0lFSplQ=="
+          },
+          "alpn": "http/1.1",
+          "tls_version": "TLSv1.3",
+          "cipher": [
+            "TLS_AES_256_GCM_SHA384",
+            "TLSv1.3",
+            256
+          ],
+          "session_reused": true,
+          "websocket_compression": true,
+          "websocket": [
+            {
+              "opcode": 1,
+              "compressed": true,
+              "data_base64": "dHJhbnNwb3J0LWVjaG8="
+            },
+            {
+              "opcode": 2,
+              "compressed": true,
+              "data_base64": "AP+AAQ=="
+            },
+            {
+              "opcode": 1,
+              "compressed": true,
+              "data_base64": "dHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNob3RyYW5zcG9ydC1lY2hvdHJhbnNwb3J0LWVjaG90cmFuc3BvcnQtZWNobw=="
+            },
+            {
+              "opcode": 8,
+              "compressed": false,
+              "data_base64": "A+hkb25l"
+            }
+          ]
+        }
+      ],
+      "identity": {
+        "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
+        "platform": "Win32",
+        "languages": [
+          "en-US",
+          "en"
+        ],
+        "metadata": {
+          "architecture": "x86",
+          "bitness": "64",
+          "brands": [
+            {
+              "brand": "Chromium",
+              "version": "152"
+            },
+            {
+              "brand": "Not?A_Brand",
+              "version": "24"
+            },
+            {
+              "brand": "Google Chrome",
+              "version": "152"
+            }
+          ],
+          "fullVersionList": [
+            {
+              "brand": "Chromium",
+              "version": "152.0.7977.82"
+            },
+            {
+              "brand": "Not?A_Brand",
+              "version": "24.0.0.0"
+            },
+            {
+              "brand": "Google Chrome",
+              "version": "152.0.7977.82"
+            }
+          ],
+          "mobile": false,
+          "model": "",
+          "platform": "Windows",
+          "platformVersion": "19.0.0",
+          "uaFullVersion": "152.0.7977.82",
+          "wow64": false
+        }
+      },
+      "responses": [
+        {
+          "method": "GET",
+          "path": "/first",
+          "status": 200,
+          "bytes": [
+            0,
+            255,
+            1,
+            128,
+            47,
+            102,
+            105,
+            114,
+            115,
+            116
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/reused",
+          "status": 200,
+          "bytes": [
+            0,
+            255,
+            1,
+            128,
+            47,
+            114,
+            101,
+            117,
+            115,
+            101,
+            100
+          ]
+        },
+        {
+          "method": "PATCH",
+          "path": "/binary",
+          "status": 200,
+          "bytes": [
+            0,
+            255,
+            1,
+            128,
+            47,
+            98,
+            105,
+            110,
+            97,
+            114,
+            121
+          ]
+        },
+        {
+          "method": "HEAD",
+          "path": "/head",
+          "status": 200,
+          "bytes": []
+        }
+      ],
+      "websocket": {
+        "events": [
+          "open:probe",
+          "text:transport-echo",
+          "binary:[0,255,128,1]",
+          "text:transport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echotransport-echo",
+          "close:1000:true"
+        ],
+        "extensions": "permessage-deflate"
+      },
+      "proxy_tunnels": [
+        {
+          "request_line": "CONNECT localhost:61613 HTTP/1.1",
+          "headers": [
+            [
+              "Host",
+              " localhost:61613"
+            ],
+            [
+              "Proxy-Connection",
+              " keep-alive"
+            ],
+            [
+              "User-Agent",
+              " Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+            ]
+          ],
+          "source_port": 54318
+        },
+        {
+          "request_line": "CONNECT localhost:61613 HTTP/1.1",
+          "headers": [
+            [
+              "Host",
+              " localhost:61613"
+            ],
+            [
+              "Proxy-Connection",
+              " keep-alive"
+            ],
+            [
+              "User-Agent",
+              " Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+            ]
+          ],
+          "source_port": 51547
+        },
+        {
+          "request_line": "CONNECT localhost:61613 HTTP/1.1",
+          "headers": [
+            [
+              "Host",
+              " localhost:61613"
+            ],
+            [
+              "Proxy-Connection",
+              " keep-alive"
+            ],
+            [
+              "User-Agent",
+              " Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+            ]
+          ],
+          "source_port": 55197
+        },
+        {
+          "request_line": "CONNECT localhost:61613 HTTP/1.1",
+          "headers": [
+            [
+              "Host",
+              " localhost:61613"
+            ],
+            [
+              "Proxy-Connection",
+              " keep-alive"
+            ],
+            [
+              "User-Agent",
+              " Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
+            ]
+          ],
+          "source_port": 51129
+        }
+      ],
+      "completed": true
+    }
+  ],
+  "fixture": "transport_fixture.py: Python SSL MemoryBIO, raw ClientHello and decrypted HTTP/2 frame/HPACK capture",
+  "security": "isolated local self-signed endpoint; certificate errors explicitly ignored for this capture only",
+  "browser": {
+    "protocolVersion": "1.3",
+    "product": "Chrome/152.0.7977.82",
+    "revision": "@d04cdb24d67b081f6cf80200ffc5233f44b61109",
+    "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
+    "jsVersion": "15.2.124.21"
+  }
+}

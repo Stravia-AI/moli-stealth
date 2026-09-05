@@ -341,8 +341,8 @@ impl Default for BrowserIdentityProfile {
                 version: "152".to_owned(),
             },
             BrowserBrandVersion {
-                brand: " Not A;Brand".to_owned(),
-                version: "99".to_owned(),
+                brand: "Not?A_Brand".to_owned(),
+                version: "24".to_owned(),
             },
             BrowserBrandVersion {
                 brand: "Google Chrome".to_owned(),
@@ -355,8 +355,8 @@ impl Default for BrowserIdentityProfile {
                 version: DEFAULT_CHROME_FULL_VERSION.to_owned(),
             },
             BrowserBrandVersion {
-                brand: " Not A;Brand".to_owned(),
-                version: "99.0.0.0".to_owned(),
+                brand: "Not?A_Brand".to_owned(),
+                version: "24.0.0.0".to_owned(),
             },
             BrowserBrandVersion {
                 brand: "Google Chrome".to_owned(),
@@ -428,7 +428,7 @@ mod tests {
         assert_eq!(identity.languages(), ["en-US", "en"]);
         assert_eq!(
             identity.sec_ch_ua_value().as_deref(),
-            Some("\"Chromium\";v=\"152\", \" Not A;Brand\";v=\"99\", \"Google Chrome\";v=\"152\"")
+            Some("\"Chromium\";v=\"152\", \"Not?A_Brand\";v=\"24\", \"Google Chrome\";v=\"152\"")
         );
         assert_eq!(
             identity
@@ -436,7 +436,7 @@ mod tests {
                 .iter()
                 .map(|entry| entry.brand.as_str())
                 .collect::<Vec<_>>(),
-            ["Chromium", " Not A;Brand", "Google Chrome"]
+            ["Chromium", "Not?A_Brand", "Google Chrome"]
         );
     }
 

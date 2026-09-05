@@ -1,1716 +1,679 @@
-//! Stealth HTTP client with Chrome TLS/HTTP2 fingerprint impersonation.
+//! Moli-owned asynchronous HTTP transport.
 //!
-//! Built directly on tokio TCP + boring2 (BoringSSL) + http2 crate, replacing wreq.
-//! Uses quinn+h3 for HTTP/3 (QUIC) with automatic Alt-Svc discovery and fallback.
+//! The low-level TLS and HTTP fingerprint implementation is derived from
+//! BrowserOxide (upstream revision recorded in Cargo metadata). Browser policy,
+//! cookies, redirects, caching, and identity intentionally live above this seam.
 
-pub mod alt_svc;
-pub mod blocker;
-pub mod compression;
-pub mod cookies;
-pub mod csp;
-pub mod error;
-pub mod h1_client;
-pub mod h2_client;
-pub mod h3_request;
-pub mod headers;
-pub mod pool;
-pub mod proxy;
-pub mod quic;
-pub mod tcp;
-pub mod tls;
+pub(crate) mod error;
+pub(crate) mod h1_client;
+pub(crate) mod h2_client;
+pub(crate) mod pool;
+pub(crate) mod proxy;
+pub(crate) mod tcp;
+pub(crate) mod tls;
 
-use crate::stealth::StealthProfile;
-use alt_svc::AltSvcCache;
-use boring2::ssl::SslConnector;
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+    sync::Arc,
+};
+
 use bytes::Bytes;
-use cookies::CookieJar;
-use error::NetError;
-use http2::client::SendRequest;
-use pool::ConnectionPool;
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-use tokio::sync::Mutex;
-use url::Url;
 
-#[derive(Debug, Clone)]
-pub enum Method {
-    Get,
-    Post(Vec<u8>),
+use self::{
+    h1_client::{BodyFraming, H1Body},
+    h2_client::H2Body,
+    pool::{ConnectionPool, OriginKey, PooledH1, PooledH2},
+};
+use crate::{
+    AuthSession, ConnectionOptions, TransportAuth, TransportError, TransportFingerprint,
+    connection::{open_connection, proxy_url},
+};
+
+pub use tls::TlsSessionCache;
+
+const MAX_AUTH_EXCHANGES: usize = 8;
+
+#[derive(Clone, Debug)]
+pub struct TransportConfig {
+    pub fingerprint: TransportFingerprint,
+    pub tls_verify: bool,
+    pub max_connections: Option<usize>,
+    pub max_host_connections: Option<usize>,
+    pub max_h2_streams: Option<usize>,
 }
 
-/// HTTP response.
-#[derive(Debug, Clone, Default)]
-pub struct TimingStats {
-    pub dns_start_ms: f64,
-    pub dns_end_ms: f64,
-    pub connect_start_ms: f64,
-    pub connect_end_ms: f64,
-    pub tls_start_ms: f64,
-    pub tls_end_ms: f64,
-    pub request_start_ms: f64,
-    pub response_start_ms: f64,
-    pub response_end_ms: f64,
-}
-
-pub struct Response {
-    pub status: u16,
-    pub status_text: String,
-    pub headers: HashMap<String, String>,
-    /// All Set-Cookie header values, preserved separately because HTTP responses
-    /// can contain multiple Set-Cookie headers and a HashMap would collapse them.
-    pub set_cookies: Vec<String>,
-    pub body: Vec<u8>,
-    pub url: String,
-    /// Whether this response taught the client Accept-CH for the first time.
-    /// Drives reloads in the navigation loop (Wildberries parity).
-    pub accept_ch_upgrade: bool,
-    pub timings: TimingStats,
-}
-
-impl Response {
-    pub fn text(&self) -> String {
-        String::from_utf8_lossy(&self.body).to_string()
-    }
-
-    pub fn ok(&self) -> bool {
-        self.status >= 200 && self.status < 300
-    }
-}
-
-/// Stealth HTTP client configured with a browser fingerprint profile.
-/// Supports HTTP/1.1, HTTP/2 (via boring2/http2) and HTTP/3 (via quinn/rustls).
-/// Pool for QUIC connections, keyed by (host, port).
-struct QuicPool {
-    inner: Arc<Mutex<HashMap<(String, u16), quinn::Connection>>>,
-}
-
-impl Clone for QuicPool {
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-        }
-    }
-}
-
-impl Default for QuicPool {
+impl Default for TransportConfig {
     fn default() -> Self {
         Self {
-            inner: Arc::new(Mutex::new(HashMap::new())),
+            fingerprint: TransportFingerprint::default(),
+            tls_verify: true,
+            max_connections: None,
+            max_host_connections: None,
+            max_h2_streams: None,
         }
     }
 }
 
-impl QuicPool {
-    async fn get(&self, host: &str, port: u16) -> Option<quinn::Connection> {
-        let pool = self.inner.lock().await;
-        let key = (host.to_string(), port);
-        pool.get(&key).cloned()
-    }
-
-    async fn put(&self, host: &str, port: u16, conn: quinn::Connection) {
-        let mut pool = self.inner.lock().await;
-        pool.insert((host.to_string(), port), conn);
-    }
+#[derive(Clone, Debug)]
+pub struct TransportRequest {
+    pub url: url::Url,
+    pub method: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Option<Vec<u8>>,
+    pub connection: ConnectionOptions,
+    pub auth: Option<TransportAuth>,
+    pub http1_only: bool,
+    /// 请求优先级事实；显式进程传输参数优先于该提示。
+    pub h2_priority: Option<crate::H2HeadersPriority>,
+    pub observer: Option<Arc<dyn crate::TransportObserver>>,
 }
 
-/// Process-wide shared browser-session state. One cookie jar, one DNS
-/// cache, one Alt-Svc cache, one Accept-CH origin set — shared across
-/// every [`HttpClient`] built via [`HttpClient::shared`]. This mimics
-/// a real user with one persistent browser profile across all tabs.
-///
-/// Without shared state, sites that fingerprint on "browsing history"
-/// (amazon, yandex, homedepot, leboncoin, quora, adidas, …) flag a
-/// fresh cold-jar client as a bot on first visit and serve a stub or
-/// challenge page. Measured 2026-05-23 same-IP A/B: 8 sites flip
-/// pass↔fail depending on whether the cookie jar carries history
-/// from prior navigations.
-#[derive(Clone)]
-pub struct SharedSession {
-    pub cookies: Arc<Mutex<CookieJar>>,
-    pub accept_ch: Arc<Mutex<HashSet<String>>>,
-    pub dns: tcp::DnsCache,
-    pub alt_svc: AltSvcCache,
-}
-
-static SHARED_SESSION: std::sync::OnceLock<SharedSession> = std::sync::OnceLock::new();
-
-/// Get (lazily initialize) the process-wide shared session. The cookie
-/// jar can be seeded from disk via `BROWSER_OXIDE_COOKIE_JAR=<path>` (same env
-/// var the legacy per-client `HttpClient::new` honors). Otherwise the
-/// jar starts empty and grows as navigations execute.
-pub fn shared_session() -> SharedSession {
-    SHARED_SESSION
-        .get_or_init(|| {
-            let initial_jar = if let Ok(path) = std::env::var("BROWSER_OXIDE_COOKIE_JAR") {
-                match CookieJar::load_from_file(&std::path::PathBuf::from(&path)) {
-                    Ok(j) => {
-                        eprintln!(
-                            "[cookies] shared session loaded persisted jar from {}",
-                            path
-                        );
-                        j
-                    }
-                    Err(e) => {
-                        eprintln!(
-                            "[cookies] shared session: failed to load {}: {} (starting fresh)",
-                            path, e
-                        );
-                        CookieJar::new()
-                    }
-                }
-            } else {
-                CookieJar::new()
-            };
-            SharedSession {
-                cookies: Arc::new(Mutex::new(initial_jar)),
-                accept_ch: Arc::new(Mutex::new(HashSet::new())),
-                dns: tcp::DnsCache::new(),
-                alt_svc: AltSvcCache::new(),
-            }
-        })
-        .clone()
-}
-
-/// Synchronously write a `document.cookie`-style raw cookie string into the
-/// process-wide shared-session jar.
-///
-/// The nav loop's reload/refetch reads cookies from a `shared()` client (the
-/// global session jar), but a `document.cookie` write from JS lands in the
-/// per-thread `FETCH_CLIENT`, which can diverge from the global jar — so the
-/// token a challenge deposits via `document.cookie` (e.g. AWS-WAF
-/// `aws-waf-token`) never reached the reload. Writing here too guarantees the
-/// session jar (and thus the reload GET) sees it. Honors deletions via
-/// [`CookieJar::set_cookies`]. No-op under `BROWSER_OXIDE_NO_SHARED_SESSION`.
-/// Uses `try_lock` (the jar is never held across an await during synchronous
-/// JS execution); returns `false` only under genuine contention.
-pub fn set_shared_cookie_sync(url: &Url, raw: &str) -> bool {
-    if std::env::var("BROWSER_OXIDE_NO_SHARED_SESSION").is_ok() {
-        return false;
-    }
-    let cookies = shared_session().cookies;
-    match cookies.try_lock() {
-        Ok(mut jar) => {
-            jar.set_cookies(url, &[raw.to_string()]);
-            true
+impl TransportRequest {
+    pub fn new(url: url::Url, method: impl Into<String>) -> Self {
+        Self {
+            url,
+            method: method.into(),
+            headers: Vec::new(),
+            body: None,
+            connection: ConnectionOptions::default(),
+            auth: None,
+            http1_only: false,
+            h2_priority: None,
+            observer: None,
         }
-        Err(_) => false,
+    }
+}
+
+pub struct TransportResponse {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub version: http::Version,
+    pub body: ResponseBody,
+    pub sent_headers: Vec<(String, String)>,
+}
+
+pub struct ResponseBody {
+    inner: BodyInner,
+}
+
+enum BodyInner {
+    Empty,
+    H1(H1Body),
+    H2(H2Body),
+}
+
+impl ResponseBody {
+    pub async fn chunk(&mut self) -> Result<Option<Bytes>, TransportError> {
+        match &mut self.inner {
+            BodyInner::Empty => Ok(None),
+            BodyInner::H1(body) => body.chunk().await,
+            BodyInner::H2(body) => body.chunk().await,
+        }
     }
 }
 
 #[derive(Clone)]
-pub struct HttpClient {
-    tls_connector: Arc<SslConnector>,
-    profile: StealthProfile,
-    cookies: Arc<Mutex<CookieJar>>,
+pub struct Transport {
+    inner: Arc<TransportInner>,
+}
+
+struct TransportInner {
+    config: TransportConfig,
     pool: ConnectionPool,
-    quic_pool: QuicPool,
-    dns_cache: tcp::DnsCache,
-    quic_client: Option<quic::QuicClient>,
-    alt_svc_cache: AltSvcCache,
-    /// Origins that have sent `Accept-CH` in a response. When an origin is
-    /// present, subsequent requests to it use `chrome_headers_with_accept_ch()`
-    /// which adds the full set of high-entropy Client Hints. Mirrors Chrome's
-    /// behaviour: baseline 13 headers on first visit, full hints after opt-in.
-    accept_ch_origins: Arc<Mutex<HashSet<String>>>,
-    /// Hosts whose TLS ALPN negotiated `http/1.1` instead of `h2`. The h2
-    /// connect attempt to such a host always fails the ALPN check and we then
-    /// open a *second* TLS connection for the h1 fallback — so remember h1-only
-    /// hosts (some CDNs / challenge endpoints serve h1 only) and skip the doomed
-    /// h2 attempt on subsequent requests, halving the per-request handshake cost
-    /// when a page makes many requests to such a host.
-    h1_only_hosts: Arc<Mutex<HashSet<String>>>,
-    /// Resolved proxy config. `BROWSER_OXIDE_PROXY` env var overrides
-    /// `profile.proxy`. None = direct connect (the existing path). T1C.
-    proxy: Option<proxy::ProxyConfig>,
+    tls_session_cache: TlsSessionCache,
 }
 
-impl HttpClient {
-    /// Borrow this client's stealth profile (read-only). Useful for
-    /// callers that need to spawn auxiliary clients with the same UA /
-    /// locale / TLS profile (e.g., the sync-fetch op which builds a
-    /// fresh client to avoid a connection-pool deadlock with the main
-    /// runtime).
-    pub fn profile(&self) -> &StealthProfile {
-        &self.profile
+impl Transport {
+    pub fn new(config: TransportConfig) -> Result<Self, TransportError> {
+        config.fingerprint.validate()?;
+        if matches!(config.max_h2_streams, Some(0)) {
+            return Err(TransportError::InvalidInput(
+                "max_h2_streams must be greater than zero".into(),
+            ));
+        }
+        let pool = ConnectionPool::new(config.max_connections, config.max_host_connections)?;
+        Ok(Self {
+            inner: Arc::new(TransportInner {
+                config,
+                pool,
+                tls_session_cache: TlsSessionCache::new(),
+            }),
+        })
     }
 
-    pub fn cookies(&self) -> Arc<Mutex<CookieJar>> {
-        self.cookies.clone()
+    /// Returns the context-scoped TLS state owned by this transport.
+    #[must_use]
+    pub fn tls_session_cache(&self) -> TlsSessionCache {
+        self.inner.tls_session_cache.clone()
     }
 
-    pub fn accept_ch_origins(&self) -> Arc<Mutex<HashSet<String>>> {
-        self.accept_ch_origins.clone()
-    }
-
-    pub fn dns_cache(&self) -> tcp::DnsCache {
-        self.dns_cache.clone()
-    }
-
-    pub fn alt_svc_cache(&self) -> AltSvcCache {
-        self.alt_svc_cache.clone()
-    }
-
-    /// Connect TCP and apply profile-specific TCP fingerprinting (TTL).
-    pub(crate) async fn connect_tcp(
+    /// Executes one approved request and resolves as soon as final response
+    /// headers arrive. Dropping this future cancels in-flight connection/send
+    /// work; dropping the returned body releases the corresponding H1
+    /// connection or H2 stream without terminating sibling H2 streams.
+    /// A stale pooled H1 connection is replaced at most once, and only for a
+    /// safe request without a body before a response has been exposed.
+    pub async fn execute(
         &self,
-        host: &str,
-        port: u16,
-    ) -> Result<tokio::net::TcpStream, NetError> {
-        let tcp_stream = tcp::connect_via_proxy(
-            host,
-            port,
-            std::time::Duration::from_secs(10),
-            Some(&self.dns_cache),
-            self.proxy.as_ref(),
+        mut request: TransportRequest,
+    ) -> Result<TransportResponse, TransportError> {
+        validate_request(&request)?;
+        if request.connection.tls_session_cache.is_none() {
+            request.connection.tls_session_cache = Some(self.tls_session_cache());
+        }
+        request
+            .headers
+            .retain(|(name, _)| !name.eq_ignore_ascii_case("proxy-authorization"));
+        let host = request.url.host_str().expect("validated host").to_owned();
+        let request_target = request_target(&request.url);
+        let mut auth_session = request
+            .auth
+            .as_ref()
+            .map(|auth| AuthSession::new(auth, &host))
+            .transpose()?;
+        if matches!(
+            request.auth.as_ref().map(|auth| auth.scheme),
+            Some(crate::AuthScheme::Negotiate | crate::AuthScheme::Ntlm)
+        ) {
+            request.http1_only = true;
+        }
+        if matches!(
+            request.auth.as_ref().map(|auth| auth.scheme),
+            Some(crate::AuthScheme::Basic)
+        ) && !request
+            .headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+            && let Some(value) = auth_session
+                .as_mut()
+                .expect("Basic auth initialized")
+                .authorization(None, &request.method, &request_target)?
+        {
+            set_header(&mut request.headers, "authorization", value);
+        }
+
+        let selected_proxy = proxy_url(&request.url, &request.connection)?;
+        let selected_proxy_config = selected_proxy
+            .as_ref()
+            .map(proxy::ProxyConfig::parse)
+            .transpose()?;
+        let is_forward_proxy = request.url.scheme() == "http"
+            && selected_proxy_config
+                .as_ref()
+                .is_some_and(|config| config.kind() == proxy::ProxyKind::Http);
+        let selected_proxy_auth = request
+            .connection
+            .proxy_auth
+            .clone()
+            .or_else(|| selected_proxy_config.as_ref()?.url_auth().cloned());
+        let mut proxy_session = match (&selected_proxy_auth, selected_proxy.as_ref()) {
+            (Some(auth), Some(proxy)) if is_forward_proxy => Some(AuthSession::new(
+                auth,
+                proxy
+                    .host_str()
+                    .ok_or_else(|| TransportError::InvalidInput("proxy URL has no host".into()))?,
+            )?),
+            _ => None,
+        };
+        let mut proxy_authorization = request
+            .connection
+            .proxy_bearer_token
+            .as_ref()
+            .map(|token| format!("Bearer {token}"));
+        if is_forward_proxy
+            && proxy_authorization.is_none()
+            && matches!(
+                selected_proxy_auth.as_ref().map(|auth| auth.scheme),
+                Some(crate::AuthScheme::Basic)
+            )
+        {
+            proxy_authorization = proxy_session
+                .as_mut()
+                .expect("Basic proxy auth initialized")
+                .authorization(None, &request.method, request.url.as_str())?;
+        }
+
+        let key = origin_key(&request)?;
+        let mut retained_h1 = None;
+        for exchange in 0..MAX_AUTH_EXCHANGES {
+            let request_body = if auth_session.is_some() || proxy_session.is_some() {
+                request.body.clone()
+            } else {
+                request.body.take()
+            };
+            let result = self
+                .execute_once(
+                    &request,
+                    &key,
+                    retained_h1.take(),
+                    request_body,
+                    proxy_authorization.as_deref(),
+                )
+                .await?;
+            if result.status() == 401
+                && let Some(session) = auth_session.as_mut()
+            {
+                let Some(challenge) = crate::auth::select_challenge(
+                    result.headers(),
+                    request.auth.as_ref().expect("session requires auth").scheme,
+                    "www-authenticate",
+                ) else {
+                    return Ok(result.into_public());
+                };
+                if exchange + 1 == MAX_AUTH_EXCHANGES {
+                    return Ok(result.into_public());
+                }
+                let Some(authorization) =
+                    session.authorization(Some(challenge), &request.method, &request_target)?
+                else {
+                    return Ok(result.into_public());
+                };
+                set_header(&mut request.headers, "authorization", authorization);
+                retained_h1 = result.prepare_retry().await?;
+                continue;
+            }
+            if result.status() == 407
+                && is_forward_proxy
+                && request.connection.proxy_bearer_token.is_none()
+                && let Some(session) = proxy_session.as_mut()
+            {
+                let Some(challenge) = crate::auth::select_challenge(
+                    result.headers(),
+                    selected_proxy_auth
+                        .as_ref()
+                        .expect("session requires proxy auth")
+                        .scheme,
+                    "proxy-authenticate",
+                ) else {
+                    return Ok(result.into_public());
+                };
+                if exchange + 1 == MAX_AUTH_EXCHANGES {
+                    return Ok(result.into_public());
+                }
+                let Some(authorization) = session.authorization(
+                    Some(challenge),
+                    &request.method,
+                    request.url.as_str(),
+                )?
+                else {
+                    return Ok(result.into_public());
+                };
+                proxy_authorization = Some(authorization);
+                retained_h1 = result.prepare_retry().await?;
+                continue;
+            }
+            return Ok(result.into_public());
+        }
+        unreachable!("bounded authentication loop returns")
+    }
+
+    async fn execute_once(
+        &self,
+        request: &TransportRequest,
+        key: &OriginKey,
+        retained_h1: Option<PooledH1>,
+        body: Option<Vec<u8>>,
+        proxy_authorization: Option<&str>,
+    ) -> Result<ExchangeResponse, TransportError> {
+        if let Some(connection) = retained_h1 {
+            return self
+                .execute_h1(
+                    request,
+                    key.clone(),
+                    connection,
+                    body.as_deref(),
+                    proxy_authorization,
+                )
+                .await;
+        }
+
+        if !request.http1_only
+            && let Some(connection) = self.inner.pool.get_h2(key).await
+        {
+            return self
+                .execute_h2(request, key.clone(), connection, body)
+                .await;
+        }
+
+        if let Some(connection) = self.inner.pool.take_h1(key).await {
+            let result = self
+                .execute_h1(
+                    request,
+                    key.clone(),
+                    connection,
+                    body.as_deref(),
+                    proxy_authorization,
+                )
+                .await;
+            match result {
+                Err(error)
+                    if body.is_none()
+                        && matches!(
+                            request.method.as_str(),
+                            "GET" | "HEAD" | "OPTIONS" | "TRACE"
+                        )
+                        && is_stale_http1_error(&error) => {}
+                result => return result,
+            }
+        }
+
+        let h2_connection_gate = if request.http1_only {
+            None
+        } else {
+            let gate = self.inner.pool.acquire_h2_connection_gate(key).await?;
+            if let Some(connection) = self.inner.pool.get_h2(key).await {
+                drop(gate);
+                return self
+                    .execute_h2(request, key.clone(), connection, body)
+                    .await;
+            }
+            Some(gate)
+        };
+
+        let host = request.url.host_str().expect("validated host");
+        let permits = self.inner.pool.acquire(host).await?;
+        let connected = open_connection(
+            &request.url,
+            &request.connection,
+            &self.inner.config.fingerprint,
+            self.inner.config.tls_verify,
+            request.http1_only,
+            false,
         )
         .await?;
 
-        // Set TCP TTL to match claimed OS (Linux=64, Windows=128, macOS=64)
-        // Advanced anti-bot systems check TCP SYN TTL vs User-Agent. Gap #8.
-        let ttl = match self.profile.os_name.as_str() {
-            "Windows" => 128,
-            _ => 64,
-        };
-        let _ = tcp_stream.set_ttl(ttl);
-
-        Ok(tcp_stream)
-    }
-
-    /// Create a new client with the given stealth profile.
-    pub fn new(profile: &StealthProfile) -> Result<Self, NetError> {
-        let connector = tls::chrome_connector(profile)?;
-        // Create QUIC client for HTTP/3 (non-fatal if it fails)
-        let quic_client = quic::QuicClient::new().ok();
-
-        // Optionally load a persisted cookie jar so per-origin trust
-        // accumulates across runs. Set BROWSER_OXIDE_COOKIE_JAR to the desired
-        // file path. Without this env var, behavior is the same as before
-        // (fresh in-memory jar each run).
-        let initial_jar = if let Ok(path) = std::env::var("BROWSER_OXIDE_COOKIE_JAR") {
-            let p = std::path::PathBuf::from(&path);
-            match CookieJar::load_from_file(&p) {
-                Ok(jar) => {
-                    eprintln!("[cookies] loaded persisted jar from {}", path);
-                    jar
-                }
-                Err(e) => {
-                    eprintln!("[cookies] failed to load {}: {} (starting fresh)", path, e);
-                    CookieJar::new()
-                }
-            }
+        if connected.version == http::Version::HTTP_2 && !request.http1_only {
+            let (sender, driver) =
+                h2_client::handshake(connected.stream, &self.inner.config.fingerprint).await?;
+            tokio::spawn(async move {
+                let _permits = permits;
+                let _ = driver.await;
+            });
+            let connection = self
+                .inner
+                .pool
+                .new_h2_connection(sender, self.inner.config.max_h2_streams);
+            self.inner
+                .pool
+                .put_h2(key.clone(), connection.clone())
+                .await;
+            drop(h2_connection_gate);
+            self.execute_h2(request, key.clone(), connection, body)
+                .await
+        } else if matches!(
+            connected.version,
+            http::Version::HTTP_10 | http::Version::HTTP_11
+        ) {
+            drop(h2_connection_gate);
+            self.execute_h1(
+                request,
+                key.clone(),
+                PooledH1 {
+                    connected,
+                    _permits: permits,
+                },
+                body.as_deref(),
+                proxy_authorization,
+            )
+            .await
         } else {
-            CookieJar::new()
-        };
-
-        Ok(Self {
-            tls_connector: Arc::new(connector),
-            profile: profile.clone(),
-            cookies: Arc::new(Mutex::new(initial_jar)),
-            pool: ConnectionPool::new(),
-            quic_pool: QuicPool::default(),
-            dns_cache: tcp::DnsCache::new(),
-            quic_client,
-            alt_svc_cache: AltSvcCache::new(),
-            accept_ch_origins: Arc::new(Mutex::new(HashSet::new())),
-            h1_only_hosts: Arc::new(Mutex::new(HashSet::new())),
-            // Resolve proxy: BROWSER_OXIDE_PROXY env override, then profile.proxy.
-            // Bad proxy URLs are non-fatal — log and continue without proxy.
-            proxy: match proxy::ProxyConfig::resolve(profile.proxy.as_deref()) {
-                Ok(p) => {
-                    if let Some(ref pc) = p {
-                        eprintln!(
-                            "[proxy] active: scheme={}",
-                            match pc {
-                                proxy::ProxyConfig::Http { tls: true, .. } => "https",
-                                proxy::ProxyConfig::Http { tls: false, .. } => "http",
-                                proxy::ProxyConfig::Socks5 { .. } => "socks5",
-                            }
-                        );
-                    }
-                    p
-                }
-                Err(e) => {
-                    eprintln!("[proxy] WARN: failed to parse proxy URL: {e} (running direct)");
-                    None
-                }
-            },
-        })
-    }
-
-    /// Build a client that participates in the process-wide
-    /// [`SharedSession`] — cookies, DNS cache, Accept-CH origins, and
-    /// Alt-Svc cache all persist across navigations.
-    ///
-    /// This is the production / benchmarking model: one user, one
-    /// cookie jar, accumulating browsing history across page loads.
-    /// Real browsers do this; without it, sites like amazon / yandex /
-    /// homedepot / leboncoin / quora / adidas flag a fresh no-cookie
-    /// client as a bot and serve a stub or a challenge page.
-    ///
-    /// The shared session is lazily initialized on first call. A
-    /// `BROWSER_OXIDE_COOKIE_JAR=<path>` env var seeds the cookie jar from a
-    /// previously-persisted file (preserved from the legacy `new()`
-    /// path).
-    pub fn shared(profile: &StealthProfile) -> Result<Self, NetError> {
-        // A/B toggles for the SharedSession-bleed hypothesis on x-com
-        // (THIN-BODY 69 mid-sweep, L3-RENDERED 274KB in isolation):
-        //   BROWSER_OXIDE_NO_SHARED_SESSION=1     — fully isolated client
-        //   BROWSER_OXIDE_NO_SHARED_COOKIES=1     — isolated cookies, shared accept_ch
-        //   BROWSER_OXIDE_NO_SHARED_ACCEPT_CH=1   — shared cookies, isolated accept_ch
-        if std::env::var("BROWSER_OXIDE_NO_SHARED_SESSION").is_ok() {
-            return Self::new(profile);
+            Err(TransportError::InvalidInput(format!(
+                "connector negotiated unsupported protocol {:?}",
+                connected.version
+            )))
         }
-        let s = shared_session();
-        let cookies = if std::env::var("BROWSER_OXIDE_NO_SHARED_COOKIES").is_ok() {
-            Arc::new(Mutex::new(CookieJar::new()))
-        } else {
-            s.cookies
-        };
-        let accept_ch = if std::env::var("BROWSER_OXIDE_NO_SHARED_ACCEPT_CH").is_ok() {
-            Arc::new(Mutex::new(HashSet::new()))
-        } else {
-            s.accept_ch
-        };
-        // Share the cookie jar and the Accept-CH origin set, but keep
-        // DNS cache and Alt-Svc cache per-client. Real browsers share
-        // cookies and Client-Hints opt-ins across tabs but DNS / Alt-Svc
-        // are connection-level state that can leak per-IP routing across
-        // unrelated origins (a challenge vendor flagged leboncoin when a shared
-        // Alt-Svc cache routed us to a previously-throttled CDN node).
-        Self::new_with_shared_state(
-            profile,
-            cookies,
-            accept_ch,
-            tcp::DnsCache::new(),
-            AltSvcCache::new(),
+    }
+
+    async fn execute_h2(
+        &self,
+        request: &TransportRequest,
+        key: OriginKey,
+        connection: PooledH2,
+        body: Option<Vec<u8>>,
+    ) -> Result<ExchangeResponse, TransportError> {
+        let stream_permit = connection.acquire_stream().await?;
+        let priority = self
+            .inner
+            .config
+            .fingerprint
+            .h2
+            .headers_priority
+            .or(request.h2_priority)
+            .or_else(|| {
+                (self.inner.config.fingerprint.preset == crate::FingerprintPreset::Chrome152)
+                    .then_some(crate::H2HeadersPriority {
+                        stream_dependency: 0,
+                        weight: 255,
+                        exclusive: true,
+                    })
+            });
+        match h2_client::send_request(
+            connection.sender.clone(),
+            request,
+            body,
+            stream_permit,
+            priority,
         )
-    }
-
-    /// Create a new client that shares session state (cookies, DNS/H3
-    /// caches, Accept-CH origins) with an existing one, but has its own
-    /// connection pool to avoid deadlocks in synchronous contexts.
-    pub fn new_with_shared_state(
-        profile: &StealthProfile,
-        cookies: Arc<Mutex<CookieJar>>,
-        accept_ch: Arc<Mutex<HashSet<String>>>,
-        dns: tcp::DnsCache,
-        alt_svc: AltSvcCache,
-    ) -> Result<Self, NetError> {
-        let connector = tls::chrome_connector(profile)?;
-        let quic_client = quic::QuicClient::new().ok();
-
-        Ok(Self {
-            tls_connector: Arc::new(connector),
-            profile: profile.clone(),
-            cookies,
-            pool: ConnectionPool::new(),
-            quic_pool: QuicPool::default(),
-            dns_cache: dns,
-            quic_client,
-            alt_svc_cache: alt_svc,
-            accept_ch_origins: accept_ch,
-            h1_only_hosts: Arc::new(Mutex::new(HashSet::new())),
-            proxy: proxy::ProxyConfig::resolve(profile.proxy.as_deref()).unwrap_or_default(),
-        })
-    }
-
-    /// Record that `host` has advertised `Accept-CH` so subsequent requests
-    /// include the full high-entropy Client Hints set. Returns `true`
-    /// if this is a new origin for which we just learned Accept-CH.
-    async fn learn_accept_ch(&self, host: &str, headers: &HashMap<String, String>) -> bool {
-        if headers.keys().any(|k| {
-            let k = k.to_ascii_lowercase();
-            k == "accept-ch" || k == "critical-ch"
-        }) {
-            let mut origins = self.accept_ch_origins.lock().await;
-            if !origins.contains(host) {
-                origins.insert(host.to_string());
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Per W3 Client Hints Reliability spec
-    /// (https://wicg.github.io/client-hints-infrastructure/#critical-ch),
-    /// when a server sends `Critical-CH`, the browser MUST retry the
-    /// request with the listed hints BEFORE rendering the response.
-    /// Without this retry, the server treats the client as non-conformant
-    /// (one challenge vendor serves the captcha; another
-    /// returns 403; a third downgrades the response).
-    fn needs_critical_ch_retry(headers: &HashMap<String, String>) -> bool {
-        headers
-            .keys()
-            .any(|k| k.eq_ignore_ascii_case("critical-ch"))
-    }
-
-    /// Return `true` if `host` has previously sent `Accept-CH`.
-    pub async fn has_accept_ch(&self, host: &str) -> bool {
-        self.accept_ch_origins.lock().await.contains(host)
-    }
-
-    /// Fetch the challenge vendor's `/mfc` endpoint for `host` if we have a
-    /// session with a known tenant prefix and don't yet have an fc token.
-    /// On success, stores `x-kpsdk-fc` from the response in the session.
-    /// Previously raced the page's ips.js by fetching /mfc from Rust with a
-    /// hardcoded `x-kpsdk-dt` literal. That token is per-session and derived
-    /// inside the ips.js VM; hardcoding it caused the vendor to refuse to issue
-    /// `x-kpsdk-fc` (and exposed an obvious bot signature: every session
-    /// presented the same dt value).
-    ///
-    /// The page's own ips.js fetches /mfc with the correct session-derived
-    /// headers via window.fetch(), and our `learn_from_headers` already
-    /// extracts `x-kpsdk-fc` from any response that carries it. So the right
-    /// behaviour is to do nothing here — let the page run.
-    /// Try HTTP/3 for an HTTPS URL. Returns Ok if successful, Err to fall back.
-    async fn try_h3_request(
-        &self,
-        url: &str,
-        method: Method,
-        extra_headers: &[(String, String)],
-    ) -> Result<Response, NetError> {
-        // Belt-and-suspenders: even if something populates the cache, never
-        // emit a QUIC handshake when allow_http3=false. See learn_alt_svc()
-        // for the full rationale.
-        if !self.profile.allow_http3 {
-            return Err(NetError::Quic("h3 disabled by profile".into()));
-        }
-        let parsed = Url::parse(url).map_err(|e| NetError::Quic(e.to_string()))?;
-        if parsed.scheme() != "https" {
-            return Err(NetError::Quic("not HTTPS".into()));
-        }
-
-        let host = parsed
-            .host_str()
-            .ok_or_else(|| NetError::Quic("no host".into()))?;
-        let cached_port = self.alt_svc_cache.lookup(host).await;
-        let port = cached_port.ok_or_else(|| NetError::Quic("not in alt-svc cache".into()))?;
-
-        let quic = self
-            .quic_client
-            .as_ref()
-            .ok_or_else(|| NetError::Quic("no quic client".into()))?;
-
-        // Try pooled connection first, then create new
-        let conn = if let Some(conn) = self.quic_pool.get(host, port).await {
-            conn
-        } else {
-            let conn =
-                tokio::time::timeout(std::time::Duration::from_secs(3), quic.connect(host, port))
-                    .await
-                    .map_err(|_| NetError::Quic("connect timeout".into()))?
-                    .map_err(|e| NetError::Quic(e.to_string()))?;
-            self.quic_pool.put(host, port, conn.clone()).await;
-            conn
-        };
-
-        let (resp, alt_svc) =
-            h3_request::h3_request(conn, &parsed, method, &self.profile, extra_headers).await?;
-
-        // Update cache from response
-        if let Some(alt_svc_header) = &alt_svc
-            && let Some((port, max_age)) = alt_svc::parse_alt_svc(alt_svc_header)
+        .await
         {
-            self.alt_svc_cache.insert(host, port, max_age).await;
-        }
-
-        Ok(resp)
-    }
-
-    /// Learn h3 support from a response's Alt-Svc header.
-    ///
-    /// When `profile.allow_http3 = false` (the default)
-    /// we DO NOT cache the h3 alternative. Reason: vanilla `quinn-proto 0.11`
-    /// emits transport_parameters in a *random* order with a *random* GREASE
-    /// TP per handshake. Real Chrome uses a deterministic fixed order — so
-    /// upgrading to QUIC with our current stack would emit a uniquely-
-    /// distinguishable browser_oxide signature. Until we vendor-fork
-    /// quinn-proto with a Chrome-fixed-order patch, advertising h3 is worse
-    /// than not speaking it at all.
-    async fn learn_alt_svc(&self, url: &str, resp_headers: &HashMap<String, String>) {
-        if !self.profile.allow_http3 {
-            return;
-        }
-        if let Some(alt_svc_header) = resp_headers.get("alt-svc")
-            && let Some((port, max_age)) = alt_svc::parse_alt_svc(alt_svc_header)
-            && let Ok(parsed) = Url::parse(url)
-            && let Some(host) = parsed.host_str()
-        {
-            self.alt_svc_cache.insert(host, port, max_age).await;
-        }
-    }
-
-    /// Inject cookies from external sources (e.g., JS document.cookie).
-    pub async fn inject_cookies(&self, url: &Url, cookies: &[String]) {
-        let mut jar = self.cookies.lock().await;
-        jar.set_cookies(url, cookies);
-    }
-
-    /// Connect TCP+TLS and perform HTTP/2 handshake, returning a sender.
-    /// Also spawns the connection driver task.
-    async fn connect_h2(&self, host: &str, port: u16) -> Result<SendRequest<Bytes>, NetError> {
-        let tcp_stream = self.connect_tcp(host, port).await?;
-
-        let tls_stream =
-            tls::connect_tls(&self.tls_connector, &self.profile, host, tcp_stream).await?;
-
-        // Check ALPN
-        let alpn = tls::negotiated_alpn(&tls_stream);
-        if alpn != Some(b"h2") {
-            // HTTP/1.1 fallback — the caller's request method opens its own h1
-            // connection on this error. Remember the host so future requests
-            // skip the doomed h2 attempt (and its wasted TLS handshake).
-            self.h1_only_hosts.lock().await.insert(host.to_string());
-            return Err(NetError::Http("ALPN negotiated http/1.1, not h2".into()));
-        }
-
-        let (sender, conn) = h2_client::handshake(tls_stream, &self.profile).await?;
-
-        // Spawn the connection driver
-        tokio::spawn(async move {
-            if let Err(e) = conn.await {
-                eprintln!("HTTP/2 connection error: {e}");
-            }
-        });
-
-        // Store in pool for reuse
-        self.pool.put(host, port, sender.clone()).await;
-
-        Ok(sender)
-    }
-
-    /// Pre-establish a TCP+TLS+HTTP/2 connection to a host.
-    /// The connection is stored in the pool for future requests.
-    pub async fn preconnect(&self, host: &str, port: u16) -> Result<(), NetError> {
-        if self.pool.get(host, port).await.is_some() {
-            return Ok(());
-        }
-        self.connect_h2(host, port).await?;
-        Ok(())
-    }
-
-    /// Get or create an HTTP/2 sender for the given host.
-    async fn get_sender(&self, host: &str, port: u16) -> Result<SendRequest<Bytes>, NetError> {
-        // Check pool first
-        if let Some(sender) = self.pool.get(host, port).await {
-            self.pool.touch(host, port).await;
-            return Ok(sender);
-        }
-        // Known h1-only host: skip the doomed h2 connect (which would do a full
-        // TLS handshake only to fail the ALPN check). Fail fast so the caller
-        // goes straight to its h1 fallback path.
-        if self.h1_only_hosts.lock().await.contains(host) {
-            return Err(NetError::Http("host is http/1.1 only (cached)".into()));
-        }
-        // Create new connection
-        self.connect_h2(host, port).await
-    }
-
-    /// Perform a GET request. Tries HTTP/3 if available, falls back to HTTP/2.
-    pub async fn get(&self, url: &str) -> Result<Response, NetError> {
-        self.get_with_headers(url, &[]).await
-    }
-
-    /// Fetch-API-style GET: uses `chrome_headers_fetch` (accept: */*, no
-    /// upgrade-insecure-requests, sec-fetch-dest: empty, etc.) as the base
-    /// header set, with caller's extras merged in. `origin` is the page's
-    /// origin string (e.g. `"https://www.example.com"`); if `None`, the
-    /// request looks like it came from a `no-origin` context (first navigation).
-    pub async fn fetch_get(
-        &self,
-        url: &str,
-        extra_headers: &[(String, String)],
-        origin: Option<&str>,
-    ) -> Result<Response, NetError> {
-        let mut hdrs = headers::nav_headers_fetch(&self.profile, url, origin);
-        merge_headers(&mut hdrs, extra_headers);
-        self.get_with_exact_headers(url, &hdrs).await
-    }
-
-    /// Fetch-API-style POST with raw bytes.
-    pub async fn fetch_post_bytes(
-        &self,
-        url: &str,
-        body: &[u8],
-        extra_headers: &[(String, String)],
-        origin: Option<&str>,
-    ) -> Result<Response, NetError> {
-        let mut hdrs = headers::nav_headers_fetch(&self.profile, url, origin);
-        merge_headers(&mut hdrs, extra_headers);
-        self.post_bytes_with_exact_headers(url, body, &hdrs).await
-    }
-
-    /// GET with the caller's exact header set — NO chrome_headers overlay.
-    /// Used for "reload" flavors where sec-fetch-user must be omitted
-    /// (chrome_headers always adds it). The caller is responsible for
-    /// providing user-agent, accept, etc. Cookies are still auto-injected
-    /// from the jar unless the caller already included a Cookie header.
-    pub async fn get_with_exact_headers(
-        &self,
-        url: &str,
-        headers: &[(String, String)],
-    ) -> Result<Response, NetError> {
-        let parsed = Url::parse(url)?;
-        let host = parsed
-            .host_str()
-            .ok_or_else(|| NetError::Http(format!("no host in URL: {url}")))?;
-        let port = parsed.port().unwrap_or(443);
-
-        let mut hdrs: Vec<(String, String)> = headers
-            .iter()
-            .filter(|(k, _)| {
-                let lower = k.to_ascii_lowercase();
-                !lower.starts_with(':') && lower != "host" && lower != "connection"
-            })
-            .map(|(k, v)| (k.to_ascii_lowercase(), v.clone()))
-            .collect();
-
-        if !has_header(&hdrs, "cookie") {
-            let jar = self.cookies.lock().await;
-            if let Some(cookie_str) = jar.cookies_for(&parsed) {
-                insert_before_priority(&mut hdrs, "cookie".to_string(), cookie_str);
-            }
-        }
-
-        let response = 'h2: {
-            for attempt in 0..2 {
-                let sender_res = self.get_sender(host, port).await;
-                let mut sender = match sender_res {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("[net] H2 connection failed for {}: {}", host, e);
-                        break 'h2 None;
-                    }
-                };
-                let uri = parsed.as_str();
-                match h2_client::send_get(&mut sender, uri, host, &hdrs).await {
-                    Ok((parts, body)) => {
-                        let resp = self.build_response(parts, body, url).await?;
-                        break 'h2 Some(resp);
-                    }
-                    Err(e) if attempt == 0 && is_stale_conn_error(&e) => {
-                        self.pool.evict(host, port).await;
-                        continue;
-                    }
-                    Err(e) => return Err(e),
+            Ok(response) => Ok(ExchangeResponse::H2(response)),
+            Err(failure) => {
+                if failure.connection_unusable {
+                    self.inner.pool.evict_h2(&key, &connection).await;
                 }
+                Err(failure.error)
             }
-            None
-        };
-        let response = match response {
-            Some(r) => r,
-            None => {
-                let tcp_stream = tcp::connect_via_proxy(
-                    host,
-                    port,
-                    std::time::Duration::from_secs(10),
-                    Some(&self.dns_cache),
-                    self.proxy.as_ref(),
-                )
-                .await?;
-                let mut tls_stream =
-                    tls::connect_tls(&self.tls_connector, &self.profile, host, tcp_stream).await?;
-                let path = if parsed.query().is_some() {
-                    format!("{}?{}", parsed.path(), parsed.query().unwrap())
-                } else {
-                    parsed.path().to_string()
-                };
-                let raw = h1_client::send_get(&mut tls_stream, host, &path, &hdrs).await?;
-                self.build_response_from_raw(raw, url).await?
-            }
-        };
-        self.learn_alt_svc(url, &response.headers).await;
-        let upgrade = self.learn_accept_ch(host, &response.headers).await;
-        self.store_set_cookies(&parsed, &response.set_cookies).await;
-
-        let mut final_response = response;
-        final_response.accept_ch_upgrade = upgrade;
-        Ok(final_response)
+        }
     }
 
-    /// GET follow for exact-header requests.
-    pub async fn get_follow_exact_headers(
+    async fn execute_h1(
         &self,
-        url: &str,
-        headers: &[(String, String)],
-        max_redirects: u8,
-    ) -> Result<Response, NetError> {
-        let mut current_url = url.to_string();
-        for _ in 0..max_redirects {
-            let resp = self.get_with_exact_headers(&current_url, headers).await?;
-            if matches!(resp.status, 301 | 302 | 303 | 307 | 308)
-                && let Some(loc) = resp.headers.get("location")
-            {
-                current_url = resolve_redirect(&current_url, loc)?;
-                continue;
-            }
-            return Ok(resp);
-        }
-        self.get_with_exact_headers(&current_url, headers).await
-    }
-
-    /// GET with caller-provided extra headers (e.g., from JS fetch init.headers).
-    /// Extra headers override any matching profile headers (case-insensitive match).
-    pub async fn get_with_headers(
-        &self,
-        url: &str,
-        extra_headers: &[(String, String)],
-    ) -> Result<Response, NetError> {
-        // Try HTTP/3 first
-        if let Ok(resp) = self.try_h3_request(url, Method::Get, extra_headers).await {
-            return Ok(resp);
-        }
-
-        let parsed = Url::parse(url)?;
-        let host = parsed
-            .host_str()
-            .ok_or_else(|| NetError::Http(format!("no host in URL: {url}")))?;
-        let port = parsed.port().unwrap_or(443);
-
-        // Browser-aware nav headers. For Chrome, may upgrade to high-entropy
-        // Client Hints if this origin has sent Accept-CH. Firefox profiles
-        // skip the upgrade (Firefox has no Client Hints).
-        // `nav_headers_for_url` swaps in a regional `accept-language` when
-        // the host's TLD has a documented expectation (amazon-fr → fr-FR…).
-        let accept_ch_upgraded = self.has_accept_ch(host).await;
-        let mut hdrs = headers::nav_headers_for_url(&self.profile, url, accept_ch_upgraded);
-        merge_headers(&mut hdrs, extra_headers);
-
-        // Add cookies (unless caller already supplied one)
-        if !has_header(&hdrs, "cookie") {
-            let jar = self.cookies.lock().await;
-            if let Some(cookie_str) = jar.cookies_for(&parsed) {
-                insert_before_priority(&mut hdrs, "cookie".to_string(), cookie_str);
-            }
-        }
-
-        // Try HTTP/2 with automatic stale-connection recovery. If the pooled
-        // connection has been closed by the server (GOAWAY), retry once with
-        // a fresh connection.
-        let response = 'h2: {
-            for attempt in 0..2 {
-                let sender_res = self.get_sender(host, port).await;
-                let mut sender = match sender_res {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("[net] H2 connection failed for {}: {}", host, e);
-                        break 'h2 None;
-                    }
-                };
-                let uri = parsed.as_str();
-                match h2_client::send_get(&mut sender, uri, host, &hdrs).await {
-                    Ok((parts, body)) => {
-                        let resp = self.build_response(parts, body, url).await?;
-                        break 'h2 Some(resp);
-                    }
-                    Err(e) if attempt == 0 && is_stale_conn_error(&e) => {
-                        // Evict the dead connection from the pool and try once more.
-                        self.pool.evict(host, port).await;
-                        continue;
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
-            None
-        };
-
-        let response = match response {
-            Some(r) => r,
-            None => {
-                // HTTP/1.1 fallback
-                let tcp_stream = tcp::connect_via_proxy(
-                    host,
-                    port,
-                    std::time::Duration::from_secs(10),
-                    Some(&self.dns_cache),
-                    self.proxy.as_ref(),
-                )
-                .await?;
-                let mut tls_stream =
-                    tls::connect_tls(&self.tls_connector, &self.profile, host, tcp_stream).await?;
-                let path = if parsed.query().is_some() {
-                    format!("{}?{}", parsed.path(), parsed.query().unwrap())
-                } else {
-                    parsed.path().to_string()
-                };
-                let raw = h1_client::send_get(&mut tls_stream, host, &path, &hdrs).await?;
-                self.build_response_from_raw(raw, url).await?
-            }
-        };
-
-        // Learn Alt-Svc from response
-        self.learn_alt_svc(url, &response.headers).await;
-
-        // Learn the challenge vendor's session from the response (look for x-kpsdk-cr + x-kpsdk-st).
-        let upgrade = self.learn_accept_ch(host, &response.headers).await;
-
-        // Store Set-Cookie from response into jar
-        self.store_set_cookies(&parsed, &response.set_cookies).await;
-
-        // Critical-CH per W3 spec: when the server demands immediate-retry
-        // hints AND we weren't already sending full CH, retry the same
-        // URL once with the high-entropy hints. Some challenge vendors
-        // (e.g. on udemy.com, yelp/leboncoin/etsy/wsj)
-        // both send Critical-CH; without an immediate retry they treat
-        // us as non-Chrome and serve the captcha. One-shot to avoid loops.
-        if !accept_ch_upgraded && Self::needs_critical_ch_retry(&response.headers) {
-            return Box::pin(self.get_with_headers(url, extra_headers)).await;
-        }
-
-        let mut final_response = response;
-        final_response.accept_ch_upgrade = upgrade;
-        Ok(final_response)
-    }
-
-    /// Store all Set-Cookie headers from a response into the cookie jar.
-    async fn store_set_cookies(&self, url: &Url, set_cookies: &[String]) {
-        if set_cookies.is_empty() {
-            return;
-        }
-        let mut jar = self.cookies.lock().await;
-        jar.set_cookies(url, set_cookies);
-        // Persist if BROWSER_OXIDE_COOKIE_JAR is set. Atomic write (tempfile +
-        // rename) so concurrent runs don't tear the file.
-        if let Ok(path) = std::env::var("BROWSER_OXIDE_COOKIE_JAR") {
-            let p = std::path::PathBuf::from(&path);
-            if let Err(e) = jar.save_to_file(&p) {
-                eprintln!("[cookies] save_to_file({}) failed: {}", path, e);
-            }
-        }
-    }
-
-    /// GET with explicit redirect following.
-    /// Perform a GET request, following redirects up to `max_redirects`.
-    /// Set `BROWSER_OXIDE_DEBUG_REDIRECTS=1` for hop-by-hop tracing.
-    pub async fn get_follow(&self, url: &str, max_redirects: u8) -> Result<Response, NetError> {
-        let debug = std::env::var("BROWSER_OXIDE_DEBUG_REDIRECTS").is_ok();
-        let mut current_url = url.to_string();
-        for hop in 0..max_redirects {
-            if debug {
-                eprintln!("[redirect] hop={} GET {}", hop, current_url);
-            }
-            let resp = self.get(&current_url).await?;
-            if debug {
-                let body_len = resp.body.len();
-                let cookies: Vec<&str> = resp
-                    .set_cookies
-                    .iter()
-                    .map(|s| s.split(';').next().unwrap_or("").trim())
-                    .collect();
-                eprintln!(
-                    "[redirect]   <- status={} body_len={} location={:?} set-cookies={:?}",
-                    resp.status,
-                    body_len,
-                    resp.headers.get("location"),
-                    cookies
+        request: &TransportRequest,
+        key: OriginKey,
+        mut connection: PooledH1,
+        body: Option<&[u8]>,
+        proxy_authorization: Option<&str>,
+    ) -> Result<ExchangeResponse, TransportError> {
+        let mut outgoing_headers;
+        let headers = if connection.connected.absolute_form {
+            outgoing_headers = request.headers.clone();
+            if let Some(value) = proxy_authorization {
+                set_header(
+                    &mut outgoing_headers,
+                    "proxy-authorization",
+                    value.to_owned(),
                 );
             }
-
-            if matches!(resp.status, 301 | 302 | 303 | 307 | 308)
-                && let Some(loc) = resp.headers.get("location")
-            {
-                let next_url = resolve_redirect(&current_url, loc)?;
-                // For 301, 302, 303 redirects from a GET, we just continue with another GET.
-                // For 307, 308, we MUST preserve the method (GET), which self.get() does.
-                current_url = next_url;
-                continue;
-            }
-            return Ok(resp);
-        }
-        if debug {
-            eprintln!(
-                "[redirect] hit max_redirects={}, final GET {}",
-                max_redirects, current_url
-            );
-        }
-        self.get(&current_url).await
-    }
-
-    /// Perform a GET request, following redirects, with extra headers.
-    pub async fn get_follow_with_headers(
-        &self,
-        url: &str,
-        extra_headers: &[(String, String)],
-        max_redirects: u8,
-    ) -> Result<Response, NetError> {
-        let mut current_url = url.to_string();
-        for _ in 0..max_redirects {
-            // Re-apply headers to each hop
-            let resp = self.get_with_headers(&current_url, extra_headers).await?;
-
-            if matches!(resp.status, 301 | 302 | 303 | 307 | 308)
-                && let Some(loc) = resp.headers.get("location")
-            {
-                current_url = resolve_redirect(&current_url, loc)?;
-                continue;
-            }
-            return Ok(resp);
-        }
-        self.get_with_headers(&current_url, extra_headers).await
-    }
-
-    /// Perform a POST request, following redirects.
-    /// DDoS-Guard (ozon.ru) returns 307 on POST /abt/result, which requires
-    /// re-POSTing the body to the new location.
-    pub async fn post_follow(
-        &self,
-        url: &str,
-        body: &str,
-        max_redirects: u8,
-    ) -> Result<Response, NetError> {
-        self.post_bytes_follow(url, body.as_bytes(), &[], max_redirects)
-            .await
-    }
-
-    /// POST with raw bytes and redirects.
-    pub async fn post_bytes_follow(
-        &self,
-        url: &str,
-        body: &[u8],
-        extra_headers: &[(String, String)],
-        max_redirects: u8,
-    ) -> Result<Response, NetError> {
-        let mut current_url = url.to_string();
-        for _ in 0..max_redirects {
-            let resp = self
-                .post_bytes_with_headers(&current_url, body, extra_headers)
-                .await?;
-
-            if matches!(resp.status, 301 | 302 | 303 | 307 | 308)
-                && let Some(loc) = resp.headers.get("location")
-            {
-                let next_url = resolve_redirect(&current_url, loc)?;
-                if matches!(resp.status, 307 | 308) {
-                    // 307/308: MUST re-POST the same body to the new location.
-                    current_url = next_url;
-                    continue;
-                } else {
-                    // 301/302/303: Standard behavior is to switch to GET.
-                    return self.get_follow(&next_url, max_redirects - 1).await;
-                }
-            }
-            return Ok(resp);
-        }
-        self.post_bytes_with_headers(&current_url, body, extra_headers)
-            .await
-    }
-
-    /// Perform a POST request.
-    pub async fn post(&self, url: &str, body: &str) -> Result<Response, NetError> {
-        self.post_with_headers(url, body, &[]).await
-    }
-
-    /// POST with caller-provided extra headers (e.g., Content-Type from JS fetch).
-    pub async fn post_with_headers(
-        &self,
-        url: &str,
-        body: &str,
-        extra_headers: &[(String, String)],
-    ) -> Result<Response, NetError> {
-        self.post_bytes_with_headers(url, body.as_bytes(), extra_headers)
-            .await
-    }
-
-    pub async fn post_bytes_with_exact_headers_direct(
-        &self,
-        url: &str,
-        body: &[u8],
-        headers: &[(String, String)],
-    ) -> Result<Response, NetError> {
-        let parsed = Url::parse(url)?;
-        let host = parsed
-            .host_str()
-            .ok_or_else(|| NetError::Http(format!("no host in URL: {url}")))?;
-        let port = parsed.port().unwrap_or(443);
-        let path = if let Some(q) = parsed.query() {
-            format!("{}?{}", parsed.path(), q)
+            outgoing_headers.as_slice()
         } else {
-            parsed.path().to_string()
+            request.headers.as_slice()
         };
-
-        let mut hdrs: Vec<(String, String)> = headers
-            .iter()
-            .filter(|(k, _)| {
-                let lower = k.to_ascii_lowercase();
-                !lower.starts_with(':') && lower != "host" && lower != "connection"
-            })
-            .map(|(k, v)| (k.to_ascii_lowercase(), v.clone()))
-            .collect();
-
-        // Add cookies
-        let jar = self.cookies.lock().await;
-        if let Some(cookie_str) = jar.cookies_for(&parsed)
-            && !has_header(&hdrs, "cookie")
-        {
-            hdrs.push(("cookie".to_string(), cookie_str));
+        let sent_headers =
+            h1_client::write_request(&mut connection.connected, request, headers, body).await?;
+        let head = h1_client::read_final_head(&mut connection.connected, &request.method).await?;
+        let status = head.status;
+        let headers = head.headers.clone();
+        if let Some(observer) = &request.observer {
+            observer.response_received(status, &headers);
         }
-        drop(jar);
-
-        let tcp_stream = self.connect_tcp(host, port).await?;
-        let connector = tls::chrome_connector(&self.profile)?;
-        let mut tls_stream = tls::connect_tls(&connector, &self.profile, host, tcp_stream).await?;
-
-        let raw = h1_client::send_post(&mut tls_stream, host, &path, &hdrs, body).await?;
-        self.build_response_from_raw(raw, url).await
-    }
-
-    /// POST with a raw byte body and ONLY the caller-provided headers plus cookies.
-    pub async fn post_bytes_with_exact_headers(
-        &self,
-        url: &str,
-        body: &[u8],
-        headers: &[(String, String)],
-    ) -> Result<Response, NetError> {
-        let parsed = Url::parse(url)?;
-        let host = parsed
-            .host_str()
-            .ok_or_else(|| NetError::Http(format!("no host in URL: {url}")))?;
-        let port = parsed.port().unwrap_or(443);
-
-        let mut hdrs: Vec<(String, String)> = headers
-            .iter()
-            .filter(|(k, _)| {
-                let lower = k.to_ascii_lowercase();
-                !lower.starts_with(':') && lower != "host" && lower != "connection"
-            })
-            .map(|(k, v)| (k.to_ascii_lowercase(), v.clone()))
-            .collect();
-
-        // Add cookies (unless already supplied)
-        if !has_header(&hdrs, "cookie") {
-            let jar = self.cookies.lock().await;
-            if let Some(cookie_str) = jar.cookies_for(&parsed) {
-                hdrs.push(("cookie".to_string(), cookie_str));
+        let version = head.version;
+        if matches!(head.framing, BodyFraming::Empty) {
+            if head.reusable {
+                self.inner.pool.put_h1(key, connection).await;
             }
+            return Ok(ExchangeResponse::Complete(TransportResponse {
+                status,
+                headers,
+                version,
+                body: ResponseBody {
+                    inner: BodyInner::Empty,
+                },
+                sent_headers,
+            }));
         }
-
-        // Env-gated POST body dump
-        if let Ok(dir) = std::env::var("BROWSER_OXIDE_DUMP_POST_DIR") {
-            use std::io::Write;
-            let _ = std::fs::create_dir_all(&dir);
-            let counter_path = format!("{}/.counter", dir);
-            let next: usize = std::fs::read_to_string(&counter_path)
-                .ok()
-                .and_then(|s| s.trim().parse().ok())
-                .unwrap_or(0)
-                + 1;
-            let _ = std::fs::write(&counter_path, next.to_string());
-            let stem = format!("{}/{:03}", dir, next);
-            if let Ok(mut f) = std::fs::File::create(format!("{stem}.body")) {
-                let _ = f.write_all(body);
-            }
-            let mut meta = String::new();
-            meta.push_str("{\n");
-            meta.push_str(&format!(
-                "  \"url\": {},\n",
-                serde_json::to_string(url).unwrap_or_else(|_| "\"\"".into())
-            ));
-            meta.push_str(&format!("  \"body_len\": {},\n", body.len()));
-            meta.push_str("  \"headers\": {\n");
-            for (i, (k, v)) in hdrs.iter().enumerate() {
-                let trailing = if i + 1 == hdrs.len() { "" } else { "," };
-                meta.push_str(&format!(
-                    "    {}: {}{}\n",
-                    serde_json::to_string(k).unwrap_or_else(|_| "\"\"".into()),
-                    serde_json::to_string(v).unwrap_or_else(|_| "\"\"".into()),
-                    trailing
-                ));
-            }
-            meta.push_str("  }\n}\n");
-            let _ = std::fs::write(format!("{stem}.meta.json"), meta);
-        }
-
-        let response = 'h2: {
-            for attempt in 0..2 {
-                let sender_res = self.get_sender(host, port).await;
-                let mut sender = match sender_res {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("[net] H2 connection failed for {}: {}", host, e);
-                        break 'h2 None;
-                    }
-                };
-                let uri = parsed.as_str();
-                if uri.contains("/mfc")
-                    || uri.contains("/akam/13")
-                    || uri.contains("/tl")
-                    || uri.contains("/r")
-                {
-                    eprintln!(
-                        "[net] sending H2 request to {} with headers: {:?}",
-                        uri, hdrs
-                    );
-                }
-                match h2_client::send_post(&mut sender, uri, host, &hdrs, body).await {
-                    Ok((parts, resp_body)) => {
-                        let resp = self.build_response(parts, resp_body, url).await?;
-                        break 'h2 Some(resp);
-                    }
-                    Err(e) if attempt == 0 && is_stale_conn_error(&e) => {
-                        self.pool.evict(host, port).await;
-                        continue;
-                    }
-                    Err(e) => {
-                        eprintln!("[net] H2 POST failed for {}: {}", uri, e);
-                    }
-                }
-            }
-            None
-        };
-
-        let response = match response {
-            Some(r) => r,
-            None => {
-                let tcp_stream = tcp::connect_via_proxy(
-                    host,
-                    port,
-                    std::time::Duration::from_secs(10),
-                    Some(&self.dns_cache),
-                    self.proxy.as_ref(),
-                )
-                .await?;
-                let connector = tls::chrome_connector(&self.profile)?;
-                let mut tls_stream =
-                    tls::connect_tls(&connector, &self.profile, host, tcp_stream).await?;
-                let path = if parsed.query().is_some() {
-                    format!("{}?{}", parsed.path(), parsed.query().unwrap())
-                } else {
-                    parsed.path().to_string()
-                };
-                if url.contains("/mfc")
-                    || url.contains("/akam/13")
-                    || url.contains("/tl")
-                    || url.contains("/r")
-                {
-                    eprintln!(
-                        "[net] sending H1 request to {} with headers: {:?}",
-                        url, hdrs
-                    );
-                }
-                let raw = h1_client::send_post(&mut tls_stream, host, &path, &hdrs, body).await?;
-                self.build_response_from_raw(raw, url).await?
-            }
-        };
-
-        let upgrade = self.learn_accept_ch(host, &response.headers).await;
-        self.store_set_cookies(&parsed, &response.set_cookies).await;
-
-        let mut final_response = response;
-        final_response.accept_ch_upgrade = upgrade;
-
-        Ok(final_response)
-    }
-
-    /// POST with a raw byte body and caller-provided headers. The binary-
-    /// safe variant of `post_with_headers` — preserves the byte payload
-    /// exactly instead of treating it as UTF-8.
-    pub async fn post_bytes_with_headers(
-        &self,
-        url: &str,
-        body: &[u8],
-        extra_headers: &[(String, String)],
-    ) -> Result<Response, NetError> {
-        // Try HTTP/3 first
-        if let Ok(resp) = self
-            .try_h3_request(url, Method::Post(body.to_vec()), extra_headers)
-            .await
-        {
-            return Ok(resp);
-        }
-
-        let parsed = Url::parse(url)?;
-        let host = parsed
-            .host_str()
-            .ok_or_else(|| NetError::Http(format!("no host in URL: {url}")))?;
-        let port = parsed.port().unwrap_or(443);
-
-        // Browser-aware nav headers (Chrome may upgrade with high-entropy
-        // Client Hints if origin sent Accept-CH; Firefox profiles skip).
-        // Regional accept-language override per target TLD.
-        let accept_ch_upgraded = self.has_accept_ch(host).await;
-        let mut hdrs = headers::nav_headers_for_url(&self.profile, url, accept_ch_upgraded);
-        merge_headers(&mut hdrs, extra_headers);
-
-        // Env-gated POST body dump (for sensor-payload diffing). Writes one
-        // file per POST into BROWSER_OXIDE_DUMP_POST_DIR with a numeric index, plus
-        // a sidecar .meta.json holding the URL and request headers.
-        if let Ok(dir) = std::env::var("BROWSER_OXIDE_DUMP_POST_DIR") {
-            use std::io::Write;
-            let _ = std::fs::create_dir_all(&dir);
-            let counter_path = format!("{}/.counter", dir);
-            let next: usize = std::fs::read_to_string(&counter_path)
-                .ok()
-                .and_then(|s| s.trim().parse().ok())
-                .unwrap_or(0)
-                + 1;
-            let _ = std::fs::write(&counter_path, next.to_string());
-            let stem = format!("{}/{:03}", dir, next);
-            if let Ok(mut f) = std::fs::File::create(format!("{stem}.body")) {
-                let _ = f.write_all(body);
-            }
-            let mut meta = String::new();
-            meta.push_str("{\n");
-            meta.push_str(&format!(
-                "  \"url\": {},\n",
-                serde_json::to_string(url).unwrap_or_else(|_| "\"\"".into())
-            ));
-            meta.push_str(&format!("  \"body_len\": {},\n", body.len()));
-            meta.push_str("  \"headers\": {\n");
-            for (i, (k, v)) in hdrs.iter().enumerate() {
-                let trailing = if i + 1 == hdrs.len() { "" } else { "," };
-                meta.push_str(&format!(
-                    "    {}: {}{}\n",
-                    serde_json::to_string(k).unwrap_or_else(|_| "\"\"".into()),
-                    serde_json::to_string(v).unwrap_or_else(|_| "\"\"".into()),
-                    trailing
-                ));
-            }
-            meta.push_str("  }\n}\n");
-            let _ = std::fs::write(format!("{stem}.meta.json"), meta);
-        }
-
-        if !has_header(&hdrs, "cookie") {
-            let jar = self.cookies.lock().await;
-            if let Some(cookie_str) = jar.cookies_for(&parsed) {
-                insert_before_priority(&mut hdrs, "cookie".to_string(), cookie_str);
-            }
-        }
-
-        // Same stale-connection recovery as GET.
-        let response = 'h2: {
-            for attempt in 0..2 {
-                let sender_res = self.get_sender(host, port).await;
-                let mut sender = match sender_res {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("[net] H2 connection failed for {}: {}", host, e);
-                        break 'h2 None;
-                    }
-                };
-                let uri = parsed.as_str();
-                match h2_client::send_post(&mut sender, uri, host, &hdrs, body).await {
-                    Ok((parts, resp_body)) => {
-                        let resp = self.build_response(parts, resp_body, url).await?;
-                        break 'h2 Some(resp);
-                    }
-                    Err(e) if attempt == 0 && is_stale_conn_error(&e) => {
-                        self.pool.evict(host, port).await;
-                        continue;
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
-            None
-        };
-
-        let response = match response {
-            Some(r) => r,
-            None => {
-                let tcp_stream = tcp::connect_via_proxy(
-                    host,
-                    port,
-                    std::time::Duration::from_secs(10),
-                    Some(&self.dns_cache),
-                    self.proxy.as_ref(),
-                )
-                .await?;
-                let mut tls_stream =
-                    tls::connect_tls(&self.tls_connector, &self.profile, host, tcp_stream).await?;
-                let path = match parsed.query() {
-                    Some(q) => format!("{}?{}", parsed.path(), q),
-                    None => parsed.path().to_string(),
-                };
-                let raw = h1_client::send_post(&mut tls_stream, host, &path, &hdrs, body).await?;
-                self.build_response_from_raw(raw, url).await?
-            }
-        };
-
-        // Store Set-Cookie from POST response — some challenge vendors set a
-        // session token here (e.g. KP_UIDz / akm_bmfp_b2 session cookies).
-        // Also learn the vendor session: the /tl POST returns x-kpsdk-cr/st here.
-        let upgrade = self.learn_accept_ch(host, &response.headers).await;
-        self.store_set_cookies(&parsed, &response.set_cookies).await;
-
-        let mut final_response = response;
-        final_response.accept_ch_upgrade = upgrade;
-        Ok(final_response)
-    }
-
-    /// Snapshot all cookies for a URL as a "name=value; name2=value2" string.
-    /// Used by document.cookie getter to unify JS-visible cookies with the network jar.
-    pub async fn cookies_for_url(&self, url: &Url) -> Option<String> {
-        let jar = self.cookies.lock().await;
-        jar.cookies_for(url)
-    }
-
-    /// Evict any pooled HTTP/2 connection to the given host. The next request
-    /// will create a fresh TCP+TLS+H2 handshake. Used by challenge retries
-    /// where the solver POSTs may have used an H2 session the server is now
-    /// done with, or where the session has accumulated GOAWAY.
-    pub async fn evict_connection(&self, host: &str, port: u16) {
-        self.pool.evict(host, port).await;
-    }
-
-    /// Set cookies for a URL from a raw Set-Cookie-style string.
-    /// Used by document.cookie setter.
-    pub async fn set_cookie_str(&self, url: &Url, raw: &str) {
-        let mut jar = self.cookies.lock().await;
-        jar.set_cookies(url, &[raw.to_string()]);
-    }
-
-    /// Synchronous cookie write. The
-    /// `document.cookie` setter must persist into the jar SYNCHRONOUSLY:
-    /// challenge.js deposits the `aws-waf-token` via `document.cookie` in the
-    /// last microtasks before `location.reload()`, and the previous
-    /// fire-and-forget async `op_cookie_set` future was torn down before it
-    /// ran — so the reload re-fetched without the token (verified on imdb:
-    /// document.cookie had the token but the shared jar was empty → 202 stub).
-    ///
-    /// The jar mutex is never held across an await during synchronous JS
-    /// execution, so `try_lock` succeeds in the common case. Returns `false`
-    /// only under genuine contention, where the caller falls back to the
-    /// async op. No new blocking in the async runtime.
-    pub fn set_cookie_str_sync(&self, url: &Url, raw: &str) -> bool {
-        match self.cookies.try_lock() {
-            Ok(mut jar) => {
-                jar.set_cookies(url, &[raw.to_string()]);
-                true
-            }
-            Err(_) => false,
-        }
-    }
-
-    /// Drop every cookie whose stored-domain is a host-suffix match of
-    /// `target_domain`. Returns the number of (domain → cookie-map)
-    /// buckets evicted. Used for the x.com / twitter.com rebrand-
-    /// collision band-aid where a fresh nav to one
-    /// identity must NOT inherit cookies from the sister identity.
-    pub async fn clear_cookies_for_domain(&self, target_domain: &str) -> usize {
-        let mut jar = self.cookies.lock().await;
-        jar.clear_for_domain(target_domain)
-    }
-
-    /// Build a Response from HTTP/2 response parts and body.
-    async fn build_response(
-        &self,
-        parts: http::response::Parts,
-        body: Vec<u8>,
-        url: &str,
-    ) -> Result<Response, NetError> {
-        let status = parts.status.as_u16();
-        let status_text = parts.status.canonical_reason().unwrap_or("").to_string();
-
-        // Split Set-Cookie out of the regular header map so multi-value
-        // Set-Cookie headers aren't collapsed (HashMap would overwrite).
-        let mut resp_headers = HashMap::new();
-        let mut set_cookies = Vec::new();
-        for (key, value) in &parts.headers {
-            if let Ok(v) = value.to_str() {
-                if key.as_str().eq_ignore_ascii_case("set-cookie") {
-                    set_cookies.push(v.to_string());
-                } else {
-                    insert_response_header(&mut resp_headers, key.as_str(), v);
-                }
-            }
-        }
-
-        // Decompress body
-        let encoding = resp_headers
-            .get("content-encoding")
-            .map(|s| s.as_str())
-            .unwrap_or("");
-        let decompressed = compression::decompress(&body, encoding)?;
-
-        Ok(Response {
+        Ok(ExchangeResponse::H1 {
             status,
-            status_text,
-            headers: resp_headers,
-            set_cookies,
-            body: decompressed,
-            url: url.to_string(),
-            accept_ch_upgrade: false,
-            timings: TimingStats::default(),
+            headers,
+            version,
+            body: H1Body::new(connection, self.inner.pool.clone(), key, head),
+            sent_headers,
         })
     }
+}
 
-    /// Build a Response from an HTTP/1.1 raw response.
-    async fn build_response_from_raw(
-        &self,
-        raw: h1_client::RawResponse,
-        url: &str,
-    ) -> Result<Response, NetError> {
-        let mut resp_headers = HashMap::new();
-        let mut set_cookies = Vec::new();
-        for (name, value) in &raw.headers {
-            if name.eq_ignore_ascii_case("set-cookie") {
-                set_cookies.push(value.clone());
-            } else {
-                insert_response_header(&mut resp_headers, name, value);
+enum ExchangeResponse {
+    Complete(TransportResponse),
+    H1 {
+        status: u16,
+        headers: Vec<(String, String)>,
+        version: http::Version,
+        body: H1Body,
+        sent_headers: Vec<(String, String)>,
+    },
+    H2(h2_client::H2Response),
+}
+
+impl ExchangeResponse {
+    fn status(&self) -> u16 {
+        match self {
+            Self::Complete(response) => response.status,
+            Self::H1 { status, .. } => *status,
+            Self::H2(response) => response.status,
+        }
+    }
+
+    fn headers(&self) -> &[(String, String)] {
+        match self {
+            Self::Complete(response) => &response.headers,
+            Self::H1 { headers, .. } => headers,
+            Self::H2(response) => &response.headers,
+        }
+    }
+
+    async fn prepare_retry(self) -> Result<Option<PooledH1>, TransportError> {
+        match self {
+            Self::Complete(_) => Ok(None),
+            Self::H1 { body, .. } => body.drain_for_retry().await,
+            Self::H2(response) => {
+                response.body.drain().await?;
+                Ok(None)
             }
         }
-
-        let encoding = resp_headers
-            .get("content-encoding")
-            .map(|s| s.as_str())
-            .unwrap_or("");
-        let decompressed = compression::decompress(&raw.body, encoding)?;
-
-        Ok(Response {
-            status: raw.status,
-            status_text: raw.status_text,
-            headers: resp_headers,
-            set_cookies,
-            body: decompressed,
-            url: url.to_string(),
-            accept_ch_upgrade: false,
-            timings: TimingStats::default(),
-        })
     }
-}
 
-fn insert_response_header(headers: &mut HashMap<String, String>, name: &str, value: &str) {
-    let name = name.to_ascii_lowercase();
-    if matches!(name.as_str(), "accept-ch" | "critical-ch")
-        && let Some(existing) = headers.get_mut(&name)
-    {
-        existing.push_str(", ");
-        existing.push_str(value);
-        return;
-    }
-    headers.insert(name, value.to_owned());
-}
-
-/// Detect whether an error indicates a stale/closed pooled connection that can
-/// be safely retried by evicting from the pool and reconnecting. This catches
-/// HTTP/2 GOAWAY ("not a result of an error"), broken pipe, and ResetStream.
-fn is_stale_conn_error(e: &NetError) -> bool {
-    let msg = e.to_string();
-    msg.contains("not a result of an error")       // h2 GOAWAY / NO_ERROR
-        || msg.contains("broken pipe")
-        || msg.contains("connection closed")
-        || msg.contains("ResetStream")
-        || msg.contains("stream was reset")
-        || msg.contains("HTTP/2 not ready")
-}
-
-/// Check if a header name is already present (case-insensitive).
-fn has_header(hdrs: &[(String, String)], name: &str) -> bool {
-    hdrs.iter().any(|(k, _)| k.eq_ignore_ascii_case(name))
-}
-
-fn insert_before_priority(hdrs: &mut Vec<(String, String)>, name: String, value: String) {
-    if let Some(pos) = hdrs
-        .iter()
-        .position(|(k, _)| k.eq_ignore_ascii_case("priority"))
-    {
-        hdrs.insert(pos, (name, value));
-    } else {
-        hdrs.push((name, value));
-    }
-}
-
-/// Merge extra headers into the base list. Existing headers with the same name
-/// (case-insensitive) are replaced in place so order is preserved.
-fn merge_headers(base: &mut Vec<(String, String)>, extra: &[(String, String)]) {
-    for (k, v) in extra {
-        // Skip pseudo-headers and forbidden fetch headers that would corrupt H2.
-        let lower = k.to_ascii_lowercase();
-        if lower.starts_with(':') || lower == "host" || lower == "connection" {
-            continue;
-        }
-        if let Some(slot) = base.iter_mut().find(|(bk, _)| bk.eq_ignore_ascii_case(k)) {
-            slot.1 = v.clone();
-        } else {
-            base.push((lower, v.clone()));
+    fn into_public(self) -> TransportResponse {
+        match self {
+            Self::Complete(response) => response,
+            Self::H1 {
+                status,
+                headers,
+                version,
+                body,
+                sent_headers,
+            } => TransportResponse {
+                status,
+                headers,
+                version,
+                body: ResponseBody {
+                    inner: BodyInner::H1(body),
+                },
+                sent_headers,
+            },
+            Self::H2(response) => TransportResponse {
+                status: response.status,
+                headers: response.headers,
+                version: http::Version::HTTP_2,
+                body: ResponseBody {
+                    inner: BodyInner::H2(response.body),
+                },
+                sent_headers: response.sent_headers,
+            },
         }
     }
 }
 
-/// Resolve a redirect Location header to an absolute URL.
-fn resolve_redirect(current_url: &str, location: &str) -> Result<String, NetError> {
-    // RFC 3986 §5.2 — resolve `location` against `current_url` as base.
-    // Url::join correctly handles all three cases:
-    //   - absolute URL ("https://b.com/x")
-    //   - root-relative ("/x")
-    //   - relative ("x.html", "../y")
-    // The previous impl returned `location` verbatim for the third case,
-    // which then failed downstream "no host in URL" — caught on iphey.com
-    // (holistic sweep 2026-05-10).
-    let base = Url::parse(current_url).map_err(|e| NetError::Request(e.to_string()))?;
-    let resolved = base.join(location).map_err(|e| {
-        NetError::Request(format!(
-            "redirect resolve: {e} (base={current_url}, loc={location})"
-        ))
+fn is_stale_http1_error(error: &TransportError) -> bool {
+    match error {
+        TransportError::EmptyResponse => true,
+        TransportError::Io(error) => matches!(
+            error.kind(),
+            std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::NotConnected
+                | std::io::ErrorKind::UnexpectedEof
+        ),
+        _ => false,
+    }
+}
+
+fn validate_request(request: &TransportRequest) -> Result<(), TransportError> {
+    if !matches!(request.url.scheme(), "http" | "https") {
+        return Err(TransportError::InvalidInput(format!(
+            "unsupported request URL scheme `{}`",
+            request.url.scheme()
+        )));
+    }
+    if request.url.host_str().is_none() {
+        return Err(TransportError::InvalidInput(
+            "request URL has no host".into(),
+        ));
+    }
+    http::Method::from_bytes(request.method.as_bytes()).map_err(|_| {
+        TransportError::InvalidInput(format!("invalid HTTP method `{}`", request.method))
     })?;
-    Ok(resolved.to_string())
+    Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn client_creates_successfully() {
-        let profile = crate::stealth::chrome_148_linux();
-        let client = HttpClient::new(&profile);
-        assert!(client.is_ok());
+fn request_target(url: &url::Url) -> String {
+    let mut target = if url.path().is_empty() {
+        "/".to_owned()
+    } else {
+        url.path().to_owned()
+    };
+    if let Some(query) = url.query() {
+        target.push('?');
+        target.push_str(query);
     }
+    target
+}
 
-    #[test]
-    fn redirect_resolve_handles_all_three_rfc3986_cases() {
-        // Absolute — pass through.
-        assert_eq!(
-            resolve_redirect("https://a.com/x", "https://b.com/y").unwrap(),
-            "https://b.com/y"
-        );
-        // Root-relative — replaces path on same origin.
-        assert_eq!(
-            resolve_redirect("https://a.com/x/y", "/z").unwrap(),
-            "https://a.com/z"
-        );
-        // Relative-no-leading-slash — resolves against current path's
-        // directory. THIS WAS THE IPHEY BUG (returned "z.html" verbatim
-        // → "no host in URL" downstream).
-        assert_eq!(
-            resolve_redirect("https://a.com/x/y", "z.html").unwrap(),
-            "https://a.com/x/z.html"
-        );
-        // Dot segments per RFC 3986 §5.2.4.
-        assert_eq!(
-            resolve_redirect("https://a.com/x/y/", "../z.html").unwrap(),
-            "https://a.com/x/z.html"
-        );
-        // Scheme-relative.
-        assert_eq!(
-            resolve_redirect("https://a.com/x", "//b.com/y").unwrap(),
-            "https://b.com/y"
-        );
-        // Query-only — preserves path.
-        assert_eq!(
-            resolve_redirect("https://a.com/x?old=1", "?new=2").unwrap(),
-            "https://a.com/x?new=2"
-        );
+fn set_header(headers: &mut Vec<(String, String)>, name: &str, value: String) {
+    headers.retain(|(candidate, _)| !candidate.eq_ignore_ascii_case(name));
+    headers.push((name.to_owned(), value));
+}
+
+fn origin_key(request: &TransportRequest) -> Result<OriginKey, TransportError> {
+    let host = request.url.host_str().expect("validated host").to_owned();
+    let mut hasher = DefaultHasher::new();
+    request.url.scheme().hash(&mut hasher);
+    host.hash(&mut hasher);
+    request.url.port_or_known_default().hash(&mut hasher);
+    proxy_url(&request.url, &request.connection)?
+        .map(|url| url.as_str().to_owned())
+        .hash(&mut hasher);
+    request.connection.resolved_addresses.hash(&mut hasher);
+    request
+        .connection
+        .tls_session_cache
+        .as_ref()
+        .map(TlsSessionCache::partition_id)
+        .hash(&mut hasher);
+    request.connection.proxy_bearer_token.hash(&mut hasher);
+    if let Some(auth) = &request.connection.proxy_auth {
+        std::mem::discriminant(&auth.scheme).hash(&mut hasher);
+        auth.username.hash(&mut hasher);
+        auth.password.hash(&mut hasher);
     }
-
-    #[test]
-    fn response_text() {
-        let resp = Response {
-            status: 200,
-            status_text: "OK".into(),
-            headers: HashMap::new(),
-            set_cookies: Vec::new(),
-            body: b"Hello world".to_vec(),
-            url: "https://example.com".into(),
-            accept_ch_upgrade: false,
-            timings: TimingStats::default(),
-        };
-        assert_eq!(resp.text(), "Hello world");
-        assert!(resp.ok());
+    if let Some(auth) = &request.auth {
+        std::mem::discriminant(&auth.scheme).hash(&mut hasher);
+        auth.username.hash(&mut hasher);
+        auth.password.hash(&mut hasher);
     }
-
-    #[test]
-    fn response_not_ok() {
-        let resp = Response {
-            status: 404,
-            status_text: "Not Found".into(),
-            headers: HashMap::new(),
-            set_cookies: Vec::new(),
-            body: vec![],
-            url: "https://example.com/missing".into(),
-            accept_ch_upgrade: false,
-            timings: TimingStats::default(),
-        };
-        assert!(!resp.ok());
-    }
-
-    #[tokio::test]
-    #[ignore]
-    async fn get_request() {
-        let profile = crate::stealth::chrome_148_linux();
-        let client = HttpClient::new(&profile).unwrap();
-        let resp = client.get("https://httpbin.org/get").await.unwrap();
-        assert_eq!(resp.status, 200);
-        assert!(resp.text().contains("httpbin"));
-    }
-
-    #[tokio::test]
-    #[ignore]
-    async fn get_ipv6_example_com() {
-        let profile = crate::stealth::chrome_148_linux();
-        let client = HttpClient::new(&profile).unwrap();
-        let resp = client.get("https://example.com").await.unwrap();
-        assert_eq!(resp.status, 200);
-        assert!(resp.text().contains("Example Domain"));
-    }
-
-    #[tokio::test]
-    #[ignore]
-    async fn get_hacker_news() {
-        let profile = crate::stealth::chrome_148_linux();
-        let client = HttpClient::new(&profile).unwrap();
-        let resp = client.get("https://news.ycombinator.com").await.unwrap();
-        assert_eq!(resp.status, 200);
-        assert!(resp.text().contains("Hacker News"));
-    }
-
-    #[tokio::test]
-    #[ignore]
-    async fn headers_include_ua() {
-        let profile = crate::stealth::chrome_148_windows();
-        let client = HttpClient::new(&profile).unwrap();
-        let resp = client.get("https://httpbin.org/headers").await.unwrap();
-        let body = resp.text();
-        assert!(
-            body.contains("Chrome/130"),
-            "Response should show our UA: {}",
-            body
-        );
-    }
-
-    #[tokio::test]
-    async fn accept_ch_starts_false_then_true_after_learn() {
-        let profile = crate::stealth::chrome_148_windows();
-        let client = HttpClient::new(&profile).unwrap();
-
-        // No response seen yet → no Accept-CH for this origin.
-        assert!(!client.has_accept_ch("example.com").await);
-
-        // Simulate a response that includes Accept-CH.
-        let mut headers = HashMap::new();
-        headers.insert(
-            "accept-ch".to_string(),
-            "Sec-CH-UA-Full-Version-List, Sec-CH-UA-Platform-Version".to_string(),
-        );
-        client.learn_accept_ch("example.com", &headers).await;
-
-        assert!(client.has_accept_ch("example.com").await);
-        // Other origins are not affected.
-        assert!(!client.has_accept_ch("other.com").await);
-    }
-
-    #[tokio::test]
-    async fn accept_ch_header_name_is_case_insensitive() {
-        let profile = crate::stealth::chrome_148_linux();
-        let client = HttpClient::new(&profile).unwrap();
-
-        // Mixed-case header name (e.g. from an HTTP/1.1 server that sends
-        // it with canonical capitalisation).
-        let mut headers = HashMap::new();
-        headers.insert("Accept-CH".to_string(), "Sec-CH-UA-Arch".to_string());
-        client.learn_accept_ch("site.example", &headers).await;
-
-        assert!(client.has_accept_ch("site.example").await);
-    }
-
-    #[tokio::test]
-    async fn response_without_accept_ch_does_not_upgrade_origin() {
-        let profile = crate::stealth::chrome_148_linux();
-        let client = HttpClient::new(&profile).unwrap();
-
-        let mut headers = HashMap::new();
-        headers.insert("content-type".to_string(), "text/html".to_string());
-        client.learn_accept_ch("boring.example", &headers).await;
-
-        assert!(!client.has_accept_ch("boring.example").await);
-    }
+    request.http1_only.hash(&mut hasher);
+    Ok(OriginKey {
+        route: format!("{:016x}", hasher.finish()),
+        host,
+    })
 }

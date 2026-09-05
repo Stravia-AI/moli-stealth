@@ -45,6 +45,9 @@ pub async fn run_cli_with_config<W: Write>(
     config: AppConfig,
     stdout: &mut W,
 ) -> Result<()> {
+    moli_stealth_net::initialize_process_fingerprint(config.transport_fingerprint.clone())
+        .context("failed to initialize process transport fingerprint")?;
+
     match cli.command {
         Commands::Fetch(mut args) => {
             reject_multiple_stdin_script_sources(&args)?;
@@ -288,8 +291,8 @@ fn load_cookie_state_cookies(config: &AppConfig) -> Result<Vec<moli_cookie_jar::
 
 fn finalize_fetch_browser(browser: Browser) {
     // Fetch is a one-shot CLI path, but the browser must still be dropped in an
-    // orderly way. Letting network threads survive until process exit can race
-    // OpenSSL global cleanup with libcurl transfers still in progress.
+    // orderly way. Letting async network work survive until process exit can
+    // skip the transport's normal cancellation and shutdown path.
     // Browser::drop owns profile cookie writeback when --profile-dir is set.
     drop(browser);
 }

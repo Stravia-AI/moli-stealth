@@ -3,11 +3,14 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+use tokio::sync::Notify;
+
 #[derive(Debug, Default)]
 struct FetchLifecycleState {
     cancel_requested: AtomicBool,
     declared_body_complete: AtomicBool,
     terminal: AtomicBool,
+    cancelled: Notify,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -21,7 +24,20 @@ impl FetchCancelHandle {
     }
 
     pub fn cancel(&self) {
-        self.state.cancel_requested.store(true, Ordering::SeqCst);
+        if !self.state.cancel_requested.swap(true, Ordering::SeqCst) {
+            self.state.cancelled.notify_waiters();
+        }
+    }
+
+    pub(crate) async fn cancelled(&self) {
+        if self.is_cancelled() {
+            return;
+        }
+        let notified = self.state.cancelled.notified();
+        if self.is_cancelled() {
+            return;
+        }
+        notified.await;
     }
 
     pub fn is_cancelled(&self) -> bool {

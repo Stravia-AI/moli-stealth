@@ -53,9 +53,11 @@ async def _task_completed(task: asyncio.Task[object], timeout_seconds: float) ->
 
 def _signal_process_tree(
     process: asyncio.subprocess.Process,
-    process_signal: signal.Signals,
+    *,
+    force: bool,
 ) -> None:
     if os.name == "posix":
+        process_signal = signal.SIGKILL if force else signal.SIGTERM
         try:
             os.killpg(process.pid, process_signal)
             return
@@ -69,10 +71,10 @@ def _signal_process_tree(
     if process.returncode is not None:
         return
     try:
-        if process_signal == signal.SIGTERM:
-            process.terminate()
-        else:
+        if force:
             process.kill()
+        else:
+            process.terminate()
     except ProcessLookupError:
         pass
 
@@ -81,7 +83,7 @@ async def _finish_communication_after_kill(
     process: asyncio.subprocess.Process,
     communication: asyncio.Task[tuple[bytes, bytes]],
 ) -> tuple[bytes, bytes, bool]:
-    _signal_process_tree(process, signal.SIGKILL)
+    _signal_process_tree(process, force=True)
     if await _task_completed(communication, _PROCESS_CLEANUP_TIMEOUT_SECONDS):
         stdout, stderr = communication.result()
         return stdout, stderr, True
@@ -147,19 +149,19 @@ async def terminate_process_tree(
     kill_timeout_seconds: float = 2.0,
 ) -> bool:
     if process.returncode is not None:
-        _signal_process_tree(process, signal.SIGKILL)
+        _signal_process_tree(process, force=True)
         return True
 
     wait_task = asyncio.create_task(process.wait())
-    _signal_process_tree(process, signal.SIGTERM)
+    _signal_process_tree(process, force=False)
     if await _task_completed(wait_task, terminate_timeout_seconds):
         # The dedicated group may still contain descendants after its leader
         # exits. The caller is tearing the service down, so clear any remaining
         # group members as well.
-        _signal_process_tree(process, signal.SIGKILL)
+        _signal_process_tree(process, force=True)
         return True
 
-    _signal_process_tree(process, signal.SIGKILL)
+    _signal_process_tree(process, force=True)
     if await _task_completed(wait_task, kill_timeout_seconds):
         return True
     wait_task.cancel()

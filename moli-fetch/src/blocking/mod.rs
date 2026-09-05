@@ -1,15 +1,10 @@
 mod cache;
-mod collectors;
 
-use std::{
-    ffi::{c_char, c_long},
-    net::{IpAddr, ToSocketAddrs},
-    str,
-    time::Duration,
-};
+#[cfg(test)]
+use std::time::Duration;
+use std::{net::IpAddr, str};
 
 use anyhow::{Context, Result, anyhow, bail};
-use curl::easy::{Auth, Easy2, Handler, HttpVersion, List};
 use moli_cookie_jar::{
     NetworkCookieRequestContext, SharedBrowserCookieStore, StoredCookieQueryReport,
     StoredCookieSetReport, same_site_urls,
@@ -17,8 +12,6 @@ use moli_cookie_jar::{
 use moli_url::{
     is_potentially_trustworthy_url, origin_ascii_serialization, same_origin, tuple_origin_url,
 };
-use moli_url_policy::ensure_http_network_transport_url;
-use tracing::debug;
 use url::Url;
 
 pub(crate) use self::cache::{
@@ -26,41 +19,23 @@ pub(crate) use self::cache::{
     cached_streaming_response_is_stale, create_streaming_cache_body_writer_for_response_parts,
     finish_streaming_cached_response, load_cached_streaming_response_lookup,
     merge_cached_not_modified_streaming_response_lookup, next_followed_redirect_url_from_parts,
-    next_redirect_url_from_parts, remove_cached_response, response_headers_forbid_cache_storage,
+    remove_cached_response, response_headers_forbid_cache_storage,
     validation_headers_for_cached_streaming_response_lookup,
 };
 pub use self::cache::{
     clear_http_cache, clear_http_cache_for_origin, clear_http_cache_root,
     clear_http_cache_root_for_origin, http_cache_stats, trim_http_cache,
 };
-pub(crate) use self::collectors::{
-    RawStreamingResponseCollector, RequestTransferMetrics, ResponseCollector, StreamingCachePlan,
-    log_request_completion, transfer_metrics_from_easy,
-};
-
 use crate::{
     BrowserRequestMetadata, FetchConfig, NegotiatedHttpVersion, NetworkRequestExtraInfo,
     RedirectInfo, Request, RequestAuthScheme, RequestAuthTarget, ResponseHead,
 };
 
 const MAX_REDIRECTS: usize = 10;
-// curl-sys in the pinned curl-rust fork does not yet export the string options
-// added in libcurl 7.85.0. CURLoption values are stable public ABI values; keep
-// these definitions adjacent to the only raw setopt call that needs them.
-const CURL_OPTION_PROTOCOLS_STR: curl_sys::CURLoption = curl_sys::CURLOPTTYPE_OBJECTPOINT + 318;
-const CURL_OPTION_REDIR_PROTOCOLS_STR: curl_sys::CURLoption =
-    curl_sys::CURLOPTTYPE_OBJECTPOINT + 319;
-const CURL_HTTP_PROTOCOL_ALLOWLIST: &[u8; 11] = b"http,https\0";
 // Leave enough of the default page deadline to settle a failed DCL-critical
 // child request and continue parsing. Main navigations retain caller policy.
+#[cfg(test)]
 const DEFAULT_BROWSER_SUBRESOURCE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum RequestHttpVersion {
-    #[default]
-    PreferHttp2,
-    Http1Only,
-}
 
 #[derive(Debug)]
 pub struct StreamingHtmlResponseStart {
@@ -91,8 +66,6 @@ impl StreamingHtmlResponseStart {
         }
     }
 }
-
-pub use collectors::StreamingResponseCollector;
 
 pub fn cookie_header_for_request(
     cookie_store: &SharedBrowserCookieStore,
@@ -166,13 +139,6 @@ pub(crate) fn outgoing_request_headers_for_url(
 ) -> Vec<(String, String)> {
     let mut outgoing = Vec::new();
 
-    if let Some(proxy_bearer_token) = config.proxy_bearer_token() {
-        outgoing.push((
-            "Proxy-Authorization".to_owned(),
-            format!("Bearer {proxy_bearer_token}"),
-        ));
-    }
-
     if let Some(cookie_header) = cookie_header {
         outgoing.push(("Cookie".to_owned(), cookie_header.to_owned()));
     }
@@ -194,7 +160,6 @@ pub(crate) fn outgoing_request_headers_for_url(
     append_browser_navigation_headers(&mut outgoing, config, request, request_url, redirect_chain);
     append_browser_subresource_headers(&mut outgoing, config, request, request_url, redirect_chain);
     append_browser_storage_access_header(&mut outgoing, request, request_url);
-    reorder_browser_client_hints(&mut outgoing);
 
     if !header_present(&outgoing, "referer")
         && let Some(referer) = referrer_header_value_for_request(request, request_url)
@@ -207,8 +172,8 @@ pub(crate) fn outgoing_request_headers_for_url(
             request.preemptive_server_basic_auth_for_url(request_url)
     {
         // Basic auth is just a deterministic request header. Sending it
-        // preemptively lets streaming transports avoid libcurl's intermediate
-        // 401 retry body while Digest/NTLM/Negotiate stay on the buffered path.
+        // preemptively avoids an unnecessary intermediate 401 exchange. Other
+        // schemes are handled by the transport's bounded challenge session.
         outgoing.push((
             "Authorization".to_owned(),
             format!("Basic {}", encode_basic_auth(username, password)),
@@ -229,55 +194,95 @@ pub(crate) fn outgoing_request_headers_for_url(
         ));
     }
 
-    if let Some(auth) = request.auth()
-        && auth.target == RequestAuthTarget::ProxyHeader
-        && !header_present(&outgoing, "proxy-authorization")
-    {
-        outgoing.push((
-            "Proxy-Authorization".to_owned(),
-            format!(
-                "Basic {}",
-                encode_basic_auth(&auth.username, &auth.password)
-            ),
-        ));
+    append_header_if_missing(&mut outgoing, "User-Agent", config.user_agent().to_owned());
+    append_header_if_missing(
+        &mut outgoing,
+        "Accept-Encoding",
+        "gzip, deflate, br, zstd".to_owned(),
+    );
+    if request.browser_request_metadata().is_some() {
+        let priority = match crate::runtime::request_fetch_load_priority(request) {
+            crate::ResourceLoadPriority::VeryHigh => "u=0, i",
+            crate::ResourceLoadPriority::High => "u=1, i",
+            crate::ResourceLoadPriority::Medium => "u=2, i",
+            crate::ResourceLoadPriority::Low => "u=3, i",
+            crate::ResourceLoadPriority::VeryLow => "u=4, i",
+        };
+        append_header_if_missing(&mut outgoing, "Priority", priority.to_owned());
     }
-
+    reorder_browser_headers(&mut outgoing, request);
     outgoing
 }
 
-fn reorder_browser_client_hints(headers: &mut Vec<(String, String)>) {
-    const ORDER: &[&str] = &[
-        "sec-ch-ua",
-        "sec-ch-ua-mobile",
-        "sec-ch-ua-platform",
-        "downlink",
-        "rtt",
-        "sec-ch-prefers-color-scheme",
-        "sec-ch-ua-arch",
-        "sec-ch-ua-bitness",
-        "sec-ch-ua-form-factors",
-        "sec-ch-ua-full-version",
-        "sec-ch-ua-full-version-list",
-        "sec-ch-ua-model",
-        "sec-ch-ua-platform-version",
-        "sec-ch-ua-wow64",
-    ];
-    let mut hints = Vec::new();
-    headers.retain(|(name, value)| {
-        let Some(order) = ORDER
+fn reorder_browser_headers(headers: &mut [(String, String)], request: &Request) {
+    let order: &[&str] = if request.is_navigation_request() {
+        &[
+            "sec-ch-ua",
+            "sec-ch-ua-mobile",
+            "sec-ch-ua-platform",
+            "downlink",
+            "rtt",
+            "sec-ch-prefers-color-scheme",
+            "sec-ch-ua-arch",
+            "sec-ch-ua-bitness",
+            "sec-ch-ua-form-factors",
+            "sec-ch-ua-full-version",
+            "sec-ch-ua-full-version-list",
+            "sec-ch-ua-model",
+            "sec-ch-ua-platform-version",
+            "sec-ch-ua-wow64",
+            "upgrade-insecure-requests",
+            "user-agent",
+            "accept",
+            "origin",
+            "sec-fetch-site",
+            "sec-fetch-mode",
+            "sec-fetch-user",
+            "sec-fetch-dest",
+            "referer",
+            "accept-encoding",
+            "accept-language",
+            "cookie",
+            "priority",
+        ]
+    } else if request.browser_request_metadata().is_some() {
+        &[
+            "sec-ch-ua-platform",
+            "user-agent",
+            "sec-ch-ua",
+            "sec-ch-ua-mobile",
+            "downlink",
+            "rtt",
+            "sec-ch-prefers-color-scheme",
+            "sec-ch-ua-arch",
+            "sec-ch-ua-bitness",
+            "sec-ch-ua-form-factors",
+            "sec-ch-ua-full-version",
+            "sec-ch-ua-full-version-list",
+            "sec-ch-ua-model",
+            "sec-ch-ua-platform-version",
+            "sec-ch-ua-wow64",
+            "accept",
+            "origin",
+            "sec-fetch-site",
+            "sec-fetch-mode",
+            "sec-fetch-dest",
+            "referer",
+            "accept-encoding",
+            "accept-language",
+            "cookie",
+            "priority",
+        ]
+    } else {
+        return;
+    };
+    // 稳定排序保留重复字段的相对次序，不改写显式字段值。
+    headers.sort_by_key(|(name, _)| {
+        order
             .iter()
             .position(|candidate| name.eq_ignore_ascii_case(candidate))
-        else {
-            return true;
-        };
-        hints.push((order, name.clone(), value.clone()));
-        false
+            .unwrap_or(order.len())
     });
-    hints.sort_by_key(|(order, _, _)| *order);
-    headers.splice(
-        0..0,
-        hints.into_iter().map(|(_, name, value)| (name, value)),
-    );
 }
 
 pub(crate) fn network_request_extra_info_from_headers(
@@ -622,254 +627,15 @@ pub(crate) fn store_response_cookies(
     ))
 }
 
-pub(crate) fn configure_easy<H: Handler>(
-    easy: &mut Easy2<H>,
-    config: &FetchConfig,
-    request: &Request,
-    request_url: &Url,
-    redirect_chain: &[RedirectInfo],
-    cookie_header: Option<&str>,
-    http_version: RequestHttpVersion,
-    validation_headers: Option<Vec<(String, String)>>,
-) -> Result<Vec<(String, String)>> {
-    ensure_http_network_transport_url(request_url)?;
-    enforce_request_target_policy(config, request_url)?;
-    configure_curl_http_protocol_allowlist(easy)?;
-
-    // Keep proxy CONNECT handshake headers out of the response callbacks so
-    // the collector only processes real HTTP responses.
-    let setopt_result = unsafe {
-        curl_sys::curl_easy_setopt(
-            easy.raw(),
-            curl_sys::CURLOPT_SUPPRESS_CONNECT_HEADERS,
-            1 as c_long,
-        )
-    };
-    if setopt_result != curl_sys::CURLE_OK {
-        return Err(curl::Error::new(setopt_result))
-            .context("failed to suppress proxy CONNECT headers");
-    }
-
-    let request_timeout = request.effective_request_timeout(config);
-    easy.timeout(request_timeout)
-        .context("failed to set curl request timeout")?;
-    easy.progress(true)
-        .context("failed to enable curl progress callback")?;
-    if let Some(connect_timeout) = effective_connect_timeout(config, request) {
-        easy.connect_timeout(connect_timeout)
-            .context("failed to set curl connect timeout")?;
-    }
-
-    let curl_http_version = match http_version {
-        RequestHttpVersion::PreferHttp2 => HttpVersion::V2TLS,
-        RequestHttpVersion::Http1Only => HttpVersion::V11,
-    };
-    easy.http_version(curl_http_version)
-        .with_context(|| format!("failed to configure HTTP version for {request_url}"))?;
-    // Do not enable CURLOPT_PIPEWAIT here. Moli often discovers a burst
-    // of same-origin script/modulepreload requests during parsing, and DCL can
-    // depend on one of those scripts. Waiting for a pending HTTPS connection to
-    // become multiplexable can put critical script fetches behind a slow TLS/H2
-    // setup or slow stream. Let libcurl start eligible transfers immediately;
-    // the runtime-level max-active / max-host caps still bound concurrency.
-    if let Err(error) = easy.tcp_keepalive(true) {
-        debug!(url = %request_url, "failed to enable TCP keepalive: {error}");
-    }
-    if let Err(error) = easy.dns_cache_timeout(Duration::from_secs(60)) {
-        debug!(url = %request_url, "failed to configure curl DNS cache timeout: {error}");
-    }
-    if let Some(max_connects) = config
-        .http_max_total_connections()
-        .or_else(|| config.effective_http_max_host_connections().map(u16::from))
-        .filter(|value| *value > 0)
-        && let Err(error) = easy.max_connects(u32::from(max_connects))
-    {
-        debug!(url = %request_url, "failed to configure curl max_connects: {error}");
-    }
-
-    easy.follow_location(false)
-        .context("failed to disable curl redirect following")?;
-    easy.accept_encoding("")
-        .context("failed to enable curl response decompression")?;
-
-    easy.ssl_verify_peer(config.tls_verify_host())
-        .context("failed to configure curl TLS peer verification")?;
-    easy.ssl_verify_host(config.tls_verify_host())
-        .context("failed to configure curl TLS host verification")?;
-    easy.useragent(config.user_agent())
-        .context("failed to set curl user-agent")?;
-    easy.url(request_url.as_str())
-        .with_context(|| anyhow!("failed to set curl request url to {}", request_url))?;
-
-    match request.method.as_str() {
-        "GET" => easy.get(true).context("failed to configure GET request")?,
-        "HEAD" => easy
-            .nobody(true)
-            .context("failed to configure HEAD request")?,
-        "POST" => {
-            easy.post(true)
-                .context("failed to configure POST request")?;
-            let body_bytes = request.body.as_deref().unwrap_or(&[]);
-            easy.post_fields_copy(body_bytes)
-                .context("failed to set POST body")?;
-        }
-        method => {
-            easy.custom_request(method)
-                .with_context(|| anyhow!("failed to configure {method} request"))?;
-            if let Some(ref body) = request.body {
-                easy.post_fields_copy(body)
-                    .context("failed to set custom request body")?;
-            }
-        }
-    }
-
-    if let Some(proxy) = config.http_proxy() {
-        easy.proxy(proxy)
-            .with_context(|| anyhow!("failed to configure HTTP proxy `{proxy}`"))?;
-    }
-    if let Some(no_proxy) = config.http_no_proxy() {
-        easy.noproxy(no_proxy)
-            .with_context(|| anyhow!("failed to configure HTTP no_proxy `{no_proxy}`"))?;
-    }
-    if !config.http_host_resolve().is_empty() {
-        let mut resolve = List::new();
-        for entry in normalized_http_host_resolve_entries(config.http_host_resolve())? {
-            resolve
-                .append(&entry)
-                .with_context(|| anyhow!("failed to build curl host resolve entry `{entry}`"))?;
-        }
-        easy.resolve(resolve)
-            .context("failed to configure curl host resolve overrides")?;
-    }
-
-    let mut headers = List::new();
-    let mut outgoing_headers = outgoing_request_headers_for_url(
-        config,
-        request,
-        request_url,
-        redirect_chain,
-        cookie_header,
-    );
-    if let Some(web_bot_auth) = config.web_bot_auth() {
-        web_bot_auth
-            .append_request_headers(&mut outgoing_headers, &request.method, request_url)
-            .with_context(|| anyhow!("failed to sign web bot auth request for {request_url}"))?;
-    }
-    let mut has_headers = false;
-
-    let mut has_content_type_header = false;
-    for (name, value) in &outgoing_headers {
-        has_content_type_header |= name.eq_ignore_ascii_case("content-type");
-        let header_line = if value.is_empty() {
-            format!("{name}:")
-        } else {
-            format!("{name}: {value}")
-        };
-        headers
-            .append(&header_line)
-            .context("failed to build request header")?;
-        has_headers = true;
-    }
-    if let Some(validation_headers) = validation_headers {
-        for (name, value) in validation_headers {
-            has_content_type_header |= name.eq_ignore_ascii_case("content-type");
-            headers
-                .append(&format!("{name}: {value}"))
-                .context("failed to build cache validation request header")?;
-            has_headers = true;
-        }
-    }
-    if request.method.eq_ignore_ascii_case("POST") && !has_content_type_header {
-        // libcurl otherwise synthesizes `Content-Type: application/x-www-form-urlencoded`
-        // for POST bodies. Browser fetch/sendBeacon only send Content-Type when
-        // BodyInit or caller headers produce one, so suppress curl's transport default.
-        headers
-            .append("Content-Type:")
-            .context("failed to suppress curl default POST content-type")?;
-        has_headers = true;
-    }
-
-    if has_headers {
-        easy.http_headers(headers)
-            .context("failed to attach curl request headers")?;
-    }
-
-    if let Some(auth) = request.auth()
-        && request.auth_requires_buffered_transport()
-    {
-        let mut methods = Auth::new();
-        match auth.scheme {
-            RequestAuthScheme::Basic => {
-                methods.basic(true);
-            }
-            RequestAuthScheme::Digest => {
-                methods.digest(true);
-            }
-            RequestAuthScheme::Negotiate => {
-                methods.gssnegotiate(true);
-            }
-            RequestAuthScheme::Ntlm => {
-                methods.ntlm(true);
-            }
-        }
-        match auth.target {
-            RequestAuthTarget::Server => {
-                easy.username(&auth.username)
-                    .context("failed to set server auth username")?;
-                easy.password(&auth.password)
-                    .context("failed to set server auth password")?;
-                easy.http_auth(&methods)
-                    .context("failed to configure server auth scheme")?;
-            }
-            RequestAuthTarget::Proxy => {
-                easy.proxy_username(&auth.username)
-                    .context("failed to set proxy auth username")?;
-                easy.proxy_password(&auth.password)
-                    .context("failed to set proxy auth password")?;
-                easy.proxy_auth(&methods)
-                    .context("failed to configure proxy auth scheme")?;
-            }
-            RequestAuthTarget::ProxyHeader => {}
-        }
-    }
-
-    Ok(outgoing_headers)
+pub(crate) enum TargetAddressResolution {
+    Approved(Vec<IpAddr>),
+    Dns { host: String, port: u16 },
 }
 
-fn enforce_request_target_policy(config: &FetchConfig, request_url: &Url) -> Result<()> {
-    if crate::should_request_be_blocked_due_to_bad_port(request_url) {
-        bail!("blocked bad port for `{request_url}`");
-    }
-
-    if !config.block_private_networks() && config.block_cidrs().is_empty() {
-        return Ok(());
-    }
-
-    let Some(host) = request_url.host_str() else {
-        return Ok(());
-    };
-    let port = request_url
-        .port_or_known_default()
-        .ok_or_else(|| anyhow!("could not determine port for request url `{request_url}`"))?;
-
-    let resolved_ips = resolve_target_ips(config, host, port)
-        .with_context(|| anyhow!("failed to resolve request host `{host}` for `{request_url}`"))?;
-    for ip in resolved_ips {
-        if config.block_private_networks() && is_private_or_internal_ip(ip) {
-            bail!("blocked private network address `{ip}` for `{request_url}`");
-        }
-        if let Some(cidr) = config.block_cidrs().iter().find(|cidr| cidr.contains(&ip)) {
-            bail!("blocked address `{ip}` for `{request_url}` because it matches `{cidr}`");
-        }
-    }
-
-    Ok(())
-}
-
-pub(crate) fn resolve_allowed_target_ips(
+pub(crate) fn target_address_resolution(
     config: &FetchConfig,
     request_url: &Url,
-) -> Result<Vec<IpAddr>> {
+) -> Result<TargetAddressResolution> {
     if crate::should_request_be_blocked_due_to_bad_port(request_url) {
         bail!("blocked bad port for `{request_url}`");
     }
@@ -879,31 +645,40 @@ pub(crate) fn resolve_allowed_target_ips(
     let port = request_url
         .port_or_known_default()
         .ok_or_else(|| anyhow!("could not determine port for request url `{request_url}`"))?;
-    let resolved_ips = resolve_target_ips(config, host, port)
-        .with_context(|| anyhow!("failed to resolve request host `{host}` for `{request_url}`"))?;
-    for ip in &resolved_ips {
-        if config.block_private_networks() && is_private_or_internal_ip(*ip) {
-            bail!("blocked private network address `{ip}` for `{request_url}`");
-        }
-        if let Some(cidr) = config.block_cidrs().iter().find(|cidr| cidr.contains(ip)) {
-            bail!("blocked address `{ip}` for `{request_url}` because it matches `{cidr}`");
-        }
-    }
-    Ok(resolved_ips)
-}
-
-fn resolve_target_ips(config: &FetchConfig, host: &str, port: u16) -> Result<Vec<IpAddr>> {
-    if let Some(resolved_ips) =
+    if let Some(addresses) =
         resolve_host_resolve_override_ips(config.http_host_resolve(), host, port)?
     {
-        return Ok(resolved_ips);
+        validate_allowed_target_ips(config, request_url, &addresses)?;
+        return Ok(TargetAddressResolution::Approved(addresses));
     }
-
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        return Ok(vec![ip]);
+    if let Ok(address) = host.parse::<IpAddr>() {
+        validate_allowed_target_ips(config, request_url, &[address])?;
+        return Ok(TargetAddressResolution::Approved(vec![address]));
     }
+    Ok(TargetAddressResolution::Dns {
+        host: host.to_owned(),
+        port,
+    })
+}
 
-    resolve_system_target_ips(host, port)
+pub(crate) fn validate_allowed_target_ips(
+    config: &FetchConfig,
+    request_url: &Url,
+    addresses: &[IpAddr],
+) -> Result<()> {
+    for address in addresses {
+        if config.block_private_networks() && is_private_or_internal_ip(*address) {
+            bail!("blocked private network address `{address}` for `{request_url}`");
+        }
+        if let Some(cidr) = config
+            .block_cidrs()
+            .iter()
+            .find(|cidr| cidr.contains(address))
+        {
+            bail!("blocked address `{address}` for `{request_url}` because it matches `{cidr}`");
+        }
+    }
+    Ok(())
 }
 
 fn resolve_host_resolve_override_ips(
@@ -944,23 +719,8 @@ fn resolve_host_resolve_override_ips(
     Ok(exact_match.or(wildcard_match))
 }
 
-fn resolve_system_target_ips(host: &str, port: u16) -> Result<Vec<IpAddr>> {
-    let mut resolved = Vec::new();
-    for addr in (host, port).to_socket_addrs()? {
-        let ip = addr.ip();
-        if !resolved.contains(&ip) {
-            resolved.push(ip);
-        }
-    }
-    if resolved.is_empty() {
-        bail!("no addresses resolved");
-    }
-    Ok(resolved)
-}
-
 enum HttpHostResolveEntry {
     Add {
-        plus_prefix: bool,
         host: String,
         port: u16,
         addresses: Vec<IpAddr>,
@@ -969,40 +729,6 @@ enum HttpHostResolveEntry {
         host: String,
         port: u16,
     },
-}
-
-impl HttpHostResolveEntry {
-    fn curl_entry(&self) -> String {
-        match self {
-            Self::Add {
-                plus_prefix,
-                host,
-                port,
-                addresses,
-            } => {
-                let prefix = if *plus_prefix { "+" } else { "" };
-                let addresses = addresses
-                    .iter()
-                    .map(format_http_host_resolve_ip)
-                    .collect::<Vec<_>>()
-                    .join(",");
-                format!(
-                    "{prefix}{}:{port}:{addresses}",
-                    format_http_host_resolve_host(host)
-                )
-            }
-            Self::Remove { host, port } => {
-                format!("-{}:{port}", format_http_host_resolve_host(host))
-            }
-        }
-    }
-}
-
-fn normalized_http_host_resolve_entries(entries: &[String]) -> Result<Vec<String>> {
-    entries
-        .iter()
-        .map(|entry| parse_http_host_resolve_entry(entry).map(|entry| entry.curl_entry()))
-        .collect()
 }
 
 fn parse_http_host_resolve_entry(entry: &str) -> Result<HttpHostResolveEntry> {
@@ -1015,11 +741,7 @@ fn parse_http_host_resolve_entry(entry: &str) -> Result<HttpHostResolveEntry> {
         });
     }
 
-    let (plus_prefix, entry) = if let Some(entry) = entry.strip_prefix('+') {
-        (true, entry)
-    } else {
-        (false, entry)
-    };
+    let entry = entry.strip_prefix('+').unwrap_or(entry);
     let (host, port, address) = split_http_host_resolve_add_entry(entry)?;
     let port = parse_http_host_resolve_port(port, entry)?;
     let mut addresses = Vec::new();
@@ -1037,7 +759,6 @@ fn parse_http_host_resolve_entry(entry: &str) -> Result<HttpHostResolveEntry> {
     }
 
     Ok(HttpHostResolveEntry::Add {
-        plus_prefix,
         host: normalize_http_host_resolve_host(host),
         port,
         addresses,
@@ -1109,21 +830,6 @@ fn normalize_http_host_resolve_host(host: &str) -> String {
     host.trim_matches(['[', ']']).to_owned()
 }
 
-fn format_http_host_resolve_host(host: &str) -> String {
-    if host != "*" && host.contains(':') {
-        format!("[{host}]")
-    } else {
-        host.to_owned()
-    }
-}
-
-fn format_http_host_resolve_ip(ip: &IpAddr) -> String {
-    match ip {
-        IpAddr::V4(ip) => ip.to_string(),
-        IpAddr::V6(ip) => format!("[{ip}]"),
-    }
-}
-
 fn is_private_or_internal_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ipv4) => {
@@ -1147,26 +853,6 @@ fn is_private_or_internal_ip(ip: IpAddr) -> bool {
                 || (ipv6.segments()[0] == 0x2001 && ipv6.segments()[1] == 0x0db8)
         }
     }
-}
-
-fn configure_curl_http_protocol_allowlist<H: Handler>(easy: &mut Easy2<H>) -> Result<()> {
-    for (option, description) in [
-        (CURL_OPTION_PROTOCOLS_STR, "request protocols"),
-        (CURL_OPTION_REDIR_PROTOCOLS_STR, "redirect protocols"),
-    ] {
-        let setopt_result = unsafe {
-            curl_sys::curl_easy_setopt(
-                easy.raw(),
-                option,
-                CURL_HTTP_PROTOCOL_ALLOWLIST.as_ptr().cast::<c_char>(),
-            )
-        };
-        if setopt_result != curl_sys::CURLE_OK {
-            return Err(curl::Error::new(setopt_result))
-                .with_context(|| format!("failed to restrict curl {description} to HTTP(S)"));
-        }
-    }
-    Ok(())
 }
 
 fn encode_basic_auth(username: &str, password: &str) -> String {
@@ -1195,6 +881,7 @@ fn encode_basic_auth(username: &str, password: &str) -> String {
     out
 }
 
+#[cfg(test)]
 fn effective_connect_timeout(config: &FetchConfig, request: &Request) -> Option<Duration> {
     config
         .http_connect_timeout_ms()
@@ -1219,24 +906,6 @@ mod tests {
             .iter()
             .find(|(header_name, _)| header_name.eq_ignore_ascii_case(name))
             .map(|(_, value)| value.clone())
-    }
-
-    struct ProtocolAllowlistHandler;
-
-    impl Handler for ProtocolAllowlistHandler {}
-
-    #[test]
-    fn curl_string_protocol_allowlist_rejects_file_transfer() {
-        let mut easy = Easy2::new(ProtocolAllowlistHandler);
-        configure_curl_http_protocol_allowlist(&mut easy)
-            .expect("libcurl should accept the string protocol allowlist options");
-        easy.url("file:///moli-policy-must-not-open")
-            .expect("file URL should parse as a curl URL");
-
-        let error = easy
-            .perform()
-            .expect_err("the curl backstop must reject a file transfer");
-        assert_eq!(error.code(), curl_sys::CURLE_UNSUPPORTED_PROTOCOL);
     }
 
     fn redirect(from_url: &Url, to_url: &Url) -> RedirectInfo {
@@ -1655,23 +1324,6 @@ mod tests {
         );
         assert!(header_value(&headers, "accept").is_some());
         assert!(header_value(&headers, "sec-ch-ua").is_some());
-    }
-
-    #[test]
-    fn http_host_resolve_entries_are_normalized_before_curl_configuration() {
-        let entries = normalized_http_host_resolve_entries(&[
-            " localhost:80: 1.1.1.1 , [2001:db8::1] ".to_owned(),
-            " - localhost:80 ".to_owned(),
-        ])
-        .unwrap();
-
-        assert_eq!(
-            entries,
-            vec![
-                "localhost:80:1.1.1.1,[2001:db8::1]".to_owned(),
-                "-localhost:80".to_owned()
-            ]
-        );
     }
 
     #[test]

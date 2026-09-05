@@ -23,18 +23,6 @@ impl NegotiatedHttpVersion {
             Self::Http3 => "h3",
         }
     }
-
-    pub(crate) fn from_status_line(line: &str) -> Option<Self> {
-        let version = line.strip_prefix("HTTP/")?.split_whitespace().next()?;
-        match version {
-            "0.9" => Some(Self::Http09),
-            "1.0" => Some(Self::Http10),
-            "1.1" => Some(Self::Http11),
-            "2" | "2.0" => Some(Self::Http2),
-            "3" | "3.0" => Some(Self::Http3),
-            _ => None,
-        }
-    }
 }
 
 #[derive(Debug, Clone)]

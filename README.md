@@ -128,6 +128,53 @@ Run `fetch --help` for the complete option list, including output formats,
 page-load/response waits, profiles, proxy settings, resource policies, and
 tracing options.
 
+### Network transport and Stealth
+
+Moli uses one native Rust async transport for HTTP/1.x, HTTP/2, and outbound
+WebSockets, with BoringSSL for TLS. At startup Moli selects a process-wide
+Stealth baseline modeled on Chrome **152.0.7977.82**. This preset coordinates
+the transport fingerprint with Moli's browser identity; it is a specific
+reference baseline, not a claim that every Chrome fingerprint or rendering
+surface is reproduced. HTTP/3 is not supported.
+
+- `--stealth chrome` is the default. `--stealth off` keeps the same transport,
+  certificate verification, and network restrictions, but uses ordinary
+  TLS/HTTP protocol defaults. The `moli-stealth-net` library itself also
+  defaults to ordinary behavior unless its caller explicitly selects a preset.
+- TLS overrides are `--tls-cipher-list`, `--tls-curves`, and
+  `--tls-signature-algorithms`. HTTP/2 overrides are
+  `--http2-header-table-size`, `--http2-enable-push`,
+  `--http2-advertised-max-concurrent-streams`,
+  `--http2-initial-window-size`, `--http2-max-frame-size`,
+  `--http2-max-header-list-size`, and `--http2-connection-window-size`.
+  Invalid combinations fail during startup; overrides apply to the whole
+  process and require a restart.
+- `--user-agent` and `--user-agent-suffix` override browser identity without
+  selecting a different transport fingerprint. For `moli fetch`, explicit
+  `--header 'Name: Value'` values take precedence over generated header
+  baselines (Cookie authorization remains governed by browser cookie policy).
+- `--http-proxy` wins over environment discovery; an explicitly empty value
+  disables proxy fallback. Otherwise Moli honors lowercase `http_proxy`,
+  `https_proxy`/`HTTPS_PROXY`, and `all_proxy`/`ALL_PROXY`, plus
+  `--http-no-proxy` or `no_proxy`/`NO_PROXY`; uppercase `HTTP_PROXY` is
+  deliberately ignored. `--http-host-resolve HOST:PORT:ADDR` pins approved
+  direct-origin addresses and bypasses origin DNS. Proxy-side DNS follows the
+  selected HTTP/SOCKS proxy mode.
+- Basic and Digest server/proxy authentication are portable. Negotiate and NTLM
+  use Windows SSPI and are unavailable on other targets. HTTP proxy Bearer
+  credentials are available through `--proxy-bearer-token` and stay confined
+  to the proxy exchange.
+- Outbound WebSockets negotiate real `permessage-deflate`, including fragmented
+  messages, context takeover, and a decoded-message size limit. HTTPS and WSS
+  share context-owned TLS sessions; inbound CDP/WebDriver WebSockets are unchanged.
+- The HTTP request, physical connection, per-host connection, and per-connection
+  HTTP/2 stream limits remain separate. A configured transport limit of `0`
+  means unbounded, as before the curl replacement.
+
+See [`moli-cdp-smoke/README.md#transport-fingerprint-evidence`](moli-cdp-smoke/README.md#transport-fingerprint-evidence)
+for the executable comparison, recorded Chrome snapshot, and maintained native
+patch boundaries. This is a clean transport cutover: there is no curl fallback.
+
 ### Start the automation server
 
 ```bash
@@ -253,7 +300,7 @@ while a changed token triggers one fresh frame. Paint results are never reused.
 Moli is a standalone browser kernel, not a Chromium wrapper. It is built in
 Rust, has its own ownership and lifecycle rules, and relies on:
 
-- `libcurl` — network transport and multi-request runtime
+- `moli-stealth-net`, BoringSSL, and HTTP/2 — native Rust async network transport with configurable TLS/HTTP fingerprints
 - `html5ever` — HTML parsing
 - `rusty_v8` / V8 — JavaScript execution
 - Servo/Stylo — selectors, cascade, computed style

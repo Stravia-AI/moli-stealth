@@ -13,6 +13,17 @@ from moli_cdp_smoke.process import terminate_process_tree
 
 
 class ExternalProcessTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cleanup_preserves_an_already_exited_process_status(self) -> None:
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            "raise SystemExit(7)",
+            start_new_session=os.name == "posix",
+        )
+        self.assertEqual(await process.wait(), 7)
+        self.assertTrue(await terminate_process_tree(process))
+        self.assertEqual(process.returncode, 7)
+
     async def test_successful_json_process_extends_results(self) -> None:
         expected = {"name": "external-process-probe", "ok": True}
         payload = json.dumps({"ok": True, "results": [expected]})

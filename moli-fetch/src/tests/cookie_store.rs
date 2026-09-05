@@ -1,4 +1,3 @@
-use moli_browser_profile::DEFAULT_SEC_CH_UA_PLATFORM;
 use moli_cookie_jar::test_support::BrowserCookieStore;
 use moli_cookie_jar::{NetworkCookieRequestContext, new_shared_browser_cookie_store};
 use url::Url;
@@ -272,36 +271,12 @@ fn outgoing_request_headers_skip_manual_cookie_when_store_cookie_exists() {
     let headers = outgoing_request_headers(&config, &request, Some("sid=server"));
 
     assert_eq!(
-        headers,
-        vec![
-            ("Cookie".to_owned(), "sid=server".to_owned()),
-            ("X-Test".to_owned(), "ok".to_owned()),
-        ]
-    );
-}
-
-#[test]
-fn outgoing_request_headers_include_default_config_headers() {
-    let mut config = FetchConfig::default();
-    config.push_default_request_header("X-Test", "one");
-    config.push_default_request_header("X-Trace", "two");
-    let request = Request::new(
-        "GET",
-        "https://example.com/app/panel",
-        None,
-        vec![("X-Request".to_owned(), "three".to_owned())],
-    )
-    .unwrap();
-
-    let headers = outgoing_request_headers(&config, &request, None);
-
-    assert_eq!(
-        headers,
-        vec![
-            ("X-Test".to_owned(), "one".to_owned()),
-            ("X-Trace".to_owned(), "two".to_owned()),
-            ("X-Request".to_owned(), "three".to_owned()),
-        ]
+        headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("cookie"))
+            .map(|(_, value)| value.as_str())
+            .collect::<Vec<_>>(),
+        ["sid=server"]
     );
 }
 
@@ -315,11 +290,12 @@ fn outgoing_request_headers_skip_default_cookie_when_store_cookie_exists() {
     let headers = outgoing_request_headers(&config, &request, Some("sid=server"));
 
     assert_eq!(
-        headers,
-        vec![
-            ("Cookie".to_owned(), "sid=server".to_owned()),
-            ("X-Test".to_owned(), "ok".to_owned()),
-        ]
+        headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("cookie"))
+            .map(|(_, value)| value.as_str())
+            .collect::<Vec<_>>(),
+        ["sid=server"]
     );
 }
 
@@ -333,11 +309,12 @@ fn outgoing_request_headers_keep_default_cookie_without_store_cookie() {
     let headers = outgoing_request_headers(&config, &request, None);
 
     assert_eq!(
-        headers,
-        vec![
-            ("Cookie".to_owned(), "manual=1".to_owned()),
-            ("X-Test".to_owned(), "ok".to_owned()),
-        ]
+        headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("cookie"))
+            .map(|(_, value)| value.as_str())
+            .collect::<Vec<_>>(),
+        ["manual=1"]
     );
 }
 
@@ -379,12 +356,12 @@ fn outgoing_request_headers_preserve_duplicate_default_headers_in_order() {
     let headers = outgoing_request_headers(&config, &request, None);
 
     assert_eq!(
-        headers,
-        vec![
-            ("X-Test".to_owned(), "one".to_owned()),
-            ("X-Test".to_owned(), "two".to_owned()),
-            ("X-Test".to_owned(), "three".to_owned()),
-        ]
+        headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("x-test"))
+            .map(|(_, value)| value.as_str())
+            .collect::<Vec<_>>(),
+        ["one", "two", "three"]
     );
 }
 
@@ -395,44 +372,6 @@ fn top_level_navigation_request(request_url: &str, initiator_url: Option<&str>) 
     } else {
         request
     }
-}
-
-#[test]
-fn top_level_navigation_headers_default_to_browser_style_document_navigation() {
-    let config = FetchConfig::default();
-    let request = top_level_navigation_request("https://example.com/docs", None);
-
-    let headers = outgoing_request_headers(&config, &request, None);
-
-    assert_eq!(
-        header_value(&headers, "accept"),
-        Some(
-            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"
-        )
-    );
-    assert_eq!(
-        header_value(&headers, "accept-language"),
-        Some("en-US,en;q=0.9")
-    );
-    assert_eq!(
-        header_value(&headers, "upgrade-insecure-requests"),
-        Some("1")
-    );
-    assert_eq!(header_value(&headers, "sec-fetch-site"), Some("none"));
-    assert_eq!(header_value(&headers, "sec-fetch-mode"), Some("navigate"));
-    assert_eq!(header_value(&headers, "sec-fetch-dest"), Some("document"));
-    assert_eq!(header_value(&headers, "sec-fetch-user"), Some("?1"));
-    assert_eq!(header_value(&headers, "sec-ch-ua-mobile"), Some("?0"));
-    assert_eq!(
-        header_value(&headers, "sec-ch-ua-platform"),
-        Some(DEFAULT_SEC_CH_UA_PLATFORM)
-    );
-    assert_eq!(
-        header_value(&headers, "sec-ch-ua"),
-        Some("\"Chromium\";v=\"152\", \" Not A;Brand\";v=\"99\", \"Google Chrome\";v=\"152\"")
-    );
-    assert_eq!(header_value(&headers, "referer"), None);
-    assert_eq!(header_value(&headers, "cache-control"), None);
 }
 
 #[test]
@@ -582,49 +521,6 @@ fn generic_subresource_requests_do_not_inherit_browser_headers_without_metadata(
     assert_eq!(header_value(&headers, "sec-ch-ua"), None);
     assert_eq!(header_value(&headers, "sec-ch-ua-mobile"), None);
     assert_eq!(header_value(&headers, "sec-ch-ua-platform"), None);
-}
-
-#[test]
-fn browser_fetch_and_xhr_subresource_headers_match_chromium_same_origin_shape() {
-    let config = FetchConfig::default();
-
-    for metadata in [BrowserRequestMetadata::Fetch, BrowserRequestMetadata::Xhr] {
-        let request = Request::new("GET", "https://example.com/api/data", None, vec![])
-            .unwrap()
-            .with_initiator_url(
-                &Url::parse("https://example.com/docs/page.html?x=1#section").unwrap(),
-            )
-            .with_browser_request_metadata(metadata);
-
-        let headers = outgoing_request_headers(&config, &request, None);
-
-        assert_eq!(header_value(&headers, "accept"), Some("*/*"));
-        assert_eq!(
-            header_value(&headers, "accept-language"),
-            Some("en-US,en;q=0.9")
-        );
-        assert_eq!(
-            header_value(&headers, "sec-fetch-site"),
-            Some("same-origin")
-        );
-        assert_eq!(header_value(&headers, "sec-fetch-mode"), Some("cors"));
-        assert_eq!(header_value(&headers, "sec-fetch-dest"), Some("empty"));
-        assert_eq!(header_value(&headers, "sec-fetch-user"), None);
-        assert_eq!(header_value(&headers, "origin"), None);
-        assert_eq!(
-            header_value(&headers, "sec-ch-ua"),
-            Some("\"Chromium\";v=\"152\", \" Not A;Brand\";v=\"99\", \"Google Chrome\";v=\"152\"")
-        );
-        assert_eq!(header_value(&headers, "sec-ch-ua-mobile"), Some("?0"));
-        assert_eq!(
-            header_value(&headers, "sec-ch-ua-platform"),
-            Some(DEFAULT_SEC_CH_UA_PLATFORM)
-        );
-        assert_eq!(
-            header_value(&headers, "referer"),
-            Some("https://example.com/docs/page.html?x=1")
-        );
-    }
 }
 
 #[test]

@@ -26,12 +26,12 @@ pub struct WindowSurfaceProfile {
 /// Keep this token in the default user agent as well. CDP clients commonly use
 /// `product` for Chromium feature detection, while Moli's own product
 /// identity remains available through its binary/package metadata.
-pub const DEFAULT_CHROME_FULL_VERSION: &str = "152.0.7977.75";
-pub const DEFAULT_CDP_PRODUCT: &str = "Chrome/152.0.7977.75";
+pub const DEFAULT_CHROME_FULL_VERSION: &str = "152.0.7977.82";
+pub const DEFAULT_CDP_PRODUCT: &str = "Chrome/152.0.7977.82";
 pub const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36";
 pub const DEFAULT_ACCEPT_LANGUAGE: &str = "en-US,en;q=0.9";
 pub const DEFAULT_SEC_CH_UA_PLATFORM: &str = "\"Windows\"";
-pub const DEFAULT_SEC_CH_UA_PLATFORM_VERSION: &str = "\"10.0\"";
+pub const DEFAULT_SEC_CH_UA_PLATFORM_VERSION: &str = "\"19.0.0\"";
 pub const DEFAULT_SEC_CH_UA_ARCH: &str = "\"x86\"";
 pub const DEFAULT_SEC_CH_UA_BITNESS: &str = "\"64\"";
 pub const DEFAULT_SEC_CH_UA_MODEL: &str = "\"\"";

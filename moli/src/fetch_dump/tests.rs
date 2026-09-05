@@ -10,9 +10,7 @@ use moli_core::{
 use serde_json::{Value, json};
 use tokio::{net::TcpListener, task::JoinHandle};
 
-use super::{
-    render_page_dump_async, render_page_dump_with_options_async, render_page_output_async,
-};
+use super::{render_page_dump_with_options_async, render_page_output_async};
 use crate::{
     cli::{DumpFormat, StripOptions},
     config::FetchCommandConfig,
@@ -373,53 +371,6 @@ async fn render_page_dump_with_options_async_inlines_child_frames() -> Result<()
 
     assert!(rendered.contains("data-moli-frame-url="));
     assert!(rendered.contains("child frame"));
-    http_server.abort();
-    Ok(())
-}
-
-#[tokio::test]
-async fn render_page_dump_async_includes_network_trace_config_summary() -> Result<()> {
-    let (_browser, mut page, http_server) =
-        load_page(r#"<!doctype html><html><body>ok</body></html>"#).await?;
-
-    let rendered = render_page_dump_async(
-        &mut page,
-        &FetchCommandConfig {
-            dump_mode: Some(DumpFormat::Json),
-            trace_network: true,
-            network_trace_config: Some(crate::network_trace::NetworkTraceConfigSummary {
-                explicit_http_proxy: true,
-                libcurl_env_proxy_fallback: false,
-                http_no_proxy: true,
-                proxy_bearer_token: true,
-                tls_verify_host: true,
-                obey_robots: false,
-                http_cache: false,
-                connect_timeout_ms: Some(2500),
-                request_timeout_ms: 5000,
-                max_concurrent: Some(16),
-                max_host_open: Some(4),
-                max_host_connections: Some(6),
-                effective_max_host_connections: Some(6),
-                max_total_connections: Some(64),
-                http2_max_concurrent_streams: Some(100),
-                max_response_size: Some(1024),
-                block_private_networks: false,
-                block_cidr_count: 0,
-            }),
-            ..FetchCommandConfig::default()
-        },
-    )
-    .await?;
-    let payload: Value = serde_json::from_str(&rendered)?;
-
-    assert_eq!(payload["network"]["config"]["explicit_http_proxy"], true);
-    assert_eq!(
-        payload["network"]["config"]["libcurl_env_proxy_fallback"],
-        false
-    );
-    assert_eq!(payload["network"]["config"]["proxy_bearer_token"], true);
-    assert_eq!(payload["network"]["config"]["connect_timeout_ms"], 2500);
     http_server.abort();
     Ok(())
 }

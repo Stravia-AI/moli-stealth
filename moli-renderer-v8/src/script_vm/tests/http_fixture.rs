@@ -25,7 +25,7 @@ impl CapturedHttpRequest {
 
 /// Small real-network fixture for standalone `ScriptVm` tests.
 ///
-/// Resource-loading tests must exercise the same Tokio/libcurl path as
+/// Resource-loading tests must exercise the same Tokio/native transport path as
 /// production. This server intentionally does not emulate a task runner or
 /// completion queue; it only supplies deterministic HTTP responses and records
 /// the requests that reached the transport boundary.

@@ -2465,10 +2465,13 @@ async fn child_click_uses_pre_dispatch_button_activation_target_after_dom_remova
             .expect("button child submit load log should evaluate"),
         expected_url.as_str()
     );
-    assert_eq!(
-        server.finish_targets().await,
-        vec!["/path/does_not_exist.html"]
-    );
+    let request_targets = server.finish_targets().await;
+    assert_eq!(request_targets.len(), 1);
+    let request_url = base_url
+        .join(&request_targets[0])
+        .expect("button child-submit request target URL");
+    assert_eq!(request_url.path(), "/path/does_not_exist.html");
+    assert!(request_url.query().is_none_or(str::is_empty));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -2723,12 +2726,21 @@ async fn programmatic_form_submit_keeps_successive_distinct_child_targets() {
         .await
         .expect("multi-target form server should finish");
     assert_eq!(requests.len(), 3);
-    assert!(
-        requests
-            .iter()
-            .all(|request| request == "GET /path/formaction.html HTTP/1.1"),
-        "unexpected multi-target form requests: {requests:?}"
-    );
+    for request in &requests {
+        let mut parts = request.split_whitespace();
+        assert_eq!(parts.next(), Some("GET"), "unexpected request: {request}");
+        let target = parts.next().expect("form request should have a target");
+        assert_eq!(
+            parts.next(),
+            Some("HTTP/1.1"),
+            "unexpected request: {request}"
+        );
+        assert_eq!(parts.next(), None, "unexpected request: {request}");
+        let request_url = url::Url::parse(&format!("http://{address}{target}"))
+            .expect("multi-target form request target URL");
+        assert_eq!(request_url.path(), "/path/formaction.html");
+        assert!(request_url.query().is_none_or(str::is_empty));
+    }
 }
 
 #[test]

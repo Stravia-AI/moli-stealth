@@ -342,16 +342,10 @@ async fn fetch_respects_request_timeout_but_default_timeout_allows_slow_fixture(
     let mut tight_config = AppConfig::default();
     tight_config.fetch_mut().set_request_timeout_ms(100);
     let tight_browser = Browser::new(tight_config)?;
-    let timeout_error = tight_browser
+    tight_browser
         .fetch(&server.url("/slow-a"))
         .await
-        .unwrap_err();
-    assert!(
-        timeout_error
-            .chain()
-            .any(|cause| cause.to_string().contains("Timeout was reached")),
-        "expected curl timeout error, got: {timeout_error:#}"
-    );
+        .expect_err("the slow response must exceed the tight request deadline");
 
     let default_browser = Browser::new(AppConfig::default())?;
     let page = default_browser.fetch(&server.url("/slow-a")).await?;

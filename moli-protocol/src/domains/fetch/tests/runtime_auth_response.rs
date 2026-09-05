@@ -79,6 +79,66 @@ fn assert_chromium_successful_http_extra_info(
     assert_eq!(finished.len(), 1, "one successful network terminal");
 }
 
+async fn spawn_basic_proxy(
+    success_body: &'static str,
+    realm: &'static str,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let mut buf = [0u8; 8192];
+                let mut request = Vec::new();
+                loop {
+                    let Ok(read) = stream.read(&mut buf).await else {
+                        return;
+                    };
+                    if read == 0 {
+                        return;
+                    }
+                    request.extend_from_slice(&buf[..read]);
+                    if request.windows(4).any(|part| part == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let request = String::from_utf8_lossy(&request);
+                let first_line = request.lines().next().unwrap_or_default();
+                let has_proxy_auth = request.lines().any(|line| {
+                    line.split_once(':').is_some_and(|(name, value)| {
+                        name.eq_ignore_ascii_case("proxy-authorization")
+                            && value.trim() == "Basic dXNlcjpwYXNz"
+                    })
+                });
+                let response = if first_line.contains("http://example.test/page") {
+                    let body = "<!doctype html><html><body>ready</body></html>";
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                } else if has_proxy_auth {
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{success_body}",
+                        success_body.len()
+                    )
+                } else {
+                    let body = "proxy auth required";
+                    format!(
+                        "HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"{realm}\"\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                };
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            });
+        }
+    });
+    (format!("http://{addr}"), server)
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_fetch_subresource_intercept_response_pauses_after_response_until_continue_response()
  {
@@ -2204,51 +2264,14 @@ async fn runtime_fetch_auth_required_includes_synthesized_cookie_header() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_fetch_subresource_proxy_auth_required_then_continue_with_auth_resolves() {
-    async fn page() -> impl IntoResponse {
-        (
-            [(CONTENT_TYPE.as_str(), "text/html")],
-            "<!doctype html><html><body>ready</body></html>",
-        )
-    }
-
-    async fn protected(headers: HeaderMap) -> impl IntoResponse {
-        let expected = format!("Basic {}", super::encode_basic_auth("user", "pass"));
-        match headers
-            .get("proxy-authorization")
-            .and_then(|value| value.to_str().ok())
-        {
-            Some(value) if value == expected => (
-                StatusCode::OK,
-                [(CONTENT_TYPE.as_str(), "text/plain")],
-                "proxy secret fetch",
-            )
-                .into_response(),
-            _ => (
-                StatusCode::PROXY_AUTHENTICATION_REQUIRED,
-                [(PROXY_AUTHENTICATE.as_str(), "Basic realm=\"proxy-area\"")],
-                "proxy auth required",
-            )
-                .into_response(),
-        }
-    }
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
-        axum::serve(
-            listener,
-            Router::new()
-                .route("/page", get(page))
-                .route("/protected", any(protected)),
-        )
-        .await
-        .unwrap();
-    });
-
-    let page_url = format!("http://{addr}/page");
-    let protected_url = format!("http://{addr}/protected");
+    let (proxy_url, proxy_server) = spawn_basic_proxy("proxy secret fetch", "proxy-area").await;
+    let page_url = "http://example.test/page";
+    let protected_url = "http://example.test/protected";
     let mut ctx = TestContext::new();
-    with_loaded_http_document(&mut ctx, &page_url, "SID-1", "TID-1").await;
+    ctx.conn
+        .set_http_proxy_override_async(Some(proxy_url))
+        .await;
+    with_loaded_http_document(&mut ctx, page_url, "SID-1", "TID-1").await;
     ctx.sent.clear();
 
     ctx.process_async(json!({
@@ -2372,7 +2395,7 @@ async fn runtime_fetch_subresource_proxy_auth_required_then_continue_with_auth_r
         .expect("network response event");
     assert_eq!(response["params"]["response"]["status"], 200);
 
-    server.abort();
+    proxy_server.abort();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -3590,54 +3613,14 @@ async fn runtime_xhr_subresource_handles_multi_round_digest_auth() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_xhr_subresource_proxy_auth_required_then_continue_with_auth_resolves() {
-    async fn page() -> impl IntoResponse {
-        (
-            [(CONTENT_TYPE.as_str(), "text/html")],
-            "<!doctype html><html><body>ready</body></html>",
-        )
-    }
-
-    async fn protected(headers: HeaderMap) -> impl IntoResponse {
-        let expected = format!("Basic {}", super::encode_basic_auth("user", "pass"));
-        match headers
-            .get("proxy-authorization")
-            .and_then(|value| value.to_str().ok())
-        {
-            Some(value) if value == expected => (
-                StatusCode::OK,
-                [(CONTENT_TYPE.as_str(), "text/plain")],
-                "xhr proxy secret",
-            )
-                .into_response(),
-            _ => (
-                StatusCode::PROXY_AUTHENTICATION_REQUIRED,
-                [(
-                    PROXY_AUTHENTICATE.as_str(),
-                    "Basic realm=\"xhr-proxy-area\"",
-                )],
-                "proxy auth required",
-            )
-                .into_response(),
-        }
-    }
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
-        axum::serve(
-            listener,
-            Router::new()
-                .route("/page", get(page))
-                .route("/protected", any(protected)),
-        )
-        .await
-        .unwrap();
-    });
-
-    let page_url = format!("http://{addr}/page");
-    let protected_url = format!("http://{addr}/protected");
+    let (proxy_url, proxy_server) = spawn_basic_proxy("xhr proxy secret", "xhr-proxy-area").await;
+    let page_url = "http://example.test/page";
+    let protected_url = "http://example.test/protected";
     let mut ctx = TestContext::new();
-    with_loaded_http_document(&mut ctx, &page_url, "SID-1", "TID-1").await;
+    ctx.conn
+        .set_http_proxy_override_async(Some(proxy_url))
+        .await;
+    with_loaded_http_document(&mut ctx, page_url, "SID-1", "TID-1").await;
     ctx.sent.clear();
 
     ctx.process_async(json!({
@@ -3762,7 +3745,7 @@ async fn runtime_xhr_subresource_proxy_auth_required_then_continue_with_auth_res
     let resolved = take_response_by_id(&mut ctx, 741);
     assert_eq!(resolved["result"]["result"]["value"], "xhr proxy secret");
 
-    server.abort();
+    proxy_server.abort();
 }
 
 #[tokio::test(flavor = "multi_thread")]

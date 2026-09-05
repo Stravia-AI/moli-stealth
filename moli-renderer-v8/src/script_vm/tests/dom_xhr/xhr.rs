@@ -1882,7 +1882,7 @@ __streamingXhr.send();
         vm.eval("JSON.stringify([__streamingXhr.readyState, __streamingXhr.responseText, __streamingXhrEvents])")
             .expect("split UTF-8 XHR body chunk should be Web-visible"),
         r#"[3,"hi €",["readystatechange:1:0:","readystatechange:2:200:","readystatechange:3:200:hi ","progress:4:7:true"]]"#,
-        "a chunk inside the 50 ms gate updates responseText without exposing libcurl chunking"
+        "a chunk inside the 50 ms gate updates responseText without exposing transport chunk boundaries"
     );
 
     vm.append_streaming_async_subresource_fetch_chunk(body_source_id, b"!".to_vec());

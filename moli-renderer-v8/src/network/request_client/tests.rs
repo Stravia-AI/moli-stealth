@@ -1020,7 +1020,7 @@ async fn concurrent_script_text_waiter_preserves_owner_cache_state() -> Result<(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn script_text_fetch_respects_configured_request_timeout() -> Result<()> {
+async fn script_text_deadline_releases_unfinished_response_connection() -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
     let server = tokio::spawn(async move {
@@ -1039,8 +1039,12 @@ async fn script_text_fetch_respects_configured_request_timeout() -> Result<()> {
             )
             .await
             .unwrap();
-        sleep(Duration::from_millis(500)).await;
-        let _ = stream.write_all(b"window.scriptLoaded = true;\n").await;
+        let mut byte = [0];
+        let received = timeout(Duration::from_secs(2), stream.read(&mut byte))
+            .await
+            .expect("the expired request must release its unfinished connection")
+            .unwrap();
+        assert_eq!(received, 0);
     });
 
     let mut config = FetchConfig::default();
@@ -1048,19 +1052,16 @@ async fn script_text_fetch_respects_configured_request_timeout() -> Result<()> {
     let loader = ResourceRequestClient::new(&config)?;
     let request = Request::get(&format!("http://{addr}/slow-script.js"))?
         .with_script_fetch_metadata(ScriptFetchRequestMetadata::default());
-    let error = timeout(
+    let result = timeout(
         Duration::from_secs(2),
         loader.fetch_cacheable_script_text_stream(request),
     )
     .await
-    .expect("script fetch should complete with the configured request timeout")
-    .unwrap_err();
+    .expect("script fetch should complete with the configured request timeout");
 
     assert!(
-        error
-            .chain()
-            .any(|cause| cause.to_string().contains("Timeout was reached")),
-        "expected configured curl request timeout, got: {error:#}"
+        result.is_err(),
+        "an unfinished response cannot succeed after its deadline"
     );
     server.await?;
     Ok(())

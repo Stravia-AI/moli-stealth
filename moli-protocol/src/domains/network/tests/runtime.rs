@@ -491,10 +491,17 @@ async fn websocket_runtime_activity_emits_cdp_websocket_events_without_payload()
     )
     .await;
 
+    let expected_origin = json!(format!("http://{addr}"));
     assert!(ctx.sent.iter().any(|message| {
         message["method"] == json!("Network.webSocketWillSendHandshakeRequest")
             && message["params"]["requestId"] == json!(request_id)
-            && message["params"]["request"]["headers"]["origin"] == json!(format!("http://{addr}"))
+            && message["params"]["request"]["headers"]
+                .as_object()
+                .is_some_and(|headers| {
+                    headers.iter().any(|(name, value)| {
+                        name.eq_ignore_ascii_case("origin") && value == &expected_origin
+                    })
+                })
     }));
     assert!(ctx.sent.iter().any(|message| {
         message["method"] == json!("Network.webSocketHandshakeResponseReceived")

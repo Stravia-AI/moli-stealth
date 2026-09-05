@@ -7,6 +7,7 @@ use std::{
 };
 
 use axum::extract::ws::WebSocket;
+use futures_util::FutureExt;
 use moli_cookie_jar::StoredCookie;
 use moli_core::{page::RendererDocumentLifecycleMilestone, runtime::NavigationRuntimeConfig};
 use moli_protocol::{
@@ -473,6 +474,7 @@ impl ClassicSessionBinding {
 #[derive(Debug, Clone)]
 pub(in crate::protocol_server) struct ClassicSessionRuntimeHandle {
     tx: mpsc::UnboundedSender<ClassicSessionRuntimeRequest>,
+    runtime_finished: futures_util::future::Shared<oneshot::Receiver<CookieProfileCommit>>,
 }
 
 impl ClassicSessionRuntimeHandle {
@@ -482,15 +484,19 @@ impl ClassicSessionRuntimeHandle {
         navigation_runtime_config: NavigationRuntimeConfig,
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
-        let _runtime_finished_rx = spawn_protocol_local_task("classic-session", move || {
+        let runtime_finished = spawn_protocol_local_task("classic-session", move || {
             classic_session_runtime_loop(
                 rx,
                 initial_cookie_snapshot,
                 initial_storage_partition,
                 navigation_runtime_config,
             )
-        });
-        Self { tx }
+        })
+        .shared();
+        Self {
+            tx,
+            runtime_finished,
+        }
     }
 
     pub(super) async fn execute(
@@ -808,15 +814,10 @@ impl ClassicSessionRuntimeHandle {
     }
 
     pub(super) async fn shutdown(self) -> CookieProfileCommit {
-        let (response_tx, response_rx) = oneshot::channel();
-        if self
-            .tx
-            .send(ClassicSessionRuntimeRequest::Shutdown { response_tx })
-            .is_err()
-        {
-            return CookieProfileCommit::unchanged();
-        }
-        response_rx
+        let _ = self.tx.send(ClassicSessionRuntimeRequest::Shutdown);
+        // Renderer owners must finish dropping before process-exit crypto
+        // cleanup can lock the native thread-local random states.
+        self.runtime_finished
             .await
             .unwrap_or_else(|_| CookieProfileCommit::unchanged())
     }
@@ -916,9 +917,7 @@ enum ClassicSessionRuntimeRequest {
         enabled: bool,
         response_tx: oneshot::Sender<Result<(), DevToolsError>>,
     },
-    Shutdown {
-        response_tx: oneshot::Sender<CookieProfileCommit>,
-    },
+    Shutdown,
 }
 
 struct ClassicAttachedBidiSocket {
@@ -1188,12 +1187,11 @@ async fn handle_classic_session_runtime_request(
             let _ = response_tx.send(result);
             ClassicSessionRuntimeRequestOutcome::Continue
         }
-        ClassicSessionRuntimeRequest::Shutdown { response_tx } => {
+        ClassicSessionRuntimeRequest::Shutdown => {
             let cookie_commit = CookieProfileCommit::from_optional_profile_backed_snapshot(
                 initial_cookie_snapshot.to_vec(),
                 scheduler.snapshot_profile_backed_cookies(),
             );
-            let _ = response_tx.send(cookie_commit.clone());
             ClassicSessionRuntimeRequestOutcome::Shutdown(cookie_commit)
         }
     }
@@ -1887,6 +1885,40 @@ async fn classic_session_ingest_ready_renderer_publications(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn shutdown_waits_for_session_owner_cleanup() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (cleanup_started_tx, cleanup_started_rx) = oneshot::channel();
+        let (release_cleanup_tx, release_cleanup_rx) = oneshot::channel();
+        let runtime_finished =
+            spawn_protocol_local_task("classic-shutdown-test", move || async move {
+                let Some(ClassicSessionRuntimeRequest::Shutdown) = rx.recv().await else {
+                    panic!("expected a session shutdown request");
+                };
+                cleanup_started_tx.send(()).expect("report cleanup start");
+                release_cleanup_rx.await.expect("release owner cleanup");
+                CookieProfileCommit::unchanged()
+            })
+            .shared();
+        let runtime = ClassicSessionRuntimeHandle {
+            tx,
+            runtime_finished: runtime_finished.clone(),
+        };
+        let mut shutdown = std::pin::pin!(runtime.shutdown());
+        let initially_ready = futures_util::poll!(&mut shutdown).is_ready();
+        cleanup_started_rx.await.expect("owner starts cleanup");
+        let completed_before_cleanup =
+            initially_ready || futures_util::poll!(&mut shutdown).is_ready();
+
+        release_cleanup_tx.send(()).expect("finish owner cleanup");
+        runtime_finished.await.expect("actor completes");
+        assert!(
+            !completed_before_cleanup,
+            "session shutdown returned before its owner finished cleanup"
+        );
+        shutdown.await;
+    }
 
     #[test]
     fn frame_owner_matching_keeps_frontend_and_backend_ids_disjoint() {
