@@ -12,6 +12,7 @@
 /.vscode
 /.codex
 /.claude
+/.scratch
 /.codex-tmp
 /node_modules
 /tmp
