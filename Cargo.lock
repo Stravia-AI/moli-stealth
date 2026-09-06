@@ -407,7 +407,7 @@ dependencies = [
 [[package]]
 name = "btls"
 version = "0.5.6"
-source = "git+https://github.com/0x676e67/btls.git?rev=de7ab84fdb58641a2bdfdf9d8ebd7db1dcf4b29b#de7ab84fdb58641a2bdfdf9d8ebd7db1dcf4b29b"
+source = "git+https://github.com/Stravia-AI/btls.git?rev=5ee7faa63188777eb0c1d4a28ef1f465d7bb02b9#5ee7faa63188777eb0c1d4a28ef1f465d7bb02b9"
 dependencies = [
  "bitflags",
  "btls-sys",
@@ -419,6 +419,7 @@ dependencies = [
 [[package]]
 name = "btls-sys"
 version = "0.5.6"
+source = "git+https://github.com/Stravia-AI/btls.git?rev=5ee7faa63188777eb0c1d4a28ef1f465d7bb02b9#5ee7faa63188777eb0c1d4a28ef1f465d7bb02b9"
 dependencies = [
  "bindgen 0.72.1",
  "cmake",
@@ -1765,9 +1766,9 @@ dependencies = [
 
 [[package]]
 name = "http"
-version = "1.4.0"
+version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3ba2a386d7f85a81f119ad7498ebe444d2e22c2af0b86b069416ace48b3311a"
+checksum = "6970f50e31d6fc17d3fa27329444bfa74e196cf62e95052a3f6fee181dba6425"
 dependencies = [
  "bytes",
  "itoa",
@@ -1807,7 +1808,8 @@ dependencies = [
 
 [[package]]
 name = "http2"
-version = "0.5.17"
+version = "0.5.20"
+source = "git+https://github.com/Stravia-AI/http2.git?rev=fd40fb985e5e07f02e9f2ac9cddb8f1a711a8e44#fd40fb985e5e07f02e9f2ac9cddb8f1a711a8e44"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -4208,6 +4210,7 @@ dependencies = [
 [[package]]
 name = "ratchet_deflate"
 version = "1.2.1"
+source = "git+https://github.com/Stravia-AI/ratchet.git?rev=df4e0645d42a67b7b2b3143f408225b31f5f8dd9#df4e0645d42a67b7b2b3143f408225b31f5f8dd9"
 dependencies = [
  "bytes",
  "flate2",
@@ -4220,8 +4223,7 @@ dependencies = [
 [[package]]
 name = "ratchet_ext"
 version = "1.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7628c68ab3103dce804e4a772d67c1d3ce114cfc153f415eb44489d48c4fb55f"
+source = "git+https://github.com/Stravia-AI/ratchet.git?rev=df4e0645d42a67b7b2b3143f408225b31f5f8dd9#df4e0645d42a67b7b2b3143f408225b31f5f8dd9"
 dependencies = [
  "bytes",
  "http",
@@ -4398,7 +4400,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5355,7 +5357,7 @@ dependencies = [
 [[package]]
 name = "tokio-btls"
 version = "0.5.6"
-source = "git+https://github.com/0x676e67/btls.git?rev=de7ab84fdb58641a2bdfdf9d8ebd7db1dcf4b29b#de7ab84fdb58641a2bdfdf9d8ebd7db1dcf4b29b"
+source = "git+https://github.com/Stravia-AI/btls.git?rev=5ee7faa63188777eb0c1d4a28ef1f465d7bb02b9#5ee7faa63188777eb0c1d4a28ef1f465d7bb02b9"
 dependencies = [
  "btls",
  "tokio",
@@ -6069,15 +6071,6 @@ name = "windows-sys"
 version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
-dependencies = [
- "windows-targets",
-]
-
-[[package]]
-name = "windows-sys"
-version = "0.59.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e38bc4d79ed67fd075bcc251a1c39b32a1776bbe92e5bef1f0bf1f8c531853b"
 dependencies = [
  "windows-targets",
 ]

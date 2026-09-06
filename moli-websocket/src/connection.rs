@@ -1,5 +1,3 @@
-use std::collections::VecDeque;
-
 use bytes::BytesMut;
 use ratchet_rs::{
     CloseCode, CloseReason, Message,
@@ -206,7 +204,6 @@ async fn run_open_websocket_connection(
     let (writer_event_tx, mut writer_event_rx) = mpsc::unbounded_channel();
     let writer = tokio::spawn(run_websocket_writer(write, command_rx, writer_event_tx));
     let mut sent_close: Option<(u16, String)> = None;
-    let mut pending_buffered_amount = VecDeque::new();
     let mut writer_done = false;
     loop {
         tokio::select! {
@@ -216,12 +213,6 @@ async fn run_open_websocket_connection(
             message = reader_event_rx.recv() => {
                 match message {
                     Some(ReaderEvent::Text(text)) => {
-                        send_next_buffered_amount(
-                            &event_tx,
-                            socket_id,
-                            &mut pending_buffered_amount,
-                        )
-                        .await;
                         let _ = send_event(&event_tx, Event::TextMessage {
                             socket_id,
                             data: text,
@@ -229,12 +220,6 @@ async fn run_open_websocket_connection(
                         .await;
                     }
                     Some(ReaderEvent::Binary(data)) => {
-                        send_next_buffered_amount(
-                            &event_tx,
-                            socket_id,
-                            &mut pending_buffered_amount,
-                        )
-                        .await;
                         let _ = send_event(&event_tx, Event::BinaryMessage {
                             socket_id,
                             data,
@@ -242,12 +227,6 @@ async fn run_open_websocket_connection(
                         .await;
                     }
                     Some(ReaderEvent::Close { code, reason }) => {
-                        flush_pending_buffered_amount(
-                            &event_tx,
-                            socket_id,
-                            &mut pending_buffered_amount,
-                        )
-                        .await;
                         let _ = send_event(
                             &event_tx,
                             Event::Close {
@@ -279,7 +258,6 @@ async fn run_open_websocket_connection(
                                 &event_tx,
                                 socket_id,
                                 &mut sent_close,
-                                &mut pending_buffered_amount,
                                 &mut writer_done,
                             )
                             .await,
@@ -295,12 +273,6 @@ async fn run_open_websocket_connection(
                         if let Some((code, reason)) = sent_close.clone() {
                             // Many servers reset the socket after receiving our close frame.
                             // Browser-observable state treats our initiated close as clean.
-                            flush_pending_buffered_amount(
-                                &event_tx,
-                                socket_id,
-                                &mut pending_buffered_amount,
-                            )
-                            .await;
                             let _ = send_event(
                                 &event_tx,
                                 Event::Close {
@@ -312,12 +284,6 @@ async fn run_open_websocket_connection(
                             )
                             .await;
                         } else {
-                            flush_pending_buffered_amount(
-                                &event_tx,
-                                socket_id,
-                                &mut pending_buffered_amount,
-                            )
-                            .await;
                             send_error_and_close(
                                 &event_tx,
                                 socket_id,
@@ -338,7 +304,6 @@ async fn run_open_websocket_connection(
                                 &event_tx,
                                 socket_id,
                                 &mut sent_close,
-                                &mut pending_buffered_amount,
                                 &mut writer_done,
                             )
                             .await,
@@ -346,12 +311,6 @@ async fn run_open_websocket_connection(
                         ) {
                             break;
                         }
-                        flush_pending_buffered_amount(
-                            &event_tx,
-                            socket_id,
-                            &mut pending_buffered_amount,
-                        )
-                        .await;
                         let (code, reason, was_clean) = sent_close
                             .clone()
                             .map(|(code, reason)| (code, reason, true))
@@ -381,7 +340,6 @@ async fn run_open_websocket_connection(
                         &event_tx,
                         socket_id,
                         &mut sent_close,
-                        &mut pending_buffered_amount,
                         &mut writer_done,
                     )
                     .await,
@@ -557,31 +515,6 @@ fn response_header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'
         .map(|(_, value)| value.as_str())
 }
 
-async fn send_next_buffered_amount(
-    event_tx: &EventSender,
-    socket_id: u64,
-    pending_buffered_amount: &mut VecDeque<usize>,
-) {
-    let Some(amount) = pending_buffered_amount.pop_front() else {
-        return;
-    };
-    let _ = send_event(
-        event_tx,
-        Event::BufferedAmountConsumed { socket_id, amount },
-    )
-    .await;
-}
-
-async fn flush_pending_buffered_amount(
-    event_tx: &EventSender,
-    socket_id: u64,
-    pending_buffered_amount: &mut VecDeque<usize>,
-) {
-    while !pending_buffered_amount.is_empty() {
-        send_next_buffered_amount(event_tx, socket_id, pending_buffered_amount).await;
-    }
-}
-
 /// Outcome of processing a single `WebSocketWriterEvent`. `Terminate` means
 /// the event itself emitted the connection's final `Event::Error` +
 /// `Event::Close` pair (today only the `Error` writer event does this), so
@@ -603,7 +536,6 @@ async fn handle_writer_event(
     event_tx: &EventSender,
     socket_id: u64,
     sent_close: &mut Option<(u16, String)>,
-    pending_buffered_amount: &mut VecDeque<usize>,
     writer_done: &mut bool,
 ) -> WriterEventOutcome {
     match writer_event {
@@ -620,17 +552,23 @@ async fn handle_writer_event(
                 },
             )
             .await;
-            pending_buffered_amount.push_back(payload_length);
+            // 发送已完成；扣减不能依赖对端是否发送消息或关闭连接。
+            let _ = send_event(
+                event_tx,
+                Event::BufferedAmountConsumed {
+                    socket_id,
+                    amount: payload_length,
+                },
+            )
+            .await;
             WriterEventOutcome::Continue
         }
         WebSocketWriterEvent::Closing { code, reason } => {
             *sent_close = Some((code, reason));
             let _ = send_event(event_tx, Event::Closing { socket_id }).await;
-            flush_pending_buffered_amount(event_tx, socket_id, pending_buffered_amount).await;
             WriterEventOutcome::Continue
         }
         WebSocketWriterEvent::Error(message) => {
-            flush_pending_buffered_amount(event_tx, socket_id, pending_buffered_amount).await;
             send_error_and_close(event_tx, socket_id, message).await;
             WriterEventOutcome::Terminate
         }
@@ -660,20 +598,11 @@ async fn drain_pending_writer_events(
     event_tx: &EventSender,
     socket_id: u64,
     sent_close: &mut Option<(u16, String)>,
-    pending_buffered_amount: &mut VecDeque<usize>,
     writer_done: &mut bool,
 ) -> WriterEventOutcome {
     while let Ok(writer_event) = writer_event_rx.try_recv() {
         if matches!(
-            handle_writer_event(
-                writer_event,
-                event_tx,
-                socket_id,
-                sent_close,
-                pending_buffered_amount,
-                writer_done,
-            )
-            .await,
+            handle_writer_event(writer_event, event_tx, socket_id, sent_close, writer_done,).await,
             WriterEventOutcome::Terminate
         ) {
             return WriterEventOutcome::Terminate;

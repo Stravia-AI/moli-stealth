@@ -288,6 +288,58 @@ pub async fn assert_buffered_amount_consumed(
     }
 }
 
+#[cfg(test)]
+pub(crate) async fn assert_echoed_send(
+    event_rx: &mut mpsc::Receiver<Event>,
+    expected_socket_id: u64,
+    expected_opcode: FrameOpcode,
+    expected_payload: &[u8],
+) {
+    // 读写任务独立推进；回包可能先于本地发送完成通知。
+    let events = [
+        recv_next_event(event_rx).await,
+        recv_next_event(event_rx).await,
+        recv_next_event(event_rx).await,
+    ];
+    let sent = events
+        .iter()
+        .position(|event| {
+            matches!(event,
+                Event::FrameSent { socket_id, opcode, payload_length }
+                if *socket_id == expected_socket_id && *opcode == expected_opcode
+                    && *payload_length == expected_payload.len()
+            )
+        })
+        .expect("matching frame-sent event");
+    let consumed = events
+        .iter()
+        .position(|event| {
+            matches!(event,
+                Event::BufferedAmountConsumed { socket_id, amount }
+                if *socket_id == expected_socket_id && *amount == expected_payload.len()
+            )
+        })
+        .expect("matching buffered amount event");
+    assert!(
+        sent < consumed,
+        "bytes cannot be consumed before being sent"
+    );
+    assert!(
+        events.iter().any(|event| match event {
+            Event::TextMessage { socket_id, data } =>
+                expected_opcode == FrameOpcode::Text
+                    && *socket_id == expected_socket_id
+                    && data.as_bytes() == expected_payload,
+            Event::BinaryMessage { socket_id, data } =>
+                expected_opcode == FrameOpcode::Binary
+                    && *socket_id == expected_socket_id
+                    && data == expected_payload,
+            _ => false,
+        }),
+        "echo payload mismatch: {events:?}"
+    );
+}
+
 pub async fn assert_text_message(
     event_rx: &mut mpsc::Receiver<Event>,
     expected_socket_id: u64,

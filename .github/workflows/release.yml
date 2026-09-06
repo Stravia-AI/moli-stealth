@@ -107,6 +107,12 @@ jobs:
           apt-get update
           apt-get install --yes --no-install-recommends binutils cmake libclang-dev python3
 
+      - name: Install Go for BoringSSL symbol prefixing
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.27.0"
+          cache: false
+
       - name: Validate shell installer
         shell: bash
         run: sh -n scripts/install.sh
@@ -160,6 +166,12 @@ jobs:
           rustup toolchain install "$toolchain" --profile minimal --no-self-update
           rustc --version
 
+      - name: Install Go for BoringSSL symbol prefixing
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.27.0"
+          cache: false
+
       - name: Build and package
         shell: bash
         run: >-
@@ -207,6 +219,12 @@ jobs:
           $toolchain = (Get-Content rust-toolchain -Raw).Trim()
           rustup toolchain install $toolchain --profile minimal --no-self-update
           rustc --version
+
+      - name: Install Go for BoringSSL symbol prefixing
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.27.0"
+          cache: false
 
       - name: Validate PowerShell installer
         shell: pwsh

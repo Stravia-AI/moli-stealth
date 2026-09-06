@@ -240,27 +240,57 @@ select a different TLS preset.
 Moli owns its HTTP policy, async transport/pool, browser observation, and
 outbound WebSocket integration. The imported transport provenance remains in
 `moli-stealth-net/Cargo.toml`; the following narrowly scoped dependency patches
-are maintained locally, with upstream licenses retained:
+live in the Stravia-AI forks. Complete, buildable forks retain upstream
+licenses, manifests, workspace members, and submodules. Cargo consumes exact
+fork commit SHAs; ordinary builds do not apply patches or run a bootstrap script.
 
-| Dependency | Local ownership boundary |
+| Release baseline | Local ownership boundary |
 | --- | --- |
-| `http2 0.5.17` in `vendor/http2-0.5.17` | Per-request HEADERS priority, including different priorities on one reused connection. |
-| `ratchet_deflate 1.2.1` in `vendor/ratchet_deflate-1.2.1` | Final-fragment flushing, per-message compression state, and bounded decoded output. |
-| `btls-sys 0.5.6` in `vendor/btls-windows-prefix` | Stable `btls_sys` native/FFI prefixes, patched exports, and opaque C++ type identities so BoringSSL safely coexists with the existing AWS-LC/OpenSSL consumers. |
+| [`http2 0.5.20`](https://github.com/Stravia-AI/http2) | Per-request HEADERS priority, including different priorities on one reused connection. |
+| [`ratchet 1.2.1`](https://github.com/Stravia-AI/ratchet) | Final-fragment flushing, per-message compression state, and bounded decoded output. Both `ratchet_deflate` and `ratchet_ext` use the same source to preserve extension trait identity. |
+| [`btls 0.5.6`](https://github.com/Stravia-AI/btls) | BoringSSL's supported native prefix build, opaque C++ type isolation, Chrome signature GREASE and trust-anchor APIs, and the upstream ML-DSA libssl backport required by the Chrome baseline. |
 
-The btls source is pinned to
-`de7ab84fdb58641a2bdfdf9d8ebd7db1dcf4b29b`; its BoringSSL source is pinned to
-`f1f2556a5dfa59e147d9d47279cc3f7f8a18b433`. A clean native build needs Git and
-network access to fetch that source unless it is already supplied. A prebuilt
-BoringSSL override must use the same namespace. Updating btls patches or the
-BoringSSL revision requires reviewing added exports and the public type
-registry, then linking the complete Moli executable—not only the transport
-crate—to catch cross-backend native collisions. The vendored patch files are
-pinned to LF line endings for reproducible `git apply` on Windows checkouts.
+Cargo manifests and `Cargo.lock` are the source of truth for consumed revisions;
+fork history owns patches, release provenance, and submodule revisions. The main
+repository does not keep duplicate patch files or a separate version ledger.
+Ratchet follows non-yanked stable crates.io releases, not its older GitHub release;
+maintenance verifies the crate checksum and reads its published VCS revision.
+Btls starts from the `v0.5.6` release with BoringSSL
+`91a66a59b6c1435120ff83e245d7719411294386`, not a later development snapshot.
 
-The recorded executable validation is Windows x64. Other target platforms,
-HTTP/3, arbitrary browser variants, and full rendering/OS impersonation are
-not established by these captures.
+A clean native build needs Git, CMake, a C/C++ toolchain, libclang, Go (CI pins
+1.27.0), and network access unless dependency sources are already cached.
+Symbol prefixing builds BoringSSL twice: once to enumerate exports, then again
+with `BORINGSSL_PREFIX=btls_sys`; Rust links only the second build. Prebuilt
+`BORING_BSSL_PATH` overrides are rejected with `prefix-symbols` because their
+namespace cannot be established. Updating native patches requires reviewing
+added exports and public opaque types, then linking the complete Moli executable
+to catch collisions with AWS-LC/OpenSSL. Native patch files in the fork use LF
+on Windows too.
+
+#### Updating a Transport Dependency
+
+Use the project skill
+[`upstream-dependency-maintenance`](../.agents/skills/upstream-dependency-maintenance/SKILL.md).
+It covers stable-release discovery, crates.io provenance checks, minimal patch
+migration in an independent full fork, native and transport validation, authorized
+publication, and exact Cargo revision updates. Git history replaces local patch
+replay; no project-specific maintenance script is required.
+
+The release-fork executable was compared with the recorded Chrome baseline in
+separate Windows x64 processes: three direct and three CONNECT captures each
+reported zero semantic differences. A Linux x64 native smoke additionally
+exercised prefixed SHA-256, ML-DSA configuration, GREASE, and trust-anchor APIs;
+all 4,158 enumerated C exports were prefixed, with no original C exports or
+unisolated `bssl` namespace symbols in the linked archives. This is not a full
+Linux browser run or macOS/ARM validation.
+
+A separate lifecycle limitation was observed when reusing the direct-capture
+process for the proxy capture after its default-context targets had all closed:
+the protocol owner panicked with `BrowserContext has no active page target`.
+The dependency migration does not fix that empty-context lifecycle; the fresh
+proxy process passed all three captures. HTTP/3, arbitrary browser variants,
+and full rendering/OS impersonation are not established by these captures.
 
 The current suite is a strong core smoke gate, not a complete Playwright compatibility suite.
 

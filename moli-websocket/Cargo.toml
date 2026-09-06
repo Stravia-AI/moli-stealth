@@ -15,7 +15,7 @@ http = "1"
 moli-stealth-net = { path = "../moli-stealth-net" }
 moli-url = { path = "../moli-url" }
 rand = "0.9"
-ratchet_rs = { version = "1.2.1", features = ["deflate", "split"] }
+ratchet_rs = { version = "=1.2.1", features = ["deflate", "split"] }
 sha1 = "0.10"
 rcgen = { version = "0.13", default-features = false, features = ["aws_lc_rs"], optional = true }
 tokio = { version = "1.51.0", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }

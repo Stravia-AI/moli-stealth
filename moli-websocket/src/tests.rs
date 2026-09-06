@@ -1035,6 +1035,26 @@ async fn websocket_transport_allows_server_to_omit_response_subprotocol() {
 }
 
 #[tokio::test]
+async fn websocket_send_consumes_buffered_amount_without_waiting_for_incoming_data() {
+    let (url, opened, reply, server) = spawn_triggered_text_websocket_server().await;
+    let (event_tx, mut event_rx) = mpsc::channel(32);
+    let command_tx = spawn_connection(4, url, Vec::new(), test_websocket_context(), event_tx);
+    recv_open_event(&mut event_rx).await;
+    opened.await.expect("server accepted the connection");
+
+    command_tx
+        .send(Command::SendText("hello".to_owned()))
+        .expect("send text without waiting for a reply");
+    assert_frame_sent(&mut event_rx, 4, FrameOpcode::Text, 5).await;
+    assert_buffered_amount_consumed(&mut event_rx, 4, 5).await;
+
+    drop(reply);
+    server
+        .await
+        .expect("triggered websocket server should finish");
+}
+
+#[tokio::test]
 async fn websocket_transport_sends_text_binary_and_reports_buffered_amount_consumption() {
     let (url, server) = spawn_text_binary_echo_websocket_server().await;
     let (event_tx, mut event_rx) = mpsc::channel(32);
@@ -1047,16 +1067,12 @@ async fn websocket_transport_sends_text_binary_and_reports_buffered_amount_consu
     command_tx
         .send(Command::SendText("hello".to_owned()))
         .expect("send text command");
-    assert_frame_sent(&mut event_rx, 4, FrameOpcode::Text, 5).await;
-    assert_buffered_amount_consumed(&mut event_rx, 4, 5).await;
-    assert_text_message(&mut event_rx, 4, "hello").await;
+    assert_echoed_send(&mut event_rx, 4, FrameOpcode::Text, b"hello").await;
 
     command_tx
         .send(Command::SendBinary(vec![1, 2, 3, 4]))
         .expect("send binary command");
-    assert_frame_sent(&mut event_rx, 4, FrameOpcode::Binary, 4).await;
-    assert_buffered_amount_consumed(&mut event_rx, 4, 4).await;
-    assert_binary_message(&mut event_rx, 4, &[1, 2, 3, 4]).await;
+    assert_echoed_send(&mut event_rx, 4, FrameOpcode::Binary, &[1, 2, 3, 4]).await;
 
     command_tx
         .send(Command::Close {
@@ -1155,17 +1171,13 @@ async fn websocket_transport_negotiates_and_round_trips_compressed_messages() {
     command_tx
         .send(Command::SendText(text.clone()))
         .expect("send compressed text command");
-    assert_frame_sent(&mut event_rx, 41, FrameOpcode::Text, text.len()).await;
-    assert_buffered_amount_consumed(&mut event_rx, 41, text.len()).await;
-    assert_text_message(&mut event_rx, 41, &text).await;
+    assert_echoed_send(&mut event_rx, 41, FrameOpcode::Text, text.as_bytes()).await;
 
     let binary = text.as_bytes().to_vec();
     command_tx
         .send(Command::SendBinary(binary.clone()))
         .expect("send compressed binary command");
-    assert_frame_sent(&mut event_rx, 41, FrameOpcode::Binary, binary.len()).await;
-    assert_buffered_amount_consumed(&mut event_rx, 41, binary.len()).await;
-    assert_binary_message(&mut event_rx, 41, &binary).await;
+    assert_echoed_send(&mut event_rx, 41, FrameOpcode::Binary, &binary).await;
 
     command_tx
         .send(Command::Close {

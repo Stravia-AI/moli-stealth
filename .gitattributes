@@ -1,2 +1,1 @@
 moli-wpt-compat/fixtures/wpt/**/*.txt text eol=lf
-vendor/btls-windows-prefix/btls-sys/patches/*.patch text eol=lf
