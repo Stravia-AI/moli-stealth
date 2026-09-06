@@ -1,4 +1,10 @@
 use super::*;
+use servo_arc::ThinArc;
+use std::{
+    borrow::Borrow,
+    fmt,
+    hash::{Hash, Hasher},
+};
 
 pub type DomHandle = NativeNodeId;
 
@@ -9,8 +15,127 @@ pub struct HostElementSnapshot {
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct NamedElementIndex {
-    pub(super) handles_by_value: HashMap<String, IndexSet<DomHandle>>,
-    pub(super) value_by_handle: HashMap<DomHandle, String>,
+    pub(super) handles_by_value: HashMap<ThinArcStr, NamedElementHandles>,
+    pub(super) value_by_handle: HashMap<DomHandle, ThinArcStr>,
+}
+
+#[repr(transparent)]
+#[derive(Clone)]
+pub(super) struct ThinArcStr(ThinArc<(), u8>);
+
+impl ThinArcStr {
+    fn as_str(&self) -> &str {
+        // SAFETY: Construction only accepts UTF-8 `str` bytes, and the shared
+        // backing slice cannot be mutated.
+        unsafe { std::str::from_utf8_unchecked(self.0.slice()) }
+    }
+
+    #[cfg(test)]
+    pub(super) fn ptr_eq(&self, other: &Self) -> bool {
+        servo_arc::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl From<&str> for ThinArcStr {
+    fn from(value: &str) -> Self {
+        Self(ThinArc::from_header_and_iter((), value.bytes()))
+    }
+}
+
+impl Borrow<str> for ThinArcStr {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl AsRef<str> for ThinArcStr {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl PartialEq for ThinArcStr {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl Eq for ThinArcStr {}
+
+impl Hash for ThinArcStr {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_str().hash(state);
+    }
+}
+
+impl fmt::Debug for ThinArcStr {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.as_str().fmt(formatter)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(super) enum NamedElementHandles {
+    One(DomHandle),
+    Many(IndexSet<DomHandle>),
+}
+
+impl NamedElementHandles {
+    pub(super) fn insert(&mut self, handle: DomHandle) {
+        match self {
+            Self::One(current) if *current == handle => {}
+            Self::One(current) => {
+                let first = *current;
+                let mut handles = IndexSet::with_capacity(2);
+                handles.insert(first);
+                handles.insert(handle);
+                *self = Self::Many(handles);
+            }
+            Self::Many(handles) => {
+                handles.insert(handle);
+            }
+        }
+    }
+
+    /// Removes a handle and reports whether the map entry is now empty.
+    pub(super) fn remove(&mut self, handle: DomHandle) -> bool {
+        match self {
+            Self::One(current) => *current == handle,
+            Self::Many(handles) => {
+                if !handles.swap_remove(&handle) {
+                    return false;
+                }
+                if handles.len() == 1 {
+                    let remaining = *handles.first().expect("one named candidate remains");
+                    *self = Self::One(remaining);
+                }
+                false
+            }
+        }
+    }
+
+    pub(super) fn iter(&self) -> NamedElementHandlesIter<'_> {
+        match self {
+            Self::One(handle) => NamedElementHandlesIter::One(Some(handle)),
+            Self::Many(handles) => NamedElementHandlesIter::Many(handles.iter()),
+        }
+    }
+}
+
+pub(super) enum NamedElementHandlesIter<'a> {
+    One(Option<&'a DomHandle>),
+    Many(indexmap::set::Iter<'a, DomHandle>),
+}
+
+impl<'a> Iterator for NamedElementHandlesIter<'a> {
+    type Item = &'a DomHandle;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::One(handle) => handle.take(),
+            Self::Many(handles) => handles.next(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]

@@ -303,31 +303,32 @@ impl DomHost {
         handle: DomHandle,
         current_value: Option<&str>,
     ) {
-        if index.value_by_handle.get(&handle).map(String::as_str) == current_value {
+        if index.value_by_handle.get(&handle).map(AsRef::as_ref) == current_value {
             return;
         }
         if let Some(previous_value) = index.value_by_handle.remove(&handle) {
-            let remove_key =
-                index
-                    .handles_by_value
-                    .get_mut(&previous_value)
-                    .is_some_and(|handles| {
-                        handles.swap_remove(&handle);
-                        handles.is_empty()
-                    });
+            let remove_key = index
+                .handles_by_value
+                .get_mut(&previous_value)
+                .is_some_and(|handles| handles.remove(handle));
             if remove_key {
                 index.handles_by_value.remove(&previous_value);
             }
         }
         if let Some(current_value) = current_value {
-            index
+            let entry = index
                 .handles_by_value
-                .entry(current_value.to_owned())
-                .or_default()
-                .insert(handle);
-            index
-                .value_by_handle
-                .insert(handle, current_value.to_owned());
+                .entry(ThinArcStr::from(current_value));
+            let canonical_value = entry.key().clone();
+            match entry {
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    entry.get_mut().insert(handle);
+                }
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(NamedElementHandles::One(handle));
+                }
+            }
+            index.value_by_handle.insert(handle, canonical_value);
         }
     }
 
@@ -466,7 +467,7 @@ impl DomHost {
 
     fn first_current_named_candidate(
         &self,
-        candidates: &IndexSet<DomHandle>,
+        candidates: &NamedElementHandles,
         key: &str,
         read_value: impl Fn(&Element) -> Option<&str>,
     ) -> Option<DomHandle> {

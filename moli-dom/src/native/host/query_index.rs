@@ -991,6 +991,74 @@ mod tests {
     }
 
     #[test]
+    fn named_candidate_index_shares_values_between_directions() {
+        let mut host = test_host();
+        let first = host.create_element("div");
+        let second = host.create_element("span");
+        for element in [first, second] {
+            assert!(host.set_attribute(element, "id", "shared-identifier"));
+            assert!(host.append_child(host.document_handle(), element));
+        }
+
+        assert_eq!(host.element_handle_by_id("shared-identifier"), Some(first));
+
+        let index = host.id_index.borrow();
+        let index = index.as_ref().expect("materialized ID index");
+        let forward = index
+            .handles_by_value
+            .keys()
+            .find(|value| value.as_ref() == "shared-identifier")
+            .expect("forward index key");
+        for element in [first, second] {
+            let reverse = index
+                .value_by_handle
+                .get(&element)
+                .expect("reverse index value");
+            assert!(forward.ptr_eq(reverse));
+        }
+        assert_eq!(
+            std::mem::size_of::<ThinArcStr>(),
+            std::mem::size_of::<usize>()
+        );
+    }
+
+    #[test]
+    fn named_candidate_index_expands_and_compacts_duplicate_values() {
+        let mut host = test_host();
+        let first = host.create_element("div");
+        let second = host.create_element("div");
+        assert!(host.set_attribute(first, "id", "duplicate"));
+        assert!(host.append_child(host.document_handle(), first));
+        assert_eq!(host.element_handle_by_id("duplicate"), Some(first));
+        assert!(matches!(
+            host.id_index
+                .borrow()
+                .as_ref()
+                .and_then(|index| index.handles_by_value.get("duplicate")),
+            Some(NamedElementHandles::One(handle)) if *handle == first
+        ));
+
+        assert!(host.set_attribute(second, "id", "duplicate"));
+        assert!(host.append_child(host.document_handle(), second));
+        assert!(matches!(
+            host.id_index
+                .borrow()
+                .as_ref()
+                .and_then(|index| index.handles_by_value.get("duplicate")),
+            Some(NamedElementHandles::Many(handles)) if handles.len() == 2
+        ));
+
+        assert!(host.remove_attribute(second, "id"));
+        assert!(matches!(
+            host.id_index
+                .borrow()
+                .as_ref()
+                .and_then(|index| index.handles_by_value.get("duplicate")),
+            Some(NamedElementHandles::One(handle)) if *handle == first
+        ));
+    }
+
+    #[test]
     fn document_root_named_subtree_lookups_use_indexes_without_widening_nested_scope() {
         let mut host = test_host();
         let document = host.document_handle();
