@@ -81,16 +81,15 @@ members = [
     "moli-http-cache",
     "moli-wpt-compat"
 ]
-exclude = ["vendor/xml5ever-0.39.0"]
 
 [workspace.package]
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 anyhow = "1.0.100"
-anyrender = { git = "https://github.com/ldm0/anyrender", rev = "18fd67d7a5622a9821d86434857fd69856912a43" }
-anyrender_svg = { git = "https://github.com/ldm0/anyrender", rev = "18fd67d7a5622a9821d86434857fd69856912a43", default-features = false }
-anyrender_vello_cpu = { git = "https://github.com/ldm0/anyrender", rev = "18fd67d7a5622a9821d86434857fd69856912a43", default-features = false }
+anyrender = { git = "https://github.com/Stravia-AI/anyrender.git", rev = "5ec13279769a256620452ff225cef1281b1ad7c2" }
+anyrender_svg = { git = "https://github.com/Stravia-AI/anyrender.git", rev = "5ec13279769a256620452ff225cef1281b1ad7c2", default-features = false }
+anyrender_vello_cpu = { git = "https://github.com/Stravia-AI/anyrender.git", rev = "5ec13279769a256620452ff225cef1281b1ad7c2", default-features = false }
 app_units = "0.7.8"
 async-compression = "0.4"
 aws-lc-rs = { version = "1.16.2", default-features = false }
@@ -106,14 +105,14 @@ cidr = "0.3.2"
 clap = "4.5.39"
 compact-enc-det = "0.1"
 content_disposition = "0.4.0"
-cookie = "0.18.0"
+cookie = { git = "https://github.com/Stravia-AI/cookie-rs.git", rev = "868ce01f66268651f524302cd84c4278ad11e286" }
 cookie_store = { package = "moli-cookie-store", path = "moli-cookie-store", default-features = false }
 crossbeam-channel = "0.5.15"
 crossbeam-utils = "0.8.21"
 cssparser = "0.37"
 data-url = "0.3.2"
 document-features = "0.2.10"
-dom = { package = "stylo_dom", version = "0.20" }
+dom = { package = "stylo_dom", git = "https://github.com/Stravia-AI/stylo.git", rev = "953bc7f148614e2b0c1657e844a57fdde2269302" }
 ed448-goldilocks = { version = "=0.14.0-pre.15", default-features = false }
 encoding_rs = "0.8"
 euclid = "=0.22.14"
@@ -127,7 +126,7 @@ html-escape = "0.2.13"
 html5ever = "0.39.0"
 http = "1"
 http-auth = { version = "0.1.10", default-features = false }
-http2 = "=0.5.20"
+http2 = { git = "https://github.com/Stravia-AI/http2.git", rev = "fd40fb985e5e07f02e9f2ac9cddb8f1a711a8e44" }
 httparse = "1"
 httpdate = "1.0.3"
 idna = "1.0"
@@ -236,29 +235,29 @@ proc-macro2 = "1.0"
 psl-types = "2.0.11"
 quote = "1.0"
 rand = "0.10"
-ratchet_rs = "=1.2.1"
+ratchet_rs = { git = "https://github.com/Stravia-AI/ratchet.git", rev = "df4e0645d42a67b7b2b3143f408225b31f5f8dd9" }
 rcgen = { version = "0.13", default-features = false }
 regex = "1.12.3"
 rustc-hash = "2.1.1"
 sanitize-filename = "=0.6.0"
-selectors = "0.40"
+selectors = { git = "https://github.com/Stravia-AI/stylo.git", rev = "953bc7f148614e2b0c1657e844a57fdde2269302" }
 serde = "1.0.228"
 serde_json = "1.0.145"
 serde_path_to_error = "0.1"
-serde_v8 = "=0.320.0"
-servo_arc = "0.4.3"
+serde_v8 = { git = "https://github.com/Stravia-AI/deno.git", rev = "63326c42f67f11613c399880745ccfe383311328" }
+servo_arc = { git = "https://github.com/Stravia-AI/stylo.git", rev = "953bc7f148614e2b0c1657e844a57fdde2269302" }
 sha1 = "0.10"
 socket2 = "0.6.3"
 static_assertions = "1.1.0"
 strip-ansi-escapes = "0.2.1"
 strum = "0.28.0"
-style_traits = { package = "stylo_traits", version = "0.20" }
-stylo = "0.20"
-stylo_static_prefs = "0.20"
-stylo_taffy = { git = "https://github.com/DioxusLabs/blitz", rev = "5081c65811a4396f5a99b2e0aca542a4a4a6606f", default-features = false }
+style_traits = { package = "stylo_traits", git = "https://github.com/Stravia-AI/stylo.git", rev = "953bc7f148614e2b0c1657e844a57fdde2269302" }
+stylo = { git = "https://github.com/Stravia-AI/stylo.git", rev = "953bc7f148614e2b0c1657e844a57fdde2269302" }
+stylo_static_prefs = { git = "https://github.com/Stravia-AI/stylo.git", rev = "953bc7f148614e2b0c1657e844a57fdde2269302" }
+stylo_taffy = { git = "https://github.com/Stravia-AI/blitz.git", rev = "cea80e35f93158a2d8fefc935cbb5397ca48fc7f", default-features = false }
 svgtypes = "0.16.1"
 syn = "3.0"
-taffy = { version = "=0.13.0", default-features = false }
+taffy = { git = "https://github.com/Stravia-AI/taffy.git", rev = "7e79f8f3288b114ed4cc04699d5652005fa74479", default-features = false }
 thin-vec = "0.2.14"
 thiserror = "2.0.17"
 tikv-jemalloc-sys = { version = "0.7.1", default-features = false }
@@ -277,35 +276,18 @@ typed-num = { version = "0.3.0", default-features = false }
 url = "2.5.7"
 usvg = "=0.48.1"
 uuid = { version = "1.23.1", default-features = false }
-v8 = "152.2.0"
+v8 = { git = "https://github.com/Stravia-AI/rusty_v8.git", rev = "01aac5af08108b24da1a821775f48c7fb91167e2" }
 vergen-gitcl = "10.0.2"
-wasm_dep_analyzer = { git = "https://github.com/ldm0/wasm_dep_analyzer", branch = "moli0" }
+wasm_dep_analyzer = { git = "https://github.com/Stravia-AI/wasm_dep_analyzer.git", rev = "c572905c84d734bbacf56e69e572a704b141f9b5" }
 webpki-root-certs = "1.0"
 widestring = "1.2.1"
 wildcard = "0.3.0"
 wuff = "=0.2.5"
 x448 = { version = "=0.14.0-pre.12", default-features = false }
-xml5ever = "0.39.0"
+xml5ever = { git = "https://github.com/Stravia-AI/html5ever.git", rev = "5e1e25531fbb05855531d78a08372af0ee1020c2" }
 xmlparser = "0.13.6"
 yeslogic-fontconfig-sys = "=6.0.1"
 zeroize = "1.8.2"
-
-[patch.crates-io]
-xml5ever = { path = "vendor/xml5ever-0.39.0" }
-http2 = { git = "https://github.com/Stravia-AI/http2.git", rev = "fd40fb985e5e07f02e9f2ac9cddb8f1a711a8e44" }
-ratchet_deflate = { git = "https://github.com/Stravia-AI/ratchet.git", rev = "df4e0645d42a67b7b2b3143f408225b31f5f8dd9" }
-ratchet_ext = { git = "https://github.com/Stravia-AI/ratchet.git", rev = "df4e0645d42a67b7b2b3143f408225b31f5f8dd9" }
-cookie = { git = "https://github.com/ldm0/cookie-rs", branch = "priority" }
-v8 = { path = "vendor/v8-152.2.0" }
-deno_v8 = { path = "vendor/deno_v8-0.3.0" }
-selectors = { git = "https://github.com/ldm0/stylo", rev = "671d13d31b3b00e7b1e0088ba2b36a4e35c0858c" }
-servo_arc = { git = "https://github.com/ldm0/stylo", rev = "671d13d31b3b00e7b1e0088ba2b36a4e35c0858c" }
-stylo = { git = "https://github.com/ldm0/stylo", rev = "671d13d31b3b00e7b1e0088ba2b36a4e35c0858c" }
-stylo_atoms = { git = "https://github.com/ldm0/stylo", rev = "671d13d31b3b00e7b1e0088ba2b36a4e35c0858c" }
-stylo_dom = { git = "https://github.com/ldm0/stylo", rev = "671d13d31b3b00e7b1e0088ba2b36a4e35c0858c" }
-stylo_static_prefs = { git = "https://github.com/ldm0/stylo", rev = "671d13d31b3b00e7b1e0088ba2b36a4e35c0858c" }
-stylo_traits = { git = "https://github.com/ldm0/stylo", rev = "671d13d31b3b00e7b1e0088ba2b36a4e35c0858c" }
-taffy = { git = "https://github.com/ldm0/taffy", rev = "71bc149ce5358406cdabba66da853ceb11ac74ee" }
 
 [workspace.lints.clippy]
 disallowed_methods = "deny"

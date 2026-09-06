@@ -96,8 +96,8 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "anyrender"
-version = "0.12.0"
-source = "git+https://github.com/ldm0/anyrender?rev=18fd67d7a5622a9821d86434857fd69856912a43#18fd67d7a5622a9821d86434857fd69856912a43"
+version = "0.13.0"
+source = "git+https://github.com/Stravia-AI/anyrender.git?rev=5ec13279769a256620452ff225cef1281b1ad7c2#5ec13279769a256620452ff225cef1281b1ad7c2"
 dependencies = [
  "kurbo",
  "peniko",
@@ -107,8 +107,8 @@ dependencies = [
 
 [[package]]
 name = "anyrender_svg"
-version = "0.13.0"
-source = "git+https://github.com/ldm0/anyrender?rev=18fd67d7a5622a9821d86434857fd69856912a43#18fd67d7a5622a9821d86434857fd69856912a43"
+version = "0.14.0"
+source = "git+https://github.com/Stravia-AI/anyrender.git?rev=5ec13279769a256620452ff225cef1281b1ad7c2#5ec13279769a256620452ff225cef1281b1ad7c2"
 dependencies = [
  "anyrender",
  "kurbo",
@@ -118,8 +118,8 @@ dependencies = [
 
 [[package]]
 name = "anyrender_vello_cpu"
-version = "0.15.0"
-source = "git+https://github.com/ldm0/anyrender?rev=18fd67d7a5622a9821d86434857fd69856912a43#18fd67d7a5622a9821d86434857fd69856912a43"
+version = "0.16.0"
+source = "git+https://github.com/Stravia-AI/anyrender.git?rev=5ec13279769a256620452ff225cef1281b1ad7c2#5ec13279769a256620452ff225cef1281b1ad7c2"
 dependencies = [
  "anyrender",
  "debug_timer",
@@ -300,7 +300,7 @@ dependencies = [
  "quote",
  "regex",
  "rustc-hash 1.1.0",
- "shlex",
+ "shlex 1.3.0",
  "syn 2.0.117",
 ]
 
@@ -320,7 +320,7 @@ dependencies = [
  "quote",
  "regex",
  "rustc-hash 2.1.1",
- "shlex",
+ "shlex 1.3.0",
  "syn 2.0.117",
 ]
 
@@ -486,14 +486,14 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.2.57"
+version = "1.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a0dd1ca384932ff3641c8718a02769f1698e7563dc6974ffd03346116310423"
+checksum = "005ec2760ca554fae18df7a11195552ec576cd665632a881bc011d5bb2fd4d80"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
  "libc",
- "shlex",
+ "shlex 2.0.1",
 ]
 
 [[package]]
@@ -744,8 +744,8 @@ dependencies = [
 
 [[package]]
 name = "cookie"
-version = "0.18.1"
-source = "git+https://github.com/ldm0/cookie-rs?branch=priority#434e80cfcf2e99f92b1e7c8988a7add714c6ea96"
+version = "0.18.2"
+source = "git+https://github.com/Stravia-AI/cookie-rs.git?rev=868ce01f66268651f524302cd84c4278ad11e286#868ce01f66268651f524302cd84c4278ad11e286"
 dependencies = [
  "time",
  "version_check",
@@ -1044,6 +1044,7 @@ dependencies = [
 [[package]]
 name = "deno_v8"
 version = "0.3.0"
+source = "git+https://github.com/Stravia-AI/deno.git?rev=63326c42f67f11613c399880745ccfe383311328#63326c42f67f11613c399880745ccfe383311328"
 dependencies = [
  "v8",
  "v8x",
@@ -1267,7 +1268,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1313,9 +1314,9 @@ dependencies = [
 
 [[package]]
 name = "find-msvc-tools"
-version = "0.1.9"
+version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
+checksum = "3e0f1c7c3a72c66fd80abe965175f7523475c0489a87d3ff9d6e8c87d87a9d2d"
 
 [[package]]
 name = "flate2"
@@ -4187,8 +4188,7 @@ checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
 [[package]]
 name = "ratchet_core"
 version = "1.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c6e76679899ff8b3104d045c6589167b5bc1ddc2460555803c105db2cdfd0ab1"
+source = "git+https://github.com/Stravia-AI/ratchet.git?rev=df4e0645d42a67b7b2b3143f408225b31f5f8dd9#df4e0645d42a67b7b2b3143f408225b31f5f8dd9"
 dependencies = [
  "base64 0.22.1",
  "bitflags",
@@ -4235,8 +4235,7 @@ dependencies = [
 [[package]]
 name = "ratchet_rs"
 version = "1.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "21fdd57241fbecef9493f6c015bb90579baba4c160944a91865fd778656683f5"
+source = "git+https://github.com/Stravia-AI/ratchet.git?rev=df4e0645d42a67b7b2b3143f408225b31f5f8dd9#df4e0645d42a67b7b2b3143f408225b31f5f8dd9"
 dependencies = [
  "log",
  "ratchet_core",
@@ -4500,7 +4499,7 @@ dependencies = [
 [[package]]
 name = "selectors"
 version = "0.40.0"
-source = "git+https://github.com/ldm0/stylo?rev=671d13d31b3b00e7b1e0088ba2b36a4e35c0858c#671d13d31b3b00e7b1e0088ba2b36a4e35c0858c"
+source = "git+https://github.com/Stravia-AI/stylo.git?rev=953bc7f148614e2b0c1657e844a57fdde2269302#953bc7f148614e2b0c1657e844a57fdde2269302"
 dependencies = [
  "bitflags",
  "cssparser",
@@ -4608,8 +4607,7 @@ dependencies = [
 [[package]]
 name = "serde_v8"
 version = "0.320.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f60d33fe848b2dabcd7c2ac8b515d4023dc459390af641df81ed539fdddda2f6"
+source = "git+https://github.com/Stravia-AI/deno.git?rev=63326c42f67f11613c399880745ccfe383311328#63326c42f67f11613c399880745ccfe383311328"
 dependencies = [
  "deno_error",
  "deno_v8",
@@ -4632,7 +4630,7 @@ dependencies = [
 [[package]]
 name = "servo_arc"
 version = "0.4.3"
-source = "git+https://github.com/ldm0/stylo?rev=671d13d31b3b00e7b1e0088ba2b36a4e35c0858c#671d13d31b3b00e7b1e0088ba2b36a4e35c0858c"
+source = "git+https://github.com/Stravia-AI/stylo.git?rev=953bc7f148614e2b0c1657e844a57fdde2269302#953bc7f148614e2b0c1657e844a57fdde2269302"
 dependencies = [
  "serde",
  "stable_deref_trait",
@@ -4685,6 +4683,12 @@ name = "shlex"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
+
+[[package]]
+name = "shlex"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "signal-hook-registry"
@@ -4890,7 +4894,7 @@ dependencies = [
 [[package]]
 name = "stylo"
 version = "0.20.0"
-source = "git+https://github.com/ldm0/stylo?rev=671d13d31b3b00e7b1e0088ba2b36a4e35c0858c#671d13d31b3b00e7b1e0088ba2b36a4e35c0858c"
+source = "git+https://github.com/Stravia-AI/stylo.git?rev=953bc7f148614e2b0c1657e844a57fdde2269302#953bc7f148614e2b0c1657e844a57fdde2269302"
 dependencies = [
  "app_units",
  "arrayvec",
@@ -4946,7 +4950,7 @@ dependencies = [
 [[package]]
 name = "stylo_atoms"
 version = "0.20.0"
-source = "git+https://github.com/ldm0/stylo?rev=671d13d31b3b00e7b1e0088ba2b36a4e35c0858c#671d13d31b3b00e7b1e0088ba2b36a4e35c0858c"
+source = "git+https://github.com/Stravia-AI/stylo.git?rev=953bc7f148614e2b0c1657e844a57fdde2269302#953bc7f148614e2b0c1657e844a57fdde2269302"
 dependencies = [
  "string_cache",
  "string_cache_codegen",
@@ -4955,7 +4959,7 @@ dependencies = [
 [[package]]
 name = "stylo_derive"
 version = "0.20.0"
-source = "git+https://github.com/ldm0/stylo?rev=671d13d31b3b00e7b1e0088ba2b36a4e35c0858c#671d13d31b3b00e7b1e0088ba2b36a4e35c0858c"
+source = "git+https://github.com/Stravia-AI/stylo.git?rev=953bc7f148614e2b0c1657e844a57fdde2269302#953bc7f148614e2b0c1657e844a57fdde2269302"
 dependencies = [
  "darling",
  "proc-macro2",
@@ -4967,7 +4971,7 @@ dependencies = [
 [[package]]
 name = "stylo_dom"
 version = "0.20.0"
-source = "git+https://github.com/ldm0/stylo?rev=671d13d31b3b00e7b1e0088ba2b36a4e35c0858c#671d13d31b3b00e7b1e0088ba2b36a4e35c0858c"
+source = "git+https://github.com/Stravia-AI/stylo.git?rev=953bc7f148614e2b0c1657e844a57fdde2269302#953bc7f148614e2b0c1657e844a57fdde2269302"
 dependencies = [
  "bitflags",
  "stylo_malloc_size_of",
@@ -4976,7 +4980,7 @@ dependencies = [
 [[package]]
 name = "stylo_malloc_size_of"
 version = "0.20.0"
-source = "git+https://github.com/ldm0/stylo?rev=671d13d31b3b00e7b1e0088ba2b36a4e35c0858c#671d13d31b3b00e7b1e0088ba2b36a4e35c0858c"
+source = "git+https://github.com/Stravia-AI/stylo.git?rev=953bc7f148614e2b0c1657e844a57fdde2269302#953bc7f148614e2b0c1657e844a57fdde2269302"
 dependencies = [
  "app_units",
  "cssparser",
@@ -4993,7 +4997,7 @@ dependencies = [
 [[package]]
 name = "stylo_static_prefs"
 version = "0.20.0"
-source = "git+https://github.com/ldm0/stylo?rev=671d13d31b3b00e7b1e0088ba2b36a4e35c0858c#671d13d31b3b00e7b1e0088ba2b36a4e35c0858c"
+source = "git+https://github.com/Stravia-AI/stylo.git?rev=953bc7f148614e2b0c1657e844a57fdde2269302#953bc7f148614e2b0c1657e844a57fdde2269302"
 dependencies = [
  "toml",
 ]
@@ -5001,7 +5005,7 @@ dependencies = [
 [[package]]
 name = "stylo_taffy"
 version = "0.3.0-beta.1"
-source = "git+https://github.com/DioxusLabs/blitz?rev=5081c65811a4396f5a99b2e0aca542a4a4a6606f#5081c65811a4396f5a99b2e0aca542a4a4a6606f"
+source = "git+https://github.com/Stravia-AI/blitz.git?rev=cea80e35f93158a2d8fefc935cbb5397ca48fc7f#cea80e35f93158a2d8fefc935cbb5397ca48fc7f"
 dependencies = [
  "stylo",
  "stylo_atoms",
@@ -5011,7 +5015,7 @@ dependencies = [
 [[package]]
 name = "stylo_traits"
 version = "0.20.0"
-source = "git+https://github.com/ldm0/stylo?rev=671d13d31b3b00e7b1e0088ba2b36a4e35c0858c#671d13d31b3b00e7b1e0088ba2b36a4e35c0858c"
+source = "git+https://github.com/Stravia-AI/stylo.git?rev=953bc7f148614e2b0c1657e844a57fdde2269302#953bc7f148614e2b0c1657e844a57fdde2269302"
 dependencies = [
  "app_units",
  "bitflags",
@@ -5087,7 +5091,7 @@ dependencies = [
 [[package]]
 name = "taffy"
 version = "0.13.0"
-source = "git+https://github.com/ldm0/taffy?rev=71bc149ce5358406cdabba66da853ceb11ac74ee#71bc149ce5358406cdabba66da853ceb11ac74ee"
+source = "git+https://github.com/Stravia-AI/taffy.git?rev=7e79f8f3288b114ed4cc04699d5652005fa74479#7e79f8f3288b114ed4cc04699d5652005fa74479"
 dependencies = [
  "arrayvec",
  "serde",
@@ -5318,7 +5322,7 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 [[package]]
 name = "to_shmem"
 version = "0.5.0"
-source = "git+https://github.com/ldm0/stylo?rev=671d13d31b3b00e7b1e0088ba2b36a4e35c0858c#671d13d31b3b00e7b1e0088ba2b36a4e35c0858c"
+source = "git+https://github.com/Stravia-AI/stylo.git?rev=953bc7f148614e2b0c1657e844a57fdde2269302#953bc7f148614e2b0c1657e844a57fdde2269302"
 dependencies = [
  "cssparser",
  "servo_arc",
@@ -5331,7 +5335,7 @@ dependencies = [
 [[package]]
 name = "to_shmem_derive"
 version = "0.1.0"
-source = "git+https://github.com/ldm0/stylo?rev=671d13d31b3b00e7b1e0088ba2b36a4e35c0858c#671d13d31b3b00e7b1e0088ba2b36a4e35c0858c"
+source = "git+https://github.com/Stravia-AI/stylo.git?rev=953bc7f148614e2b0c1657e844a57fdde2269302#953bc7f148614e2b0c1657e844a57fdde2269302"
 dependencies = [
  "darling",
  "proc-macro2",
@@ -5721,6 +5725,7 @@ checksum = "ddd74a9687298c6858e9b88ec8935ec45d22e8fd5e6394fa1bd4e99a87789c76"
 [[package]]
 name = "v8"
 version = "152.2.0"
+source = "git+https://github.com/Stravia-AI/rusty_v8.git?rev=01aac5af08108b24da1a821775f48c7fb91167e2#01aac5af08108b24da1a821775f48c7fb91167e2"
 dependencies = [
  "bindgen 0.72.1",
  "bitflags",
@@ -5876,7 +5881,7 @@ dependencies = [
 [[package]]
 name = "wasm_dep_analyzer"
 version = "0.4.0"
-source = "git+https://github.com/ldm0/wasm_dep_analyzer?branch=moli0#17df042b381db26705b13353a3daf52cbbd56ab1"
+source = "git+https://github.com/Stravia-AI/wasm_dep_analyzer.git?rev=c572905c84d734bbacf56e69e572a704b141f9b5#c572905c84d734bbacf56e69e572a704b141f9b5"
 dependencies = [
  "deno_error",
  "thiserror 2.0.18",
@@ -5958,7 +5963,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6208,6 +6213,7 @@ dependencies = [
 [[package]]
 name = "xml5ever"
 version = "0.39.0"
+source = "git+https://github.com/Stravia-AI/html5ever.git?rev=5e1e25531fbb05855531d78a08372af0ee1020c2#5e1e25531fbb05855531d78a08372af0ee1020c2"
 dependencies = [
  "log",
  "markup5ever",
