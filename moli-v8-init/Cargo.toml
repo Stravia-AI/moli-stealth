@@ -5,7 +5,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-v8 = "152.2.0"
+v8.workspace = true
 
 [lints]
 workspace = true

@@ -13,39 +13,39 @@ default = ["jemalloc"]
 jemalloc = ["dep:tikv-jemalloc-sys", "dep:tikv-jemallocator"]
 
 [dependencies]
-anyhow = "1.0.100"
-axum = { version = "0.8.6", features = ["ws"] }
-base64 = "0.22.1"
-cidr = "0.3.2"
-clap = { version = "4.5.39", features = ["derive", "env"] }
-moli-browser-profile = { path = "../moli-browser-profile" }
-moli-cookie-cache = { path = "../moli-cookie-cache" }
-moli-protocol = { path = "../moli-protocol" }
-moli-cookie-jar = { path = "../moli-cookie-jar" }
-moli-fetch = { path = "../moli-fetch" }
-moli-core = { path = "../moli-core" }
-moli-process-signal = { path = "../moli-process-signal" }
-moli-protocol-server = { path = "../moli-protocol-server" }
-moli-robots = { path = "../moli-robots" }
-moli-stealth-net = { path = "../moli-stealth-net" }
-parking_lot = "0.12"
-regex = "1.12.3"
-serde_json = "1.0.145"
-tokio = { version = "1.51.0", features = ["macros", "net", "rt-multi-thread", "signal", "sync"] }
-tracing = "0.1.41"
-tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt"] }
-url = "2.5.7"
+anyhow.workspace = true
+axum = { workspace = true, features = ["ws"] }
+base64.workspace = true
+cidr.workspace = true
+clap = { workspace = true, features = ["derive", "env"] }
+moli-browser-profile.workspace = true
+moli-cookie-cache.workspace = true
+moli-protocol.workspace = true
+moli-cookie-jar.workspace = true
+moli-fetch.workspace = true
+moli-core.workspace = true
+moli-process-signal.workspace = true
+moli-protocol-server.workspace = true
+moli-robots.workspace = true
+moli-stealth-net.workspace = true
+parking_lot.workspace = true
+regex.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync"] }
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+url.workspace = true
 
 # Keep the existing jemalloc fallback only where rusty_v8 does not publish a
 # pointer-compressed PartitionAlloc archive. Windows keeps its system allocator.
 [target.'cfg(all(not(target_os = "windows"), not(any(all(target_os = "linux", target_env = "gnu", target_arch = "x86_64"), all(target_os = "macos", any(target_arch = "x86_64", target_arch = "aarch64"))))))'.dependencies]
-tikv-jemalloc-sys = { version = "0.7.1", optional = true, default-features = false }
-tikv-jemallocator = { version = "0.7.0", optional = true, default-features = false, features = ["override_allocator_on_supported_platforms"] }
+tikv-jemalloc-sys = { workspace = true, optional = true }
+tikv-jemallocator = { workspace = true, features = ["override_allocator_on_supported_platforms"], optional = true }
 
 [dev-dependencies]
-libc = "0.2"
-moli-test-support = { path = "../moli-test-support" }
-strip-ansi-escapes = "0.2.1"
+libc.workspace = true
+moli-test-support.workspace = true
+strip-ansi-escapes.workspace = true
 
 [lints]
 workspace = true

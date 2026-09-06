@@ -5,20 +5,20 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-app_units = "0.7.8"
-cssparser = "0.37"
-dom = { package = "stylo_dom", version = "0.20" }
-euclid = "0.22"
-moli-css-parse = { path = "../moli-css-parse" }
-moli-dom = { path = "../moli-dom" }
-indexmap = "2.6"
-parking_lot = "0.12"
-percent-encoding = "2.3"
-precomputed-hash = "0.1"
-selectors = "0.40"
-stylo = "0.20"
-style_traits = { package = "stylo_traits", version = "0.20" }
-url = "2.5.7"
+app_units.workspace = true
+cssparser.workspace = true
+dom.workspace = true
+euclid.workspace = true
+moli-css-parse.workspace = true
+moli-dom.workspace = true
+indexmap.workspace = true
+parking_lot.workspace = true
+percent-encoding.workspace = true
+precomputed-hash.workspace = true
+selectors.workspace = true
+stylo.workspace = true
+style_traits.workspace = true
+url.workspace = true
 
 [lints]
 workspace = true

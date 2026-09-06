@@ -11,17 +11,17 @@ default = []
 test-support = []
 
 [dependencies]
-anyhow = "1.0.100"
-html5ever = "0.39.0"
-moli-dom = { path = "../moli-dom" }
-moli-fetch = { path = "../moli-fetch" }
-moli-page-types = { path = "../moli-page-types" }
-moli-script = { path = "../moli-script" }
-moli-stylesheet-blocking = { path = "../moli-stylesheet-blocking" }
-markup5ever = "0.39.0"
-url = "2.5.7"
-xml5ever = "0.39.0"
-xmlparser = "0.13.6"
+anyhow.workspace = true
+html5ever.workspace = true
+moli-dom.workspace = true
+moli-fetch.workspace = true
+moli-page-types.workspace = true
+moli-script.workspace = true
+moli-stylesheet-blocking.workspace = true
+markup5ever.workspace = true
+url.workspace = true
+xml5ever.workspace = true
+xmlparser.workspace = true
 
 [lints]
 workspace = true

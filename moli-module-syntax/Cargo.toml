@@ -5,11 +5,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-oxc_allocator = "0.127.0"
-oxc_ast = "0.127.0"
-oxc_ast_visit = "0.127.0"
-oxc_parser = "0.127.0"
-oxc_span = "0.127.0"
+oxc_allocator.workspace = true
+oxc_ast.workspace = true
+oxc_ast_visit.workspace = true
+oxc_parser.workspace = true
+oxc_span.workspace = true
 
 [lints]
 workspace = true

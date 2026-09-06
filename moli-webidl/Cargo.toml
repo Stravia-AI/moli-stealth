@@ -5,13 +5,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-moli-v8-util = { path = "../moli-v8-util" }
-moli-webidl-callback = { path = "../moli-webidl-callback" }
-moli-webidl-derive = { path = "../moli-webidl-derive" }
-v8 = "152.2.0"
+moli-v8-util.workspace = true
+moli-webidl-callback.workspace = true
+moli-webidl-derive.workspace = true
+v8.workspace = true
 
 [dev-dependencies]
-moli-v8-test-util = { path = "../moli-v8-test-util" }
+moli-v8-test-util.workspace = true
 
 [lints]
 workspace = true

@@ -5,9 +5,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-encoding_rs = "0.8"
-moli-charset-parser = { path = "../moli-charset-parser" }
-moli-content-type = { path = "../moli-content-type" }
+encoding_rs.workspace = true
+moli-charset-parser.workspace = true
+moli-content-type.workspace = true
 
 [lints]
 workspace = true

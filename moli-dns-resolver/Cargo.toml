@@ -5,8 +5,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-crossbeam-channel = "0.5.15"
-parking_lot = "0.12"
+crossbeam-channel.workspace = true
+parking_lot.workspace = true
 
 [lints]
 workspace = true

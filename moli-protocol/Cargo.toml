@@ -9,53 +9,53 @@ build = "build.rs"
 test-support = []
 
 [dependencies]
-anyhow = "1.0.100"
-base64 = "0.22"
-indexmap = "2.6"
-moli-bounded-buffer = { path = "../moli-bounded-buffer" }
-moli-core = { path = "../moli-core" }
-moli-header-field = { path = "../moli-header-field" }
-moli-page-types = { path = "../moli-page-types" }
-moli-browser-profile = { path = "../moli-browser-profile" }
-moli-cookie-jar = { path = "../moli-cookie-jar" }
-moli-encoding = { path = "../moli-encoding" }
-moli-protocol-cdp = { path = "../moli-protocol-cdp" }
-moli-fetch = { path = "../moli-fetch" }
-moli-css-parse = { path = "../moli-css-parse" }
-moli-shared-worker = { path = "../moli-shared-worker" }
-moli-site = { path = "../moli-site" }
-moli-storage-key = { path = "../moli-storage-key" }
-moli-trace = { path = "../moli-trace" }
-moli-url = { path = "../moli-url" }
-moli-url-policy = { path = "../moli-url-policy" }
-moli-v8-platform = { path = "../moli-v8-platform" }
-moli-web-mime = { path = "../moli-web-mime" }
-parking_lot = "0.12"
-percent-encoding = "2.3"
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.145"
-serde_path_to_error = "0.1"
-strum = { version = "0.28.0", features = ["derive"] }
-tokio = { version = "1.51.0", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync"] }
-tracing = "0.1.41"
-url = "2.5.7"
-v8 = "152.2.0"
-time = "0.3"
-chromiumoxide_cdp = "0.9.1"
-data-url = "0.3.2"
-moli-crypto = { path = "../moli-crypto" }
-http = "1"
-sanitize-filename = "=0.6.0"
+anyhow.workspace = true
+base64.workspace = true
+indexmap.workspace = true
+moli-bounded-buffer.workspace = true
+moli-core.workspace = true
+moli-header-field.workspace = true
+moli-page-types.workspace = true
+moli-browser-profile.workspace = true
+moli-cookie-jar.workspace = true
+moli-encoding.workspace = true
+moli-protocol-cdp.workspace = true
+moli-fetch.workspace = true
+moli-css-parse.workspace = true
+moli-shared-worker.workspace = true
+moli-site.workspace = true
+moli-storage-key.workspace = true
+moli-trace.workspace = true
+moli-url.workspace = true
+moli-url-policy.workspace = true
+moli-v8-platform.workspace = true
+moli-web-mime.workspace = true
+parking_lot.workspace = true
+percent-encoding.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+serde_path_to_error.workspace = true
+strum = { workspace = true, features = ["derive"] }
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync"] }
+tracing.workspace = true
+url.workspace = true
+v8.workspace = true
+time.workspace = true
+chromiumoxide_cdp.workspace = true
+data-url.workspace = true
+moli-crypto.workspace = true
+http.workspace = true
+sanitize-filename.workspace = true
 
 [dev-dependencies]
-axum = { version = "0.8.6", features = ["ws"] }
-moli-cookie-jar = { path = "../moli-cookie-jar", features = ["test-support"] }
-moli-image = { path = "../moli-image" }
-moli-storage-service = { path = "../moli-storage-service" }
-moli-v8-init = { path = "../moli-v8-init" }
+axum = { workspace = true, features = ["ws"] }
+moli-cookie-jar = { workspace = true, features = ["test-support"] }
+moli-image.workspace = true
+moli-storage-service.workspace = true
+moli-v8-init.workspace = true
 
 [build-dependencies]
-vergen-gitcl = "10.0.2"
+vergen-gitcl.workspace = true
 
 [lints]
 workspace = true

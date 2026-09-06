@@ -5,10 +5,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-v8 = "152.2.0"
+v8.workspace = true
 
 [dev-dependencies]
-moli-v8-test-util = { path = "../moli-v8-test-util" }
+moli-v8-test-util.workspace = true
 
 [lints]
 workspace = true

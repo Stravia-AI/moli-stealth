@@ -6,15 +6,15 @@ edition = "2024"
 description = "Renderer-neutral WebCrypto algorithms, keys, and JWK validation for Moli"
 
 [dependencies]
-base64 = "0.22"
-ed448-goldilocks = { version = "=0.14.0-pre.15", default-features = false, features = ["alloc", "signing"] }
-moli-crypto = { path = "../moli-crypto" }
-openssl = { version = "0.10.80", features = ["aws-lc"] }
-pkcs8 = { version = "0.11.0", default-features = false, features = ["alloc"] }
-serde = { version = "1.0.228", features = ["derive"] }
-strum = { version = "0.28.0", features = ["derive"] }
-x448 = { version = "=0.14.0-pre.12", default-features = false, features = ["static_secrets"] }
-zeroize = "1.8.2"
+base64.workspace = true
+ed448-goldilocks = { workspace = true, features = ["alloc", "signing"] }
+moli-crypto.workspace = true
+openssl = { workspace = true, features = ["aws-lc"] }
+pkcs8 = { workspace = true, features = ["alloc"] }
+serde = { workspace = true, features = ["derive"] }
+strum = { workspace = true, features = ["derive"] }
+x448 = { workspace = true, features = ["static_secrets"] }
+zeroize.workspace = true
 
 [lints]
 workspace = true

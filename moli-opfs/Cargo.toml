@@ -6,12 +6,12 @@ edition = "2024"
 description = "Renderer-neutral Origin Private File System backend for Moli"
 
 [dependencies]
-moli-crypto = { path = "../moli-crypto" }
-parking_lot = "0.12"
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.145"
-thiserror = "2.0.17"
-typed-num = { version = "0.3.0", default-features = false, features = ["serde"] }
+moli-crypto.workspace = true
+parking_lot.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+typed-num = { workspace = true, features = ["serde"] }
 
 [lints]
 workspace = true

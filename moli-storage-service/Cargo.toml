@@ -6,17 +6,17 @@ edition = "2024"
 description = "Renderer-neutral Moli storage service and bucket identity"
 
 [dependencies]
-anyhow = "1.0.100"
-base64 = "0.22.1"
-moli-browser-profile = { path = "../moli-browser-profile" }
-moli-crypto = { path = "../moli-crypto" }
-moli-indexeddb = { path = "../moli-indexeddb" }
-moli-opfs = { path = "../moli-opfs" }
-moli-storage-key = { path = "../moli-storage-key" }
-parking_lot = "0.12"
-percent-encoding = "2.3"
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.145"
+anyhow.workspace = true
+base64.workspace = true
+moli-browser-profile.workspace = true
+moli-crypto.workspace = true
+moli-indexeddb.workspace = true
+moli-opfs.workspace = true
+moli-storage-key.workspace = true
+parking_lot.workspace = true
+percent-encoding.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
 
 [lints]
 workspace = true

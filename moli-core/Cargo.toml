@@ -14,37 +14,37 @@ test-support = ["moli-renderer-v8/test-support"]
 wpt-extensions = ["moli-renderer-v8/wpt-extensions"]
 
 [dependencies]
-anyhow = "1.0.100"
-moli-browser-profile = { path = "../moli-browser-profile" }
-moli-dom = { path = "../moli-dom" }
-moli-parser = { path = "../moli-parser" }
-moli-page-types = { path = "../moli-page-types" }
-moli-renderer-v8 = { path = "../moli-renderer-v8" }
-moli-selector = { path = "../moli-selector" }
-moli-storage-key = { path = "../moli-storage-key" }
-moli-storage-service = { path = "../moli-storage-service" }
-moli-url = { path = "../moli-url" }
-moli-web-mime = { path = "../moli-web-mime" }
-moli-cookie-jar = { path = "../moli-cookie-jar" }
-moli-fetch = { path = "../moli-fetch" }
-parking_lot = "0.12"
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.145"
-tokio = { version = "1.51.0", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
-tracing = "0.1.41"
-url = "2.5.7"
+anyhow.workspace = true
+moli-browser-profile.workspace = true
+moli-dom.workspace = true
+moli-parser.workspace = true
+moli-page-types.workspace = true
+moli-renderer-v8.workspace = true
+moli-selector.workspace = true
+moli-storage-key.workspace = true
+moli-storage-service.workspace = true
+moli-url.workspace = true
+moli-web-mime.workspace = true
+moli-cookie-jar.workspace = true
+moli-fetch.workspace = true
+parking_lot.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tracing.workspace = true
+url.workspace = true
 
 [dev-dependencies]
-moli-fetch = { path = "../moli-fetch", features = ["test-support"] }
-moli-parser = { path = "../moli-parser", features = ["test-support"] }
+moli-fetch = { workspace = true, features = ["test-support"] }
+moli-parser = { workspace = true, features = ["test-support"] }
 # Integration tests compile moli-core as a normal dependency, so `cfg(test)` in
 # moli-renderer-v8 would not apply. Enable the renderer feature through this
 # dev-dependency instead; production dependencies keep it disabled by default.
-moli-renderer-v8 = { path = "../moli-renderer-v8", features = ["test-support", "wpt-extensions"] }
-moli-test-support = { path = "../moli-test-support" }
-moli-wpt-compat = { path = "../moli-wpt-compat" }
-strip-ansi-escapes = "0.2.1"
-static_assertions = "1.1.0"
+moli-renderer-v8 = { workspace = true, features = ["test-support", "wpt-extensions"] }
+moli-test-support.workspace = true
+moli-wpt-compat.workspace = true
+strip-ansi-escapes.workspace = true
+static_assertions.workspace = true
 
 [lints]
 workspace = true

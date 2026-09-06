@@ -11,29 +11,29 @@ source-root = "crates/browser_oxide/src"
 imported-paths = ["net"]
 
 [dependencies]
-base64 = "0.23"
-boring2 = { package = "btls", git = "https://github.com/Stravia-AI/btls.git", rev = "5ee7faa63188777eb0c1d4a28ef1f465d7bb02b9" }
-boring-sys2 = { package = "btls-sys", git = "https://github.com/Stravia-AI/btls.git", rev = "5ee7faa63188777eb0c1d4a28ef1f465d7bb02b9", features = ["prefix-symbols"] }
-brotli = "8"
-bytes = "1"
-foreign-types = "0.5"
-futures-util = "0.3"
-http = "1"
-http2 = { version = "=0.5.20", features = ["unstable"] }
-httparse = "1"
-parking_lot = "0.12"
-percent-encoding = "2"
-rand = "0.10"
-thiserror = "2"
-tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
-tokio-boring2 = { package = "tokio-btls", git = "https://github.com/Stravia-AI/btls.git", rev = "5ee7faa63188777eb0c1d4a28ef1f465d7bb02b9" }
-url = "2"
-webpki-root-certs = "1.0"
+base64.workspace = true
+boring2.workspace = true
+boring-sys2 = { workspace = true, features = ["prefix-symbols"] }
+brotli.workspace = true
+bytes.workspace = true
+foreign-types.workspace = true
+futures-util.workspace = true
+http.workspace = true
+http2 = { workspace = true, features = ["unstable"] }
+httparse.workspace = true
+parking_lot.workspace = true
+percent-encoding.workspace = true
+rand.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio-boring2.workspace = true
+url.workspace = true
+webpki-root-certs.workspace = true
 
 [dev-dependencies]
-h2 = "0.4"
-rcgen = { version = "0.13", default-features = false, features = ["aws_lc_rs"] }
-tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs", "logging", "tls12"] }
+h2.workspace = true
+rcgen = { workspace = true, features = ["aws_lc_rs"] }
+tokio-rustls = { workspace = true, features = ["aws_lc_rs", "logging", "tls12"] }
 
 [lints]
 workspace = true

@@ -5,10 +5,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-cssparser = "0.37"
-stylo = "0.20"
-style_traits = { package = "stylo_traits", version = "0.20" }
-url = "2"
+cssparser.workspace = true
+stylo.workspace = true
+style_traits.workspace = true
+url.workspace = true
 
 [lints]
 workspace = true

@@ -86,6 +86,210 @@ exclude = ["vendor/xml5ever-0.39.0"]
 [workspace.package]
 license = "MIT OR Apache-2.0"
 
+[workspace.dependencies]
+anyhow = "1.0.100"
+anyrender = { git = "https://github.com/ldm0/anyrender", rev = "18fd67d7a5622a9821d86434857fd69856912a43" }
+anyrender_svg = { git = "https://github.com/ldm0/anyrender", rev = "18fd67d7a5622a9821d86434857fd69856912a43", default-features = false }
+anyrender_vello_cpu = { git = "https://github.com/ldm0/anyrender", rev = "18fd67d7a5622a9821d86434857fd69856912a43", default-features = false }
+app_units = "0.7.8"
+async-compression = "0.4"
+aws-lc-rs = { version = "1.16.2", default-features = false }
+axum = "0.8.6"
+base64 = "0.23"
+bitflags = "2.11.0"
+boring-sys2 = { package = "btls-sys", git = "https://github.com/Stravia-AI/btls.git", rev = "5ee7faa63188777eb0c1d4a28ef1f465d7bb02b9" }
+boring2 = { package = "btls", git = "https://github.com/Stravia-AI/btls.git", rev = "5ee7faa63188777eb0c1d4a28ef1f465d7bb02b9" }
+brotli = "8"
+bytes = "1"
+chromiumoxide_cdp = "0.9.1"
+cidr = "0.3.2"
+clap = "4.5.39"
+compact-enc-det = "0.1"
+content_disposition = "0.4.0"
+cookie = "0.18.0"
+cookie_store = { package = "moli-cookie-store", path = "moli-cookie-store", default-features = false }
+crossbeam-channel = "0.5.15"
+crossbeam-utils = "0.8.21"
+cssparser = "0.37"
+data-url = "0.3.2"
+document-features = "0.2.10"
+dom = { package = "stylo_dom", version = "0.20" }
+ed448-goldilocks = { version = "=0.14.0-pre.15", default-features = false }
+encoding_rs = "0.8"
+euclid = "=0.22.14"
+flate2 = "1.1.9"
+font8x8 = "0.3"
+foreign-types = "0.5"
+futures-util = "0.3.31"
+getrandom = "0.3"
+h2 = "0.4"
+html-escape = "0.2.13"
+html5ever = "0.39.0"
+http = "1"
+http-auth = { version = "0.1.10", default-features = false }
+http2 = "=0.5.20"
+httparse = "1"
+httpdate = "1.0.3"
+idna = "1.0"
+image = { version = "0.25.10", default-features = false }
+import_map = { version = "0.25.0", default-features = false }
+indexmap = "2.6.0"
+jpeg-decoder = "0.3"
+jpeg-encoder = "0.6"
+kurbo = "=0.13.1"
+libc = "0.2"
+log = "0.4"
+markup5ever = "0.39.0"
+mime = "0.3"
+moli-action-window = { path = "moli-action-window" }
+moli-bounded-buffer = { path = "moli-bounded-buffer" }
+moli-bounded-json = { path = "moli-bounded-json" }
+moli-broadcast-channel = { path = "moli-broadcast-channel" }
+moli-browser-profile = { path = "moli-browser-profile" }
+moli-canvas = { path = "moli-canvas" }
+moli-charset-parser = { path = "moli-charset-parser" }
+moli-content-type = { path = "moli-content-type" }
+moli-cookie-cache = { path = "moli-cookie-cache" }
+moli-cookie-jar = { path = "moli-cookie-jar" }
+moli-core = { path = "moli-core" }
+moli-crypto = { path = "moli-crypto" }
+moli-css-parse = { path = "moli-css-parse" }
+moli-dns-resolver = { path = "moli-dns-resolver" }
+moli-dom = { path = "moli-dom" }
+moli-encoding = { path = "moli-encoding" }
+moli-encoding-detector = { path = "moli-encoding-detector" }
+moli-fetch = { path = "moli-fetch" }
+moli-file-api = { path = "moli-file-api" }
+moli-geometry = { path = "moli-geometry" }
+moli-header-field = { path = "moli-header-field" }
+moli-html-input-temporal = { path = "moli-html-input-temporal" }
+moli-http-cache = { path = "moli-http-cache" }
+moli-image = { path = "moli-image" }
+moli-import-map = { path = "moli-import-map" }
+moli-indexeddb = { path = "moli-indexeddb" }
+moli-layout = { path = "moli-layout" }
+moli-local-executor = { path = "moli-local-executor" }
+moli-message-port = { path = "moli-message-port" }
+moli-module-script-tree = { path = "moli-module-script-tree" }
+moli-module-syntax = { path = "moli-module-syntax" }
+moli-multipart = { path = "moli-multipart" }
+moli-opfs = { path = "moli-opfs" }
+moli-owner-queue = { path = "moli-owner-queue" }
+moli-page-types = { path = "moli-page-types" }
+moli-paint = { path = "moli-paint" }
+moli-parser = { path = "moli-parser" }
+moli-process-signal = { path = "moli-process-signal" }
+moli-protocol = { path = "moli-protocol" }
+moli-protocol-cdp = { path = "moli-protocol-cdp" }
+moli-protocol-server = { path = "moli-protocol-server" }
+moli-protocol-webdriver-bidi = { path = "moli-protocol-webdriver-bidi" }
+moli-protocol-webdriver-classic = { path = "moli-protocol-webdriver-classic" }
+moli-renderer-v8 = { path = "moli-renderer-v8" }
+moli-robots = { path = "moli-robots" }
+moli-script = { path = "moli-script" }
+moli-selector = { path = "moli-selector" }
+moli-shared-worker = { path = "moli-shared-worker" }
+moli-site = { path = "moli-site" }
+moli-stealth-net = { path = "moli-stealth-net" }
+moli-storage-key = { path = "moli-storage-key" }
+moli-storage-service = { path = "moli-storage-service" }
+moli-streams = { path = "moli-streams" }
+moli-structured-clone = { path = "moli-structured-clone" }
+moli-stylesheet-blocking = { path = "moli-stylesheet-blocking" }
+moli-svg = { path = "moli-svg" }
+moli-test-support = { path = "moli-test-support" }
+moli-time = { path = "moli-time" }
+moli-trace = { path = "moli-trace" }
+moli-url = { path = "moli-url" }
+moli-url-policy = { path = "moli-url-policy" }
+moli-v8-init = { path = "moli-v8-init" }
+moli-v8-platform = { path = "moli-v8-platform" }
+moli-v8-test-util = { path = "moli-v8-test-util" }
+moli-v8-util = { path = "moli-v8-util" }
+moli-web-bot-auth = { path = "moli-web-bot-auth" }
+moli-web-errors = { path = "moli-web-errors" }
+moli-web-mime = { path = "moli-web-mime" }
+moli-webapi-declare = { path = "moli-webapi-declare" }
+moli-webapi-declare-derive = { path = "moli-webapi-declare-derive" }
+moli-webcrypto = { path = "moli-webcrypto" }
+moli-webidl = { path = "moli-webidl" }
+moli-webidl-callback = { path = "moli-webidl-callback" }
+moli-webidl-derive = { path = "moli-webidl-derive" }
+moli-websocket = { path = "moli-websocket" }
+moli-wpt-compat = { path = "moli-wpt-compat" }
+moli-xpath = { path = "moli-xpath" }
+netscape-cookie-file-parser = "0.3"
+openssl = "0.10.80"
+oxc_allocator = "0.127.0"
+oxc_ast = "0.127.0"
+oxc_ast_visit = "0.127.0"
+oxc_parser = "0.127.0"
+oxc_span = "0.127.0"
+parking_lot = "0.12"
+parley = "=0.11.1"
+peniko = "0.6.0"
+percent-encoding = "2.3"
+pkcs8 = { version = "0.11.0", default-features = false }
+png = "0.18"
+precomputed-hash = "0.1"
+proc-macro2 = "1.0"
+psl-types = "2.0.11"
+quote = "1.0"
+rand = "0.10"
+ratchet_rs = "=1.2.1"
+rcgen = { version = "0.13", default-features = false }
+regex = "1.12.3"
+rustc-hash = "2.1.1"
+sanitize-filename = "=0.6.0"
+selectors = "0.40"
+serde = "1.0.228"
+serde_json = "1.0.145"
+serde_path_to_error = "0.1"
+serde_v8 = "=0.320.0"
+servo_arc = "0.4.3"
+sha1 = "0.10"
+socket2 = "0.6.3"
+static_assertions = "1.1.0"
+strip-ansi-escapes = "0.2.1"
+strum = "0.28.0"
+style_traits = { package = "stylo_traits", version = "0.20" }
+stylo = "0.20"
+stylo_static_prefs = "0.20"
+stylo_taffy = { git = "https://github.com/DioxusLabs/blitz", rev = "5081c65811a4396f5a99b2e0aca542a4a4a6606f", default-features = false }
+svgtypes = "0.16.1"
+syn = "3.0"
+taffy = { version = "=0.13.0", default-features = false }
+thin-vec = "0.2.14"
+thiserror = "2.0.17"
+tikv-jemalloc-sys = { version = "0.7.1", default-features = false }
+tikv-jemallocator = { version = "0.7.0", default-features = false }
+time = "0.3.47"
+tokio = "1.51.0"
+tokio-boring2 = { package = "tokio-btls", git = "https://github.com/Stravia-AI/btls.git", rev = "5ee7faa63188777eb0c1d4a28ef1f465d7bb02b9" }
+tokio-rustls = { version = "0.26", default-features = false }
+tokio-stream = "0.1.17"
+tokio-tungstenite = "0.28.0"
+toml = "1.1"
+tower = "0.5.2"
+tracing = "0.1.41"
+tracing-subscriber = "0.3.19"
+typed-num = { version = "0.3.0", default-features = false }
+url = "2.5.7"
+usvg = "=0.48.1"
+uuid = { version = "1.23.1", default-features = false }
+v8 = "152.2.0"
+vergen-gitcl = "10.0.2"
+wasm_dep_analyzer = { git = "https://github.com/ldm0/wasm_dep_analyzer", branch = "moli0" }
+webpki-root-certs = "1.0"
+widestring = "1.2.1"
+wildcard = "0.3.0"
+wuff = "=0.2.5"
+x448 = { version = "=0.14.0-pre.12", default-features = false }
+xml5ever = "0.39.0"
+xmlparser = "0.13.6"
+yeslogic-fontconfig-sys = "=6.0.1"
+zeroize = "1.8.2"
+
 [patch.crates-io]
 xml5ever = { path = "vendor/xml5ever-0.39.0" }
 http2 = { git = "https://github.com/Stravia-AI/http2.git", rev = "fd40fb985e5e07f02e9f2ac9cddb8f1a711a8e44" }

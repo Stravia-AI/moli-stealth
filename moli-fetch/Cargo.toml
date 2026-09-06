@@ -9,34 +9,34 @@ default = []
 test-support = ["moli-cookie-jar/test-support"]
 
 [dependencies]
-anyhow = "1.0.100"
-async-compression = { version = "0.4", features = ["tokio", "gzip", "zlib", "brotli", "zstd"] }
-bytes = "1"
-cidr = "0.3.2"
-http = "1"
-moli-browser-profile = { path = "../moli-browser-profile" }
-moli-cookie-jar = { path = "../moli-cookie-jar" }
-moli-dns-resolver = { path = "../moli-dns-resolver" }
-moli-http-cache = { path = "../moli-http-cache" }
-moli-stealth-net = { path = "../moli-stealth-net" }
-moli-trace = { path = "../moli-trace" }
-moli-url = { path = "../moli-url" }
-moli-url-policy = { path = "../moli-url-policy" }
-moli-web-bot-auth = { path = "../moli-web-bot-auth" }
-moli-web-mime = { path = "../moli-web-mime" }
-parking_lot = "0.12"
-strum = { version = "0.28.0", features = ["derive"] }
-tokio = { version = "1.51.0", features = ["io-util", "rt", "sync", "time"] }
-tracing = "0.1.41"
-url = "2.5.7"
-wildcard = "0.3.0"
+anyhow.workspace = true
+async-compression = { workspace = true, features = ["tokio", "gzip", "zlib", "brotli", "zstd"] }
+bytes.workspace = true
+cidr.workspace = true
+http.workspace = true
+moli-browser-profile.workspace = true
+moli-cookie-jar.workspace = true
+moli-dns-resolver.workspace = true
+moli-http-cache.workspace = true
+moli-stealth-net.workspace = true
+moli-trace.workspace = true
+moli-url.workspace = true
+moli-url-policy.workspace = true
+moli-web-bot-auth.workspace = true
+moli-web-mime.workspace = true
+parking_lot.workspace = true
+strum = { workspace = true, features = ["derive"] }
+tokio = { workspace = true, features = ["io-util", "rt", "sync", "time"] }
+tracing.workspace = true
+url.workspace = true
+wildcard.workspace = true
 
 [dev-dependencies]
-h2 = "0.4"
-moli-cookie-jar = { path = "../moli-cookie-jar", features = ["test-support"] }
-rcgen = { version = "0.13", default-features = false, features = ["aws_lc_rs"] }
-tokio = { version = "1.51.0", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
-tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs", "logging", "tls12"] }
+h2.workspace = true
+moli-cookie-jar = { workspace = true, features = ["test-support"] }
+rcgen = { workspace = true, features = ["aws_lc_rs"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+tokio-rustls = { workspace = true, features = ["aws_lc_rs", "logging", "tls12"] }
 
 [lints]
 workspace = true

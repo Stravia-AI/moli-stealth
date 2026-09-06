@@ -5,8 +5,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-moli-page-types = { path = "../moli-page-types" }
-moli-web-mime = { path = "../moli-web-mime" }
+moli-page-types.workspace = true
+moli-web-mime.workspace = true
 
 [lints]
 workspace = true

@@ -6,9 +6,9 @@ edition = "2024"
 description = "Moli storage partition key primitives"
 
 [dependencies]
-moli-site = { path = "../moli-site" }
-moli-url = { path = "../moli-url" }
-url = "2.5.7"
+moli-site.workspace = true
+moli-url.workspace = true
+url.workspace = true
 
 [lints]
 workspace = true

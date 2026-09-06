@@ -5,8 +5,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-moli-v8-init = { path = "../moli-v8-init" }
-v8 = "152.2.0"
+moli-v8-init.workspace = true
+v8.workspace = true
 
 [lints]
 workspace = true

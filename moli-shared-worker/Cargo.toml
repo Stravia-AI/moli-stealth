@@ -5,8 +5,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-moli-storage-key = { path = "../moli-storage-key" }
-parking_lot = "0.12"
+moli-storage-key.workspace = true
+parking_lot.workspace = true
 
 [lints]
 workspace = true

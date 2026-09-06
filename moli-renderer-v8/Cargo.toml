@@ -15,114 +15,114 @@ test-support = []
 wpt-extensions = []
 
 [dependencies]
-anyhow = "1.0.100"
-app_units = "0.7.8"
-base64 = "0.22"
-crossbeam-channel = "0.5.15"
-cssparser = "0.37"
-data-url = "0.3.2"
-dom = { package = "stylo_dom", version = "0.20" }
-encoding_rs = "0.8"
-euclid = "0.22"
-futures-util = "0.3.31"
-precomputed-hash = "0.1"
-percent-encoding = "2.3"
-selectors = "0.40"
-stylo = "0.20"
-stylo_static_prefs = "0.20"
-moli-action-window = { path = "../moli-action-window" }
-moli-broadcast-channel = { path = "../moli-broadcast-channel" }
-moli-browser-profile = { path = "../moli-browser-profile" }
-moli-crypto = { path = "../moli-crypto" }
-moli-css-parse = { path = "../moli-css-parse" }
-moli-dom = { path = "../moli-dom" }
-moli-parser = { path = "../moli-parser" }
-moli-page-types = { path = "../moli-page-types" }
-moli-protocol-cdp = { path = "../moli-protocol-cdp" }
-moli-selector = { path = "../moli-selector" }
-moli-shared-worker = { path = "../moli-shared-worker" }
-moli-storage-service = { path = "../moli-storage-service" }
-moli-cookie-jar = { path = "../moli-cookie-jar" }
-moli-canvas = { path = "../moli-canvas" }
-moli-encoding = { path = "../moli-encoding" }
-moli-encoding-detector = { path = "../moli-encoding-detector" }
-moli-fetch = { path = "../moli-fetch" }
-moli-stealth-net = { path = "../moli-stealth-net" }
-moli-file-api = { path = "../moli-file-api" }
-moli-geometry = { path = "../moli-geometry" }
-moli-http-cache = { path = "../moli-http-cache" }
-moli-image = { path = "../moli-image" }
-moli-import-map = { path = "../moli-import-map" }
-moli-indexeddb = { path = "../moli-indexeddb" }
-moli-local-executor = { path = "../moli-local-executor" }
-moli-layout = { path = "../moli-layout" }
-moli-message-port = { path = "../moli-message-port" }
-moli-multipart = { path = "../moli-multipart" }
-moli-module-script-tree = { path = "../moli-module-script-tree" }
-moli-module-syntax = { path = "../moli-module-syntax" }
-moli-owner-queue = { path = "../moli-owner-queue" }
-moli-paint = { path = "../moli-paint" }
-moli-script = { path = "../moli-script" }
-moli-stylesheet-blocking = { path = "../moli-stylesheet-blocking" }
-moli-storage-key = { path = "../moli-storage-key" }
-moli-streams = { path = "../moli-streams" }
-moli-structured-clone = { path = "../moli-structured-clone" }
-moli-svg = { path = "../moli-svg" }
-moli-time = { path = "../moli-time" }
-moli-trace = { path = "../moli-trace" }
-moli-url = { path = "../moli-url" }
-moli-url-policy = { path = "../moli-url-policy" }
-moli-v8-init = { path = "../moli-v8-init" }
-moli-v8-platform = { path = "../moli-v8-platform" }
-moli-v8-util = { path = "../moli-v8-util" }
-moli-web-errors = { path = "../moli-web-errors" }
-moli-web-mime = { path = "../moli-web-mime" }
-moli-webcrypto = { path = "../moli-webcrypto" }
-moli-webapi-declare = { path = "../moli-webapi-declare" }
-moli-webidl = { path = "../moli-webidl" }
-moli-webidl-callback = { path = "../moli-webidl-callback" }
-moli-websocket = { path = "../moli-websocket" }
-moli-xpath = { path = "../moli-xpath" }
-http = "1"
-httpdate = "1.0.3"
-html-escape = "0.2.13"
-html5ever = "0.39.0"
-indexmap = "2.6"
-parking_lot = "0.12"
-markup5ever = "0.39.0"
-xml5ever = "0.39.0"
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.145"
-serde_v8 = "=0.320.0"
-strum = { version = "0.28.0", features = ["derive"] }
-tokio = { version = "1.51.0", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
-tracing = "0.1.41"
-url = "2.5.7"
-uuid = { version = "1.23.1", default-features = false }
-widestring = "1.2.1"
-style_traits = { package = "stylo_traits", version = "0.20" }
-xmlparser = "0.13.6"
-typed-num = { version = "0.3.0", default-features = false, features = ["serde"] }
-wasm_dep_analyzer = { git = "https://github.com/ldm0/wasm_dep_analyzer", branch = "moli0" }
+anyhow.workspace = true
+app_units.workspace = true
+base64.workspace = true
+crossbeam-channel.workspace = true
+cssparser.workspace = true
+data-url.workspace = true
+dom.workspace = true
+encoding_rs.workspace = true
+euclid.workspace = true
+futures-util.workspace = true
+precomputed-hash.workspace = true
+percent-encoding.workspace = true
+selectors.workspace = true
+stylo.workspace = true
+stylo_static_prefs.workspace = true
+moli-action-window.workspace = true
+moli-broadcast-channel.workspace = true
+moli-browser-profile.workspace = true
+moli-crypto.workspace = true
+moli-css-parse.workspace = true
+moli-dom.workspace = true
+moli-parser.workspace = true
+moli-page-types.workspace = true
+moli-protocol-cdp.workspace = true
+moli-selector.workspace = true
+moli-shared-worker.workspace = true
+moli-storage-service.workspace = true
+moli-cookie-jar.workspace = true
+moli-canvas.workspace = true
+moli-encoding.workspace = true
+moli-encoding-detector.workspace = true
+moli-fetch.workspace = true
+moli-stealth-net.workspace = true
+moli-file-api.workspace = true
+moli-geometry.workspace = true
+moli-http-cache.workspace = true
+moli-image.workspace = true
+moli-import-map.workspace = true
+moli-indexeddb.workspace = true
+moli-local-executor.workspace = true
+moli-layout.workspace = true
+moli-message-port.workspace = true
+moli-multipart.workspace = true
+moli-module-script-tree.workspace = true
+moli-module-syntax.workspace = true
+moli-owner-queue.workspace = true
+moli-paint.workspace = true
+moli-script.workspace = true
+moli-stylesheet-blocking.workspace = true
+moli-storage-key.workspace = true
+moli-streams.workspace = true
+moli-structured-clone.workspace = true
+moli-svg.workspace = true
+moli-time.workspace = true
+moli-trace.workspace = true
+moli-url.workspace = true
+moli-url-policy.workspace = true
+moli-v8-init.workspace = true
+moli-v8-platform.workspace = true
+moli-v8-util.workspace = true
+moli-web-errors.workspace = true
+moli-web-mime.workspace = true
+moli-webcrypto.workspace = true
+moli-webapi-declare.workspace = true
+moli-webidl.workspace = true
+moli-webidl-callback.workspace = true
+moli-websocket.workspace = true
+moli-xpath.workspace = true
+http.workspace = true
+httpdate.workspace = true
+html-escape.workspace = true
+html5ever.workspace = true
+indexmap.workspace = true
+parking_lot.workspace = true
+markup5ever.workspace = true
+xml5ever.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+serde_v8.workspace = true
+strum = { workspace = true, features = ["derive"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tracing.workspace = true
+url.workspace = true
+uuid.workspace = true
+widestring.workspace = true
+style_traits.workspace = true
+xmlparser.workspace = true
+typed-num = { workspace = true, features = ["serde"] }
+wasm_dep_analyzer.workspace = true
 
 # rusty_v8 publishes pointer-compressed archives for these targets. Those
 # archives also provide the process-wide PartitionAlloc allocator shim.
 [target.'cfg(any(all(target_os = "linux", target_env = "gnu", target_arch = "x86_64"), all(target_os = "macos", any(target_arch = "x86_64", target_arch = "aarch64"))))'.dependencies]
-v8 = { version = "152.2.0", features = ["v8_enable_pointer_compression"] }
+v8 = { workspace = true, features = ["v8_enable_pointer_compression"] }
 
 # Keep the upstream V8 configuration on targets without an official
 # pointer-compressed archive.
 [target.'cfg(not(any(all(target_os = "linux", target_env = "gnu", target_arch = "x86_64"), all(target_os = "macos", any(target_arch = "x86_64", target_arch = "aarch64")))))'.dependencies]
-v8 = "152.2.0"
+v8.workspace = true
 
 [dev-dependencies]
-moli-fetch = { path = "../moli-fetch", features = ["test-support"] }
-moli-parser = { path = "../moli-parser", features = ["test-support"] }
-moli-page-types = { path = "../moli-page-types", features = ["test-support"] }
-moli-v8-test-util = { path = "../moli-v8-test-util" }
-moli-websocket = { path = "../moli-websocket", features = ["test-support"] }
-png = "0.18"
-wuff = "=0.2.5"
+moli-fetch = { workspace = true, features = ["test-support"] }
+moli-parser = { workspace = true, features = ["test-support"] }
+moli-page-types = { workspace = true, features = ["test-support"] }
+moli-v8-test-util.workspace = true
+moli-websocket = { workspace = true, features = ["test-support"] }
+png.workspace = true
+wuff.workspace = true
 
 [lints]
 workspace = true

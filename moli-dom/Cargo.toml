@@ -5,16 +5,16 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-html5ever = "0.39.0"
-indexmap = "2.6"
-moli-css-parse = { path = "../moli-css-parse" }
-moli-html-input-temporal = { path = "../moli-html-input-temporal" }
-percent-encoding = "2.3"
-selectors = "0.40"
-serde_json = "1.0.145"
-servo_arc = "0.4.3"
-thin-vec = "0.2.14"
-url = "2.5.7"
+html5ever.workspace = true
+indexmap.workspace = true
+moli-css-parse.workspace = true
+moli-html-input-temporal.workspace = true
+percent-encoding.workspace = true
+selectors.workspace = true
+serde_json.workspace = true
+servo_arc.workspace = true
+thin-vec.workspace = true
+url.workspace = true
 
 [lints]
 workspace = true

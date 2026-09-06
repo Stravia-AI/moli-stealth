@@ -9,13 +9,13 @@ default = []
 test-support = []
 
 [dependencies]
-cookie_store = { package = "moli-cookie-store", path = "../moli-cookie-store", default-features = false, features = ["public_suffix"] }
-moli-site = { path = "../moli-site" }
-moli-storage-key = { path = "../moli-storage-key" }
-parking_lot = "0.12"
-time = "0.3"
-tracing = "0.1.41"
-url = "2.5.7"
+cookie_store = { workspace = true, features = ["public_suffix"] }
+moli-site.workspace = true
+moli-storage-key.workspace = true
+parking_lot.workspace = true
+time.workspace = true
+tracing.workspace = true
+url.workspace = true
 
 [lints]
 workspace = true

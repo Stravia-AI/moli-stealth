@@ -6,11 +6,11 @@ edition = "2024"
 description = "Renderer-neutral BroadcastChannel routing service for Moli"
 
 [dependencies]
-moli-storage-key = { path = "../moli-storage-key" }
-parking_lot = "0.12"
+moli-storage-key.workspace = true
+parking_lot.workspace = true
 
 [dev-dependencies]
-url = "2.5.7"
+url.workspace = true
 
 [lints]
 workspace = true

@@ -6,9 +6,9 @@ edition = "2024"
 description = "Moli registrable-site and schemeful-site helpers"
 
 [dependencies]
-moli-url = { path = "../moli-url" }
-psl-types = "2.0.11"
-url = "2.5.7"
+moli-url.workspace = true
+psl-types.workspace = true
+url.workspace = true
 
 [lints]
 workspace = true

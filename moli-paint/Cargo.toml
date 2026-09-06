@@ -5,12 +5,12 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-anyrender = { git = "https://github.com/ldm0/anyrender", rev = "18fd67d7a5622a9821d86434857fd69856912a43" }
-anyrender_svg = { git = "https://github.com/ldm0/anyrender", rev = "18fd67d7a5622a9821d86434857fd69856912a43", default-features = false, features = ["text"] }
-anyrender_vello_cpu = { git = "https://github.com/ldm0/anyrender", rev = "18fd67d7a5622a9821d86434857fd69856912a43", default-features = false, features = ["bitmap-glyphs", "filters"] }
-moli-image = { path = "../moli-image" }
-moli-layout = { path = "../moli-layout" }
-peniko = "0.6.0"
+anyrender.workspace = true
+anyrender_svg = { workspace = true, features = ["text"] }
+anyrender_vello_cpu = { workspace = true, features = ["bitmap-glyphs", "filters"] }
+moli-image.workspace = true
+moli-layout.workspace = true
+peniko.workspace = true
 
 [lints]
 workspace = true

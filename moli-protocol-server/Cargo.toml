@@ -5,36 +5,36 @@ edition = "2024"
 license.workspace = true
 
 [dependencies]
-anyhow = "1.0.100"
-axum = { version = "0.8.6", features = ["ws"] }
-base64 = "0.22"
-flate2 = "1.1.9"
-futures-util = "0.3.31"
-moli-bounded-json = { path = "../moli-bounded-json" }
-moli-cookie-jar = { path = "../moli-cookie-jar" }
-moli-core = { path = "../moli-core" }
-moli-fetch = { path = "../moli-fetch" }
-moli-protocol = { path = "../moli-protocol" }
-moli-protocol-cdp = { path = "../moli-protocol-cdp" }
-moli-protocol-webdriver-bidi = { path = "../moli-protocol-webdriver-bidi" }
-moli-protocol-webdriver-classic = { path = "../moli-protocol-webdriver-classic" }
-moli-trace = { path = "../moli-trace" }
-parking_lot = "0.12"
-percent-encoding = "2.3"
-serde_json = "1.0.145"
-socket2 = { version = "0.6.3", features = ["all"] }
-tokio = { version = "1.51.0", features = ["io-std", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync"] }
-tracing = "0.1.41"
-url = "2.5.7"
+anyhow.workspace = true
+axum = { workspace = true, features = ["ws"] }
+base64.workspace = true
+flate2.workspace = true
+futures-util.workspace = true
+moli-bounded-json.workspace = true
+moli-cookie-jar.workspace = true
+moli-core.workspace = true
+moli-fetch.workspace = true
+moli-protocol.workspace = true
+moli-protocol-cdp.workspace = true
+moli-protocol-webdriver-bidi.workspace = true
+moli-protocol-webdriver-classic.workspace = true
+moli-trace.workspace = true
+parking_lot.workspace = true
+percent-encoding.workspace = true
+serde_json.workspace = true
+socket2 = { workspace = true, features = ["all"] }
+tokio = { workspace = true, features = ["io-std", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync"] }
+tracing.workspace = true
+url.workspace = true
 
 [dev-dependencies]
-moli-browser-profile = { path = "../moli-browser-profile" }
-moli-cookie-cache = { path = "../moli-cookie-cache" }
-moli-protocol = { path = "../moli-protocol", features = ["test-support"] }
-png = "0.18"
-time = "0.3"
-tokio-tungstenite = "0.28.0"
-tower = { version = "0.5.2", features = ["util"] }
+moli-browser-profile.workspace = true
+moli-cookie-cache.workspace = true
+moli-protocol = { workspace = true, features = ["test-support"] }
+png.workspace = true
+time.workspace = true
+tokio-tungstenite.workspace = true
+tower = { workspace = true, features = ["util"] }
 
 [lints]
 workspace = true

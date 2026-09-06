@@ -5,7 +5,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-time = { version = "0.3", features = ["large-dates"] }
+time = { workspace = true, features = ["large-dates"] }
 
 [lints]
 workspace = true

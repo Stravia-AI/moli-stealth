@@ -5,15 +5,15 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-crossbeam-utils = "0.8.21"
-parking_lot = "0.12"
-tokio = { version = "1.51.0", features = ["rt", "sync", "time"] }
-tracing = "0.1.41"
-v8 = "152.2.0"
+crossbeam-utils.workspace = true
+parking_lot.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tracing.workspace = true
+v8.workspace = true
 
 [dev-dependencies]
-moli-v8-init = { path = "../moli-v8-init" }
-serde_json = "1.0.145"
+moli-v8-init.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true
