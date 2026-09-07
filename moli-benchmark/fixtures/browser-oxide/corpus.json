@@ -1,0 +1,632 @@
+[
+  {
+    "cat": "amazon",
+    "name": "amazon-ca",
+    "url": "https://www.amazon.ca/"
+  },
+  {
+    "cat": "amazon",
+    "name": "amazon-co-uk",
+    "url": "https://www.amazon.co.uk/"
+  },
+  {
+    "cat": "amazon",
+    "name": "amazon-com-au",
+    "url": "https://www.amazon.com.au/"
+  },
+  {
+    "cat": "amazon",
+    "name": "amazon-com",
+    "url": "https://www.amazon.com/"
+  },
+  {
+    "cat": "amazon",
+    "name": "amazon-de",
+    "url": "https://www.amazon.de/"
+  },
+  {
+    "cat": "amazon",
+    "name": "amazon-fr",
+    "url": "https://www.amazon.fr/"
+  },
+  {
+    "cat": "amazon",
+    "name": "amazon-in",
+    "url": "https://www.amazon.in/"
+  },
+  {
+    "cat": "amazon",
+    "name": "amazon-jp",
+    "url": "https://www.amazon.co.jp/"
+  },
+  {
+    "cat": "antibot",
+    "name": "amiunique",
+    "url": "https://amiunique.org/"
+  },
+  {
+    "cat": "antibot",
+    "name": "areyouheadless",
+    "url": "https://arh.antoinevastel.com/bots/areyouheadless"
+  },
+  {
+    "cat": "antibot",
+    "name": "botd",
+    "url": "https://fingerprint.com/products/bot-detection/"
+  },
+  {
+    "cat": "antibot",
+    "name": "browserleaks-canvas",
+    "url": "https://browserleaks.com/canvas"
+  },
+  {
+    "cat": "antibot",
+    "name": "creepjs",
+    "url": "https://abrahamjuliot.github.io/creepjs/"
+  },
+  {
+    "cat": "antibot",
+    "name": "fingerprintscan",
+    "url": "https://fingerprint.com/"
+  },
+  {
+    "cat": "antibot",
+    "name": "iphey",
+    "url": "https://iphey.com/"
+  },
+  {
+    "cat": "antibot",
+    "name": "nowsecure",
+    "url": "https://nowsecure.nl/"
+  },
+  {
+    "cat": "antibot",
+    "name": "pixelscan",
+    "url": "https://pixelscan.net/"
+  },
+  {
+    "cat": "antibot",
+    "name": "sannysoft",
+    "url": "https://bot.sannysoft.com/"
+  },
+  {
+    "cat": "chl-known",
+    "name": "adidas",
+    "url": "https://www.adidas.com/us"
+  },
+  {
+    "cat": "chl-known",
+    "name": "canadagoose",
+    "url": "https://www.canadagoose.com/"
+  },
+  {
+    "cat": "chl-known",
+    "name": "douyin",
+    "url": "https://www.douyin.com/"
+  },
+  {
+    "cat": "chl-known",
+    "name": "hyatt",
+    "url": "https://www.hyatt.com/"
+  },
+  {
+    "cat": "chl-known",
+    "name": "leboncoin",
+    "url": "https://www.leboncoin.fr/"
+  },
+  {
+    "cat": "gov-bank",
+    "name": "bofa",
+    "url": "https://www.bankofamerica.com/"
+  },
+  {
+    "cat": "gov-bank",
+    "name": "chase",
+    "url": "https://www.chase.com/"
+  },
+  {
+    "cat": "gov-bank",
+    "name": "irs",
+    "url": "https://www.irs.gov/"
+  },
+  {
+    "cat": "gov-bank",
+    "name": "paypal",
+    "url": "https://www.paypal.com/"
+  },
+  {
+    "cat": "gov-bank",
+    "name": "usa-gov",
+    "url": "https://www.usa.gov/"
+  },
+  {
+    "cat": "gov-bank",
+    "name": "wellsfargo",
+    "url": "https://www.wellsfargo.com/"
+  },
+  {
+    "cat": "misc",
+    "name": "coursera",
+    "url": "https://www.coursera.org/"
+  },
+  {
+    "cat": "misc",
+    "name": "discord-com",
+    "url": "https://discord.com/"
+  },
+  {
+    "cat": "misc",
+    "name": "duolingo",
+    "url": "https://www.duolingo.com/"
+  },
+  {
+    "cat": "misc",
+    "name": "imdb",
+    "url": "https://www.imdb.com/"
+  },
+  {
+    "cat": "misc",
+    "name": "khanacademy",
+    "url": "https://www.khanacademy.org/"
+  },
+  {
+    "cat": "misc",
+    "name": "medium",
+    "url": "https://medium.com/"
+  },
+  {
+    "cat": "misc",
+    "name": "slack-com",
+    "url": "https://slack.com/"
+  },
+  {
+    "cat": "misc",
+    "name": "substack",
+    "url": "https://substack.com/"
+  },
+  {
+    "cat": "misc",
+    "name": "udemy",
+    "url": "https://www.udemy.com/"
+  },
+  {
+    "cat": "misc",
+    "name": "weather",
+    "url": "https://weather.com/"
+  },
+  {
+    "cat": "misc",
+    "name": "yelp",
+    "url": "https://www.yelp.com/"
+  },
+  {
+    "cat": "misc",
+    "name": "zoom",
+    "url": "https://zoom.us/"
+  },
+  {
+    "cat": "news",
+    "name": "bbc",
+    "url": "https://www.bbc.com/"
+  },
+  {
+    "cat": "news",
+    "name": "bloomberg",
+    "url": "https://www.bloomberg.com/"
+  },
+  {
+    "cat": "news",
+    "name": "cnn",
+    "url": "https://www.cnn.com/"
+  },
+  {
+    "cat": "news",
+    "name": "economist",
+    "url": "https://www.economist.com/"
+  },
+  {
+    "cat": "news",
+    "name": "ft",
+    "url": "https://www.ft.com/"
+  },
+  {
+    "cat": "news",
+    "name": "guardian",
+    "url": "https://www.theguardian.com/"
+  },
+  {
+    "cat": "news",
+    "name": "nytimes",
+    "url": "https://www.nytimes.com/"
+  },
+  {
+    "cat": "news",
+    "name": "reuters",
+    "url": "https://www.reuters.com/"
+  },
+  {
+    "cat": "news",
+    "name": "washingtonpost",
+    "url": "https://www.washingtonpost.com/"
+  },
+  {
+    "cat": "news",
+    "name": "wsj",
+    "url": "https://www.wsj.com/"
+  },
+  {
+    "cat": "realestate",
+    "name": "realtor",
+    "url": "https://www.realtor.com/"
+  },
+  {
+    "cat": "realestate",
+    "name": "redfin",
+    "url": "https://www.redfin.com/"
+  },
+  {
+    "cat": "realestate",
+    "name": "trulia",
+    "url": "https://www.trulia.com/"
+  },
+  {
+    "cat": "realestate",
+    "name": "zillow",
+    "url": "https://www.zillow.com/"
+  },
+  {
+    "cat": "reference",
+    "name": "github",
+    "url": "https://github.com/"
+  },
+  {
+    "cat": "reference",
+    "name": "mdn",
+    "url": "https://developer.mozilla.org/"
+  },
+  {
+    "cat": "reference",
+    "name": "stackoverflow",
+    "url": "https://stackoverflow.com/"
+  },
+  {
+    "cat": "reference",
+    "name": "wikipedia-en",
+    "url": "https://en.wikipedia.org/wiki/Main_Page"
+  },
+  {
+    "cat": "reference",
+    "name": "wiktionary",
+    "url": "https://en.wiktionary.org/"
+  },
+  {
+    "cat": "ru",
+    "name": "mail-ru",
+    "url": "https://mail.ru/"
+  },
+  {
+    "cat": "ru",
+    "name": "ozon",
+    "url": "https://www.ozon.ru/"
+  },
+  {
+    "cat": "ru",
+    "name": "ria",
+    "url": "https://ria.ru/"
+  },
+  {
+    "cat": "ru",
+    "name": "vk",
+    "url": "https://vk.com/"
+  },
+  {
+    "cat": "ru",
+    "name": "wildberries",
+    "url": "https://www.wildberries.ru/"
+  },
+  {
+    "cat": "ru",
+    "name": "yandex-ru",
+    "url": "https://yandex.ru/"
+  },
+  {
+    "cat": "search",
+    "name": "bing",
+    "url": "https://www.bing.com/"
+  },
+  {
+    "cat": "search",
+    "name": "brave",
+    "url": "https://search.brave.com/"
+  },
+  {
+    "cat": "search",
+    "name": "duckduckgo",
+    "url": "https://duckduckgo.com/"
+  },
+  {
+    "cat": "search",
+    "name": "ecosia",
+    "url": "https://www.ecosia.org/"
+  },
+  {
+    "cat": "search",
+    "name": "google",
+    "url": "https://www.google.com/"
+  },
+  {
+    "cat": "search",
+    "name": "startpage",
+    "url": "https://www.startpage.com/"
+  },
+  {
+    "cat": "search",
+    "name": "yahoo",
+    "url": "https://www.yahoo.com/"
+  },
+  {
+    "cat": "search",
+    "name": "yandex",
+    "url": "https://ya.ru/"
+  },
+  {
+    "cat": "social",
+    "name": "facebook",
+    "url": "https://www.facebook.com/"
+  },
+  {
+    "cat": "social",
+    "name": "instagram",
+    "url": "https://www.instagram.com/"
+  },
+  {
+    "cat": "social",
+    "name": "linkedin",
+    "url": "https://www.linkedin.com/"
+  },
+  {
+    "cat": "social",
+    "name": "pinterest",
+    "url": "https://www.pinterest.com/"
+  },
+  {
+    "cat": "social",
+    "name": "quora",
+    "url": "https://www.quora.com/"
+  },
+  {
+    "cat": "social",
+    "name": "reddit",
+    "url": "https://www.reddit.com/"
+  },
+  {
+    "cat": "social",
+    "name": "threads",
+    "url": "https://www.threads.net/"
+  },
+  {
+    "cat": "social",
+    "name": "tumblr",
+    "url": "https://www.tumblr.com/"
+  },
+  {
+    "cat": "social",
+    "name": "twitter",
+    "url": "https://twitter.com/"
+  },
+  {
+    "cat": "social",
+    "name": "x-com",
+    "url": "https://x.com/"
+  },
+  {
+    "cat": "stores",
+    "name": "alibaba",
+    "url": "https://www.alibaba.com/"
+  },
+  {
+    "cat": "stores",
+    "name": "aliexpress",
+    "url": "https://www.aliexpress.com/"
+  },
+  {
+    "cat": "stores",
+    "name": "asos",
+    "url": "https://www.asos.com/"
+  },
+  {
+    "cat": "stores",
+    "name": "bestbuy",
+    "url": "https://www.bestbuy.com/"
+  },
+  {
+    "cat": "stores",
+    "name": "costco",
+    "url": "https://www.costco.com/"
+  },
+  {
+    "cat": "stores",
+    "name": "ebay",
+    "url": "https://www.ebay.com/"
+  },
+  {
+    "cat": "stores",
+    "name": "etsy",
+    "url": "https://www.etsy.com/"
+  },
+  {
+    "cat": "stores",
+    "name": "h-m",
+    "url": "https://www2.hm.com/"
+  },
+  {
+    "cat": "stores",
+    "name": "homedepot",
+    "url": "https://www.homedepot.com/"
+  },
+  {
+    "cat": "stores",
+    "name": "ikea",
+    "url": "https://www.ikea.com/"
+  },
+  {
+    "cat": "stores",
+    "name": "macys",
+    "url": "https://www.macys.com/"
+  },
+  {
+    "cat": "stores",
+    "name": "shopify",
+    "url": "https://www.shopify.com/"
+  },
+  {
+    "cat": "stores",
+    "name": "target",
+    "url": "https://www.target.com/"
+  },
+  {
+    "cat": "stores",
+    "name": "uniqlo",
+    "url": "https://www.uniqlo.com/"
+  },
+  {
+    "cat": "stores",
+    "name": "walmart",
+    "url": "https://www.walmart.com/"
+  },
+  {
+    "cat": "stores",
+    "name": "wayfair",
+    "url": "https://www.wayfair.com/"
+  },
+  {
+    "cat": "stores",
+    "name": "zara",
+    "url": "https://www.zara.com/"
+  },
+  {
+    "cat": "streaming",
+    "name": "disneyplus",
+    "url": "https://www.disneyplus.com/"
+  },
+  {
+    "cat": "streaming",
+    "name": "hulu",
+    "url": "https://www.hulu.com/"
+  },
+  {
+    "cat": "streaming",
+    "name": "netflix",
+    "url": "https://www.netflix.com/"
+  },
+  {
+    "cat": "streaming",
+    "name": "prime-video",
+    "url": "https://www.primevideo.com/"
+  },
+  {
+    "cat": "streaming",
+    "name": "spotify",
+    "url": "https://open.spotify.com/"
+  },
+  {
+    "cat": "streaming",
+    "name": "twitch",
+    "url": "https://www.twitch.tv/"
+  },
+  {
+    "cat": "streaming",
+    "name": "vimeo",
+    "url": "https://vimeo.com/"
+  },
+  {
+    "cat": "streaming",
+    "name": "youtube",
+    "url": "https://www.youtube.com/"
+  },
+  {
+    "cat": "tech",
+    "name": "anthropic",
+    "url": "https://www.anthropic.com/"
+  },
+  {
+    "cat": "tech",
+    "name": "apple",
+    "url": "https://www.apple.com/"
+  },
+  {
+    "cat": "tech",
+    "name": "aws",
+    "url": "https://aws.amazon.com/"
+  },
+  {
+    "cat": "tech",
+    "name": "azure",
+    "url": "https://azure.microsoft.com/"
+  },
+  {
+    "cat": "tech",
+    "name": "cloudflare",
+    "url": "https://www.cloudflare.com/"
+  },
+  {
+    "cat": "tech",
+    "name": "google-cloud",
+    "url": "https://cloud.google.com/"
+  },
+  {
+    "cat": "tech",
+    "name": "microsoft",
+    "url": "https://www.microsoft.com/"
+  },
+  {
+    "cat": "tech",
+    "name": "openai",
+    "url": "https://openai.com/"
+  },
+  {
+    "cat": "tech",
+    "name": "stripe",
+    "url": "https://stripe.com/"
+  },
+  {
+    "cat": "travel",
+    "name": "airbnb",
+    "url": "https://www.airbnb.com/"
+  },
+  {
+    "cat": "travel",
+    "name": "booking",
+    "url": "https://www.booking.com/"
+  },
+  {
+    "cat": "travel",
+    "name": "expedia",
+    "url": "https://www.expedia.com/"
+  },
+  {
+    "cat": "travel",
+    "name": "hotels",
+    "url": "https://www.hotels.com/"
+  },
+  {
+    "cat": "travel",
+    "name": "kayak",
+    "url": "https://www.kayak.com/"
+  },
+  {
+    "cat": "travel",
+    "name": "skyscanner",
+    "url": "https://www.skyscanner.com/"
+  },
+  {
+    "cat": "travel",
+    "name": "tripadvisor",
+    "url": "https://www.tripadvisor.com/"
+  },
+  {
+    "cat": "travel",
+    "name": "uber",
+    "url": "https://www.uber.com/"
+  }
+]

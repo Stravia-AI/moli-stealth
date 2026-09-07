@@ -249,8 +249,9 @@ evaluation environments, and reinforcement-learning workloads.
 
 - **Complete web runtime** — streaming HTML parsing, native DOM, V8 JavaScript,
   modules/timers/microtasks/events, iframes and workers, CSS cascade,
-  Fetch/XHR/WebSocket, cookies, WebCrypto, and profile-scoped storage
-  (localStorage, IndexedDB, OPFS).
+  Fetch/XHR/WebSocket, native `CompressionStream`/`DecompressionStream`
+  (`gzip`, `deflate`, `deflate-raw`, `brotli`), cookies, WebCrypto, and
+  profile-scoped storage (localStorage, IndexedDB, OPFS).
 - **Extraction-optimized outputs** — the CLI directly produces HTML, Markdown,
   JSON, semantic text trees, and frame-aware serialization, with
   selector/script/response waits and network tracing.

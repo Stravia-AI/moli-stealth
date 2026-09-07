@@ -1269,8 +1269,8 @@ fn inline_style_entries_for_property(
     let mut normal = None;
     let mut important = None;
     style_entries(runtime, handle)
-        .into_iter()
-        .filter_map(|entry| candidate(&entry))
+        .iter()
+        .filter_map(candidate)
         .for_each(|entry| {
             if entry.priority {
                 important = Some(entry);
@@ -1779,14 +1779,14 @@ fn inline_exact_style_entry_with_index(
 ) -> Option<(usize, StyleEntry)> {
     let mut normal = None;
     let mut important = None;
-    for (index, entry) in style_entries(runtime, handle).into_iter().enumerate() {
+    for (index, entry) in style_entries(runtime, handle).iter().enumerate() {
         if entry.name != property {
             continue;
         }
         if entry.priority {
-            important = Some((index, entry));
+            important = Some((index, entry.clone()));
         } else {
-            normal = Some((index, entry));
+            normal = Some((index, entry.clone()));
         }
     }
     important.or(normal)
@@ -1800,7 +1800,7 @@ fn exact_shorthand_has_later_overriding_longhand(
     longhands: &[&str],
 ) -> bool {
     style_entries(runtime, handle)
-        .into_iter()
+        .iter()
         .enumerate()
         .skip(shorthand_index + 1)
         .any(|(_, entry)| {
@@ -7128,8 +7128,8 @@ pub(in crate::native_bridge::element::styles) fn style_property_names_with_conte
         return state.property_names();
     }
     style_entries(runtime, handle)
-        .into_iter()
-        .map(|entry| entry.name)
+        .iter()
+        .map(|entry| entry.name.clone())
         .collect()
 }
 

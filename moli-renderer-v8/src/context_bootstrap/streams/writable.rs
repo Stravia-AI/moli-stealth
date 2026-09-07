@@ -126,11 +126,34 @@ pub(in crate::context_bootstrap) fn writable_stream_locked_getter<'s>(
     rv.set(v8::Boolean::new(scope, locked).into());
 }
 
+fn matches_compression_stream_accessor_brand<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: &v8::FunctionCallbackArguments<'s>,
+) -> bool {
+    match crate::util::get_private_value(
+        scope,
+        args.this(),
+        super::compression::COMPRESSION_STREAM_BRAND_SLOT,
+    ) {
+        Some(brand) => {
+            brand.is_boolean() && args.data().is_boolean() && brand.strict_equals(args.data())
+        }
+        None => !args.data().is_boolean(),
+    }
+}
+
 fn transform_stream_readable_getter_callback<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'s, v8::Value>,
 ) {
+    if !matches_compression_stream_accessor_brand(scope, &args) {
+        throw_type_error(
+            scope,
+            "Stream readable getter called on incompatible receiver",
+        );
+        return;
+    }
     let Some(readable) = stream_slot_object(scope, args.this(), TRANSFORM_STREAM_READABLE_SLOT)
     else {
         throw_type_error(
@@ -147,6 +170,13 @@ fn transform_stream_writable_getter_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'s, v8::Value>,
 ) {
+    if !matches_compression_stream_accessor_brand(scope, &args) {
+        throw_type_error(
+            scope,
+            "Stream writable getter called on incompatible receiver",
+        );
+        return;
+    }
     let Some(writable) = stream_slot_object(scope, args.this(), TRANSFORM_STREAM_WRITABLE_SLOT)
     else {
         throw_type_error(
@@ -199,6 +229,26 @@ struct TextDecoderStreamPrototypeAttributesDeclaration {
     writable: (),
 }
 
+#[derive(WebApiFunctionTemplate)]
+#[webapi(name = "CompressionStream", enumerable)]
+struct CompressionStreamPrototypeAttributesDeclaration {
+    #[webapi(accessor_property, getter = transform_stream_readable_getter_callback, data = false)]
+    readable: (),
+
+    #[webapi(accessor_property, getter = transform_stream_writable_getter_callback, data = false)]
+    writable: (),
+}
+
+#[derive(WebApiFunctionTemplate)]
+#[webapi(name = "DecompressionStream", enumerable)]
+struct DecompressionStreamPrototypeAttributesDeclaration {
+    #[webapi(accessor_property, getter = transform_stream_readable_getter_callback, data = true)]
+    readable: (),
+
+    #[webapi(accessor_property, getter = transform_stream_writable_getter_callback, data = true)]
+    writable: (),
+}
+
 pub(super) fn install_transform_stream_template_bindings<'s>(
     scope: &mut v8::PinScope<'s, '_, ()>,
     prototype: v8::Local<'s, v8::ObjectTemplate>,
@@ -217,6 +267,16 @@ pub(super) fn install_transform_stream_template_bindings<'s>(
         }
         "TextDecoderStream" => {
             TextDecoderStreamPrototypeAttributesDeclaration::initialize_prototype_template(
+                scope, prototype,
+            );
+        }
+        "CompressionStream" => {
+            CompressionStreamPrototypeAttributesDeclaration::initialize_prototype_template(
+                scope, prototype,
+            );
+        }
+        "DecompressionStream" => {
+            DecompressionStreamPrototypeAttributesDeclaration::initialize_prototype_template(
                 scope, prototype,
             );
         }

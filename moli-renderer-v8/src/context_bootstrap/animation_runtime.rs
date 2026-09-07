@@ -2,9 +2,7 @@ use super::*;
 use moli_webapi_declare::{WebApiFunctionTemplate, WebApiObject};
 
 use crate::native_bridge::node_runtime_and_handle_from_object;
-use crate::util::{
-    call_script_visible_function, get_private_object, get_private_value, set_private_value,
-};
+use crate::util::{get_private_object, get_private_value, set_private_value};
 
 mod element_registry;
 
@@ -18,6 +16,7 @@ const ANIMATION_EFFECT_SLOT: &str = "__moliAnimationEffect";
 const ANIMATION_TIMELINE_SLOT: &str = "__moliAnimationTimeline";
 const ANIMATION_START_TIME_SLOT: &str = "__moliAnimationStartTime";
 const ANIMATION_ONFINISH_SLOT: &str = "__moliAnimationOnfinish";
+const ANIMATION_LISTENERS_SLOT: &str = "__moliAnimationListeners";
 const ANIMATION_FINISH_TOKEN_SLOT: &str = "__moliAnimationFinishToken";
 const ANIMATION_MICROTASK_ANIMATION_SLOT: &str = "__moliAnimationMicrotaskAnimation";
 const ANIMATION_MICROTASK_TOKEN_SLOT: &str = "__moliAnimationMicrotaskToken";
@@ -58,6 +57,10 @@ struct AnimationPrototypeMethodsDeclaration {
 #[derive(WebApiObject)]
 #[webapi(interface = "Animation")]
 struct AnimationObjectDeclaration<'s> {
+    #[webapi(slot = SIMPLE_EVENT_TARGET_SLOT, value = ANIMATION_LISTENERS_SLOT)]
+    event_target_slot: (),
+    #[webapi(slot = SIMPLE_EVENT_TARGET_ORDERED_HANDLERS_SLOT, init = true)]
+    ordered_handlers: (),
     #[webapi(slot = ANIMATION_ID_SLOT, constructor_default = "")]
     id: &'static str,
     #[webapi(slot = ANIMATION_PLAY_STATE_SLOT, constructor_default = "idle")]
@@ -789,16 +792,14 @@ fn animation_finish<'s>(
     {
         let _ = resolve.call(scope, v8::undefined(scope).into(), &[animation.into()]);
     }
-    if invoke_onfinish
-        && let Some(callback) = get_private_value(scope, animation, ANIMATION_ONFINISH_SLOT)
-            .and_then(|value| v8::Local::<v8::Function>::try_from(value).ok())
-    {
-        let _ = call_script_visible_function(
+    if invoke_onfinish && let Some(event) = construct_original_event(scope, "finish") {
+        events::mark_event_trusted(scope, event);
+        dispatch_simple_event_target_event(
             scope,
-            callback,
-            animation.into(),
-            &[],
-            "Animation.onfinish callback",
+            animation,
+            ANIMATION_LISTENERS_SLOT,
+            "finish",
+            event,
         );
     }
 }
@@ -923,6 +924,14 @@ fn set_animation_onfinish_value<'s>(
         v8::null(scope).into()
     };
     set_private_value(scope, animation, ANIMATION_ONFINISH_SLOT, value);
+    simple_object_event_set_ordered_handler(
+        scope,
+        animation,
+        ANIMATION_LISTENERS_SLOT,
+        "finish",
+        ANIMATION_ONFINISH_SLOT,
+        value.is_function(),
+    );
 }
 
 fn new_animation_pending_promise<'s>(

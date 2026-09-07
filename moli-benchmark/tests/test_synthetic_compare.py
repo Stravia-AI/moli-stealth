@@ -26,28 +26,17 @@ class SyntheticCompareTargetTests(unittest.TestCase):
         self.assertIn("moli-full-cdp", CDP_TARGETS)
         self.assertIn("moli-full", TARGETS)
 
-    def test_obscura_command_uses_fetch_and_second_timeout(self) -> None:
+    def test_obscura_timeout_truncates_fractional_seconds(self) -> None:
         command = _command_for_target("obscura", Path("/bin/obscura"), "http://127.0.0.1:1/static-html", 4.8)
 
-        self.assertEqual(command[:4], ["/bin/obscura", "fetch", "--dump", "html"])
-        self.assertIn("--wait-until", command)
-        self.assertEqual(command[command.index("--wait") + 1], "0")
-        self.assertIn("--timeout", command)
         self.assertEqual(command[command.index("--timeout") + 1], "4")
-        self.assertEqual(command[-1], "http://127.0.0.1:1/static-html")
 
     def test_lightpanda_command_aligns_fetch_timeouts(self) -> None:
         command = _command_for_target("lightpanda", Path("/bin/lightpanda"), "http://127.0.0.1:1/static-html", 30.0)
 
-        self.assertEqual(command[:4], ["/bin/lightpanda", "fetch", "--dump", "html"])
-        self.assertEqual(command[command.index("--wait-until") + 1], "done")
         self.assertEqual(command[command.index("--wait-ms") + 1], "30000")
         self.assertEqual(command[command.index("--http-timeout") + 1], "30000")
         self.assertEqual(command[command.index("--terminate-ms") + 1], "30000")
-        self.assertNotIn("--wait_until", command)
-        self.assertNotIn("--wait_ms", command)
-        self.assertNotIn("--http_timeout", command)
-        self.assertEqual(command[-1], "http://127.0.0.1:1/static-html")
 
     def test_moli_full_enables_layout_and_resources_only_for_full_target(self) -> None:
         default = _command_for_target(

@@ -1,4 +1,5 @@
-Portions of moli-stealth-net are derived from BrowserOxide:
+Portions of moli-stealth-net and the BrowserOxide corpus and classifier in
+moli-benchmark are derived from BrowserOxide:
 https://github.com/yfedoseev/browser_oxide
 
 Imported from revision 9cd4af36b744bc8f9047bcceeb341610a6f32109 and modified for Moli integration.

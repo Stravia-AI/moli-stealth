@@ -902,6 +902,19 @@ fn document_cookie_utc_expires_does_not_leave_empty_host_only_shadow() {
 }
 
 #[test]
+fn document_cookie_accepts_expires_with_unicode_timezone_comment() {
+    let mut store = BrowserCookieStore::default();
+    let document_url = parse("https://example.com/cookies");
+
+    store.set_document_cookie(
+        &document_url,
+        "sid=alive; Expires=Tue Jun 09 2037 19:21:05 GMT+0800 (中国标准时间); Max-Age=3600; Path=/",
+    );
+
+    assert_eq!(store.document_cookie(&document_url), "sid=alive");
+}
+
+#[test]
 fn document_cookie_expires_without_timezone_is_treated_as_gmt() {
     let mut store = BrowserCookieStore::default();
     let document_url = parse("https://example.com/cookies");

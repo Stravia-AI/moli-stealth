@@ -948,6 +948,8 @@ pub(crate) struct JsContextHost {
     live_stylesheets: crate::live_stylesheet::LiveStylesheetRegistry,
     style_engine: MoliStyleEngine,
     inline_style_declarations: HashMap<DomHandle, CssInlineStyleDeclarationState>,
+    inline_style_entry_cache:
+        RefCell<HashMap<DomHandle, (String, Rc<[crate::css_style::CssStyleEntry]>)>>,
     css_module_texts_by_url: HashMap<String, String>,
     css_module_failed_urls: HashSet<String>,
     popover_focus_restore_targets: HashMap<DomHandle, Option<DomHandle>>,

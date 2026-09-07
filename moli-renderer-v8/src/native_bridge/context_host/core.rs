@@ -348,6 +348,7 @@ impl JsContextHost {
                 runtime.author_styles_disabled(),
             ),
             inline_style_declarations: HashMap::new(),
+            inline_style_entry_cache: RefCell::new(HashMap::new()),
             css_module_texts_by_url: HashMap::new(),
             css_module_failed_urls: HashSet::new(),
             popover_focus_restore_targets: HashMap::new(),
@@ -592,6 +593,7 @@ impl JsContextHost {
             "applied main document replacement owner transaction"
         );
         self.inline_style_declarations.clear();
+        self.inline_style_entry_cache.get_mut().clear();
         self.style_engine
             .clear_for_document_replacement(document_handle);
         if let Some(lifecycle) = &self.root_document_lifecycle {

@@ -2342,12 +2342,34 @@ impl JsContextHost {
         handle: DomHandle,
         state: crate::css_style::CssInlineStyleDeclarationState,
     ) {
+        self.inline_style_entry_cache.get_mut().remove(&handle);
         self.inline_style_declarations.insert(handle, state);
     }
 
     pub(crate) fn clear_element_inline_style_declaration_state(&mut self, handle: DomHandle) {
+        self.inline_style_entry_cache.get_mut().remove(&handle);
         self.inline_style_declarations.remove(&handle);
         self.clear_element_inline_style_resolution_text(handle);
+    }
+
+    pub(crate) fn cached_inline_style_entries(
+        &self,
+        handle: DomHandle,
+        text: String,
+        parse: impl FnOnce(&str) -> Vec<crate::css_style::CssStyleEntry>,
+    ) -> std::rc::Rc<[crate::css_style::CssStyleEntry]> {
+        // Unrelated layout invalidations do not change inline declarations.
+        // Attribute text is checked here; CSSOM state setters invalidate the cache.
+        if let Some((cached_text, entries)) = self.inline_style_entry_cache.borrow().get(&handle)
+            && *cached_text == text
+        {
+            return entries.clone();
+        }
+        let entries: std::rc::Rc<[_]> = parse(&text).into();
+        self.inline_style_entry_cache
+            .borrow_mut()
+            .insert(handle, (text, entries.clone()));
+        entries
     }
 
     pub(crate) fn set_element_inline_style_current_base_url(&mut self, handle: DomHandle) {

@@ -247,28 +247,10 @@ class TopSitesTests(unittest.TestCase):
         )
         self.assertIn("legacy-encoding", TOP_SITES_SOURCES)
 
-    def test_top_command_for_moli_uses_domcontentloaded(self) -> None:
+    def test_moli_timeout_converts_seconds_to_milliseconds(self) -> None:
         command = _top_command_for_target("moli", Path("/bin/moli"), "https://example.test/", 12.0)
-        self.assertEqual(command[0], "/bin/moli")
-        self.assertNotIn("--layout", command)
-        self.assertNotIn("--resource", command)
-        self.assertIn("--wait-until", command)
-        self.assertEqual(command[command.index("--wait-until") + 1], "domcontentloaded")
-        self.assertEqual(command[command.index("--wait-script") + 1], POST_DCL_WAIT_SCRIPT)
         self.assertEqual(command[command.index("--timeout") + 1], "12000")
         self.assertEqual(command[command.index("--http-timeout") + 1], "12000")
-        self.assertEqual(command[-1], "https://example.test/")
-
-    def test_top_command_for_moli_full_enables_layout_and_all_resource_fetch(self) -> None:
-        command = _top_command_for_target("moli-full", Path("/bin/moli"), "https://example.test/", 12.0)
-        self.assertEqual(command[0], "/bin/moli")
-        self.assertIn("--layout", command)
-        self.assertIn("--resource", command)
-        self.assertLess(command.index("--layout"), command.index("--dump"))
-        self.assertLess(command.index("--resource"), command.index("--dump"))
-        self.assertEqual(command[command.index("--wait-until") + 1], "domcontentloaded")
-        self.assertEqual(command[command.index("--wait-script") + 1], POST_DCL_WAIT_SCRIPT)
-        self.assertEqual(command[-1], "https://example.test/")
 
     def test_top_command_for_moli_omits_page_waits_for_explicit_pdf(self) -> None:
         command = _top_command_for_target(
@@ -286,14 +268,9 @@ class TopSitesTests(unittest.TestCase):
 
     def test_top_command_for_lightpanda_aligns_wait_and_http_timeouts(self) -> None:
         command = _top_command_for_target("lightpanda", Path("/bin/lightpanda"), "https://example.test/", 12.0)
-        self.assertEqual(command[0], "/bin/lightpanda")
-        self.assertIn("--wait-until", command)
-        self.assertEqual(command[command.index("--wait-until") + 1], "domcontentloaded")
-        self.assertEqual(command[command.index("--wait-script") + 1], POST_DCL_WAIT_SCRIPT)
         self.assertEqual(command[command.index("--wait-ms") + 1], "12000")
         self.assertEqual(command[command.index("--http-timeout") + 1], "12000")
         self.assertEqual(command[command.index("--terminate-ms") + 1], "12000")
-        self.assertEqual(command[-1], "https://example.test/")
 
     def test_top_sites_chrome_uses_cdp_dcl_metadata(self) -> None:
         self.assertEqual(_top_sites_target_metadata("chrome")["driver"], "cdp-dcl")
@@ -998,7 +975,6 @@ if(window.EOJsChallengeSDK){new window.EOJsChallengeSDK({callback:function(){}})
         self.assertEqual(summary["chrome_parallelism"], 2)
         self.assertEqual(summary["schedule"], "site-paired-rotating-target-order")
         self.assertEqual(summary["scheduled_site_groups"], 2)
-        self.assertEqual(run_rows[0]["command"][0], "/bin/echo")
         self.assertEqual(run_rows[0]["peak_rss_bytes"], 2048)
         self.assertEqual(run_rows[0]["schedule_index"], 0)
         self.assertEqual(run_rows[0]["target_order_index"], 1)

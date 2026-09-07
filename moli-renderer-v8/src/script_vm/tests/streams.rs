@@ -5,6 +5,60 @@ fn stream_test_vm() -> StandaloneScriptVmHarness {
 }
 
 #[test]
+fn stream_promises_use_intrinsics_after_global_promise_replacement() {
+    let mut vm = stream_test_vm();
+
+    vm.eval(
+        r#"
+(() => {
+  const NativePromise = Promise;
+  let replacementCalls = 0;
+  globalThis.Promise = class {
+    constructor(executor) {
+      replacementCalls++;
+      executor(() => {}, () => {});
+    }
+  };
+  globalThis.__intrinsicStreamResults = [];
+  (async () => {
+    const written = [];
+    const writer = new WritableStream({
+      write(chunk) { written.push(chunk); }
+    }).getWriter();
+    const ready = writer.ready;
+    const closed = writer.closed;
+    await ready;
+    await writer.write("payload");
+    await writer.close();
+    await closed;
+    __intrinsicStreamResults.push(ready instanceof NativePromise, closed instanceof NativePromise);
+    __intrinsicStreamResults.push(written.join(","));
+
+    const reason = {};
+    const reader = new ReadableStream({
+      start(controller) { controller.error(reason); }
+    }).getReader();
+    try { await reader.read(); } catch (error) {
+      __intrinsicStreamResults.push(error === reason);
+    }
+    try { await reader.closed; } catch (error) {
+      __intrinsicStreamResults.push(error === reason);
+    }
+    __intrinsicStreamResults.push(replacementCalls);
+  })().catch(error => __intrinsicStreamResults.push(String(error)));
+})()
+"#,
+    )
+    .expect("Streams should not call the replaced global Promise");
+
+    assert_eq!(
+        vm.eval("__intrinsicStreamResults.join('|')")
+            .expect("intrinsic stream results should be readable"),
+        "true|true|payload|true|true|0"
+    );
+}
+
+#[test]
 fn stream_constructor_dictionaries_follow_webidl_order_and_callback_conversion() {
     let mut vm = stream_test_vm();
 
@@ -5370,6 +5424,260 @@ fn readable_stream_pipe_to_rejects_sync_close_throw_and_releases_locks() {
         .eval("JSON.stringify(globalThis.__pipeToCloseThrowEvents)")
         .expect("pipeTo close throw events should settle");
     assert_eq!(events, r#"["close","pipe:true:false:false"]"#);
+}
+
+#[test]
+fn compression_stream_supports_blob_response_gzip_round_trip() {
+    let mut vm = stream_test_vm();
+
+    vm.eval(
+        r#"
+globalThis.__compressionBlobResult = "pending";
+(async () => {
+  const source = "Duolingo compression stream payload";
+  const compressed = await new Response(
+    new Blob([source]).stream().pipeThrough(new CompressionStream("gzip"))
+  ).arrayBuffer();
+  const restored = await new Response(
+    new Blob([compressed]).stream().pipeThrough(new DecompressionStream("gzip"))
+  ).text();
+  const bytes = new Uint8Array(compressed);
+  const chunkProbe = new CompressionStream("gzip");
+  const chunkTypes = (async () => {
+    const reader = chunkProbe.readable.getReader();
+    let allUint8Arrays = true;
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) return allUint8Arrays;
+      allUint8Arrays &&= value instanceof Uint8Array;
+    }
+  })();
+  const chunkProbeWriter = chunkProbe.writable.getWriter();
+  await chunkProbeWriter.write(new Uint8Array([1]));
+  await chunkProbeWriter.close();
+  const outputIsUint8Array = await chunkTypes;
+  const compression = new CompressionStream("gzip");
+  const decompression = new DecompressionStream("gzip");
+  globalThis.__compressionBlobResult = JSON.stringify({
+    restored,
+    gzipMagic: `${bytes[0]}:${bytes[1]}`,
+    outputIsUint8Array,
+    compressionEndpoints:
+      compression.readable instanceof ReadableStream &&
+      compression.writable instanceof WritableStream,
+    decompressionEndpoints:
+      decompression.readable instanceof ReadableStream &&
+      decompression.writable instanceof WritableStream
+  });
+})().catch(error => {
+  globalThis.__compressionBlobResult = `error:${error.name}:${error.message}`;
+});
+"#,
+    )
+    .expect("gzip Blob/Response compression pipeline should start");
+
+    for _ in 0..16 {
+        let result = vm
+            .eval("globalThis.__compressionBlobResult")
+            .expect("gzip Blob/Response pipeline should drain microtasks");
+        if result != "pending" {
+            break;
+        }
+    }
+
+    let result = vm
+        .eval("globalThis.__compressionBlobResult")
+        .expect("gzip Blob/Response pipeline should settle");
+    assert_eq!(
+        result,
+        r#"{"restored":"Duolingo compression stream payload","gzipMagic":"31:139","outputIsUint8Array":true,"compressionEndpoints":true,"decompressionEndpoints":true}"#
+    );
+}
+
+#[test]
+fn compression_stream_processes_offset_views_across_multiple_chunks_and_formats() {
+    let mut vm = stream_test_vm();
+
+    vm.eval(
+        r#"
+globalThis.__compressionFormatsResult = "pending";
+(async () => {
+  const results = {};
+  for (const format of ["gzip", "deflate", "deflate-raw", "brotli"]) {
+    const compressor = new CompressionStream(format);
+    const compressedResult = new Response(compressor.readable).arrayBuffer();
+    const writer = compressor.writable.getWriter();
+    const firstBacking = new Uint8Array([0xff, 65, 66, 0xff]);
+    const secondBacking = new Uint8Array([0xff, 67, 0xff]);
+    await writer.write(new Uint8Array(firstBacking.buffer, 1, 2));
+    await writer.write(new DataView(secondBacking.buffer, 1, 1));
+    await writer.close();
+    const compressed = new Uint8Array(await compressedResult);
+
+    const decompressor = new DecompressionStream(format);
+    const restoredResult = new Response(decompressor.readable).text();
+    const decompressorWriter = decompressor.writable.getWriter();
+    const split = Math.max(1, Math.floor(compressed.byteLength / 2));
+    await decompressorWriter.write(compressed.subarray(0, split));
+    await decompressorWriter.write(compressed.subarray(split));
+    await decompressorWriter.close();
+    results[format] = await restoredResult;
+  }
+  globalThis.__compressionFormatsResult = JSON.stringify(results);
+})().catch(error => {
+  globalThis.__compressionFormatsResult = `error:${error.name}:${error.message}`;
+});
+"#,
+    )
+    .expect("multi-chunk compression formats should start");
+
+    for _ in 0..32 {
+        let result = vm
+            .eval("globalThis.__compressionFormatsResult")
+            .expect("multi-chunk compression formats should drain microtasks");
+        if result != "pending" {
+            break;
+        }
+    }
+
+    let result = vm
+        .eval("globalThis.__compressionFormatsResult")
+        .expect("multi-chunk compression formats should settle");
+    assert_eq!(
+        result,
+        r#"{"gzip":"ABC","deflate":"ABC","deflate-raw":"ABC","brotli":"ABC"}"#
+    );
+}
+
+#[test]
+fn compression_stream_rejects_invalid_chunks_formats_and_malformed_gzip() {
+    let mut vm = stream_test_vm();
+
+    vm.eval(
+        r#"
+globalThis.__compressionErrorsResult = "pending";
+(async () => {
+  const rejectedWithTypeError = async promise => {
+    try {
+      await promise;
+      return false;
+    } catch (error) {
+      return error instanceof TypeError;
+    }
+  };
+  const constructorErrors = [];
+  for (const Constructor of [CompressionStream, DecompressionStream]) {
+    try {
+      new Constructor("GZIP");
+      constructorErrors.push(false);
+    } catch (error) {
+      constructorErrors.push(error instanceof TypeError);
+    }
+  }
+
+  const invalidChunkStream = new CompressionStream("gzip");
+  const invalidReadable = rejectedWithTypeError(
+    new Response(invalidChunkStream.readable).arrayBuffer()
+  );
+  const invalidWriter = invalidChunkStream.writable.getWriter();
+  const invalidChunk = rejectedWithTypeError(
+    invalidWriter.write(new Uint8Array(
+      new WebAssembly.Memory({ shared: true, initial: 1, maximum: 1 }).buffer
+    ))
+  );
+  invalidWriter.close().catch(() => {});
+
+  const valid = new Uint8Array(await new Response(
+    new Blob(["checksum-sensitive payload"]).stream()
+      .pipeThrough(new CompressionStream("gzip"))
+  ).arrayBuffer());
+  const corrupt = valid.slice();
+  corrupt[corrupt.length - 1] ^= 0xff;
+  const truncated = valid.slice(0, valid.length - 1);
+  const trailing = new Uint8Array(valid.length + 1);
+  trailing.set(valid);
+  trailing[valid.length] = 0;
+  const decode = bytes => rejectedWithTypeError(new Response(
+    new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"))
+  ).arrayBuffer());
+
+  globalThis.__compressionErrorsResult = JSON.stringify({
+    constructorErrors,
+    invalidChunk: await invalidChunk,
+    invalidReadable: await invalidReadable,
+    corrupt: await decode(corrupt),
+    truncated: await decode(truncated),
+    trailing: await decode(trailing)
+  });
+})().catch(error => {
+  globalThis.__compressionErrorsResult = `error:${error.name}:${error.message}`;
+});
+"#,
+    )
+    .expect("compression error cases should start");
+
+    for _ in 0..32 {
+        let result = vm
+            .eval("globalThis.__compressionErrorsResult")
+            .expect("compression error cases should drain microtasks");
+        if result != "pending" {
+            break;
+        }
+    }
+
+    let result = vm
+        .eval("globalThis.__compressionErrorsResult")
+        .expect("compression error cases should settle");
+    assert_eq!(
+        result,
+        r#"{"constructorErrors":[true,true],"invalidChunk":true,"invalidReadable":true,"corrupt":true,"truncated":true,"trailing":true}"#
+    );
+}
+
+#[test]
+fn compression_stream_accessors_use_native_brands_after_prototype_mutation() {
+    let mut vm = stream_test_vm();
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const compressed = new CompressionStream("gzip");
+  const decompressed = new DecompressionStream("gzip");
+  const result = {};
+  for (const [name, stream, sibling] of [
+    ["CompressionStream", compressed, decompressed],
+    ["DecompressionStream", decompressed, compressed]
+  ]) {
+    const prototype = globalThis[name].prototype;
+    const readable = Object.getOwnPropertyDescriptor(prototype, "readable").get;
+    const writable = Object.getOwnPropertyDescriptor(prototype, "writable").get;
+    const rejects = receiver => [readable, writable].every(getter => {
+      try { getter.call(receiver); return false; }
+      catch (error) { return error instanceof TypeError; }
+    });
+    Object.setPrototypeOf(stream, null);
+    result[name] = [
+      readable.call(stream) instanceof ReadableStream,
+      writable.call(stream) instanceof WritableStream,
+      rejects(sibling),
+      rejects(new TransformStream())
+    ];
+  }
+  try {
+    Object.getOwnPropertyDescriptor(TransformStream.prototype, "readable").get.call(compressed);
+    result.foreignGetter = false;
+  } catch (error) {
+    result.foreignGetter = error instanceof TypeError;
+  }
+  return JSON.stringify(result);
+})()
+"#,
+        )
+        .expect("compression accessor brand checks should evaluate");
+    assert_eq!(
+        result,
+        r#"{"CompressionStream":[true,true,true,true],"DecompressionStream":[true,true,true,true],"foreignGetter":true}"#
+    );
 }
 
 #[test]

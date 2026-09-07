@@ -502,8 +502,9 @@ fn normalize_expires_utc_timezone(raw: &str) -> Cow<'_, str> {
             }
             let value = &value_with_equals[1..];
             let value_trimmed = value.trim_end();
-            if value_trimmed.len() < 3
-                || !value_trimmed[value_trimmed.len() - 3..].eq_ignore_ascii_case("UTC")
+            if !value_trimmed
+                .get(value_trimmed.len().saturating_sub(3)..)
+                .is_some_and(|timezone| timezone.eq_ignore_ascii_case("UTC"))
             {
                 if !looks_like_http_date_without_timezone(value_trimmed) {
                     return segment.to_owned();

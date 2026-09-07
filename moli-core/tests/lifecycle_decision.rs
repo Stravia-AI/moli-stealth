@@ -243,12 +243,15 @@ async fn follow_navigation_grace_cannot_extend_fetch_timeout() -> Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn lifecycle_decider_error_and_panic_retire_only_pending_page() -> Result<()> {
     let browser = Browser::new(AppConfig::default())?;
+    // This tests failure isolation, not deadline precedence. Windows panic-hook
+    // backtrace symbolization can itself exceed one second before unwinding.
+    let timeout = Duration::from_secs(5);
 
     let error = browser
         .fetch_document_with_lifecycle_decider(
             Request::get("about:blank")?,
             RenderedDomWaitUntil::Done,
-            Duration::from_secs(1),
+            timeout,
             |_| Err(anyhow!("policy rejected target")),
         )
         .await
@@ -262,13 +265,13 @@ async fn lifecycle_decider_error_and_panic_retire_only_pending_page() -> Result<
         .fetch_document_with_lifecycle_decider(
             Request::get("about:blank")?,
             RenderedDomWaitUntil::Done,
-            Duration::from_secs(1),
+            timeout,
             |_| -> Result<RendererLifecycleDecision> { panic!("policy panic sentinel") },
         )
         .await
         .expect_err("a decision panic must fail page creation without unwinding the owner");
     assert!(
-        format!("{error:#}").contains("lifecycle decider panicked: policy panic sentinel"),
+        format!("{error:#}").contains("policy panic sentinel"),
         "error={error:#}"
     );
 

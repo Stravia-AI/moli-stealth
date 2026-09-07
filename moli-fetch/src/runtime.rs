@@ -1424,11 +1424,24 @@ enum DecodedBodySource {
     Encoded {
         reader: Pin<Box<dyn AsyncRead + Send>>,
         producer: Option<tokio::task::JoinHandle<Result<()>>>,
+        source_was_empty: Option<Arc<AtomicBool>>,
     },
 }
 
 impl DecodedBody {
-    fn new(mut body: TransportResponseBody, headers: &[(String, String)]) -> Self {
+    fn new(body: TransportResponseBody, headers: &[(String, String)]) -> Self {
+        Self::new_with_empty_source_policy(body, headers, false)
+    }
+
+    fn for_followed_redirect(body: TransportResponseBody, headers: &[(String, String)]) -> Self {
+        Self::new_with_empty_source_policy(body, headers, true)
+    }
+
+    fn new_with_empty_source_policy(
+        mut body: TransportResponseBody,
+        headers: &[(String, String)],
+        accept_empty_source: bool,
+    ) -> Self {
         let encoding = headers
             .iter()
             .rev()
@@ -1442,12 +1455,26 @@ impl DecodedBody {
             };
         };
         let (mut writer, reader) = tokio::io::duplex(32 * 1024);
+        let source_was_empty = accept_empty_source.then(|| Arc::new(AtomicBool::new(false)));
+        let producer_source_was_empty = source_was_empty.clone();
         let producer = tokio::spawn(async move {
-            while let Some(chunk) = body.chunk().await.map_err(anyhow::Error::new)? {
-                writer
-                    .write_all(&chunk)
-                    .await
-                    .context("failed to feed response decoder")?;
+            let mut saw_chunk = false;
+            loop {
+                match body.chunk().await.map_err(anyhow::Error::new)? {
+                    Some(chunk) => {
+                        saw_chunk |= !chunk.is_empty();
+                        writer
+                            .write_all(&chunk)
+                            .await
+                            .context("failed to feed response decoder")?;
+                    }
+                    None => {
+                        if let Some(source_was_empty) = producer_source_was_empty.as_ref() {
+                            source_was_empty.store(!saw_chunk, Ordering::Release);
+                        }
+                        break;
+                    }
+                }
             }
             writer
                 .shutdown()
@@ -1468,6 +1495,7 @@ impl DecodedBody {
             source: DecodedBodySource::Encoded {
                 reader,
                 producer: Some(producer),
+                source_was_empty,
             },
         }
     }
@@ -1475,12 +1503,28 @@ impl DecodedBody {
     async fn chunk(&mut self) -> Result<Option<bytes::Bytes>> {
         match &mut self.source {
             DecodedBodySource::Identity(body) => body.chunk().await.map_err(anyhow::Error::new),
-            DecodedBodySource::Encoded { reader, producer } => {
+            DecodedBodySource::Encoded {
+                reader,
+                producer,
+                source_was_empty,
+            } => {
                 let mut chunk = vec![0; 16 * 1024];
-                let count = reader
-                    .read(&mut chunk)
-                    .await
-                    .context("failed to decode response body")?;
+                let count = match reader.read(&mut chunk).await {
+                    Ok(count) => count,
+                    Err(_)
+                        if source_was_empty
+                            .as_ref()
+                            .is_some_and(|empty| empty.load(Ordering::Acquire)) =>
+                    {
+                        if let Some(producer) = producer.take() {
+                            producer.await.map_err(|error| {
+                                anyhow!("response decoder producer failed: {error}")
+                            })??;
+                        }
+                        return Ok(None);
+                    }
+                    Err(error) => return Err(error).context("failed to decode response body"),
+                };
                 if count != 0 {
                     chunk.truncate(count);
                     return Ok(Some(bytes::Bytes::from(chunk)));
@@ -1676,7 +1720,7 @@ async fn cache_and_drain_redirect(
             None
         }
     };
-    let mut body = DecodedBody::new(response.body, headers);
+    let mut body = DecodedBody::for_followed_redirect(response.body, headers);
     let mut received = 0usize;
     while let Some(chunk) = next_decoded_chunk(shared, job, &mut body).await? {
         received = received

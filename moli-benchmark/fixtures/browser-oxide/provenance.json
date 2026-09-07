@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "upstream": {
+    "name": "BrowserOxide",
+    "repository": "https://github.com/yfedoseev/browser_oxide",
+    "revision": "9cd4af36b744bc8f9047bcceeb341610a6f32109",
+    "license": "MIT",
+    "license_notice": "licenses/BrowserOxide-MIT.txt"
+  },
+  "sources": [
+    {
+      "path": "crates/browser_oxide/src/classify.rs",
+      "derived_file": "moli-benchmark/moli_benchmark/browser_oxide_scoring.py",
+      "symbol": "engine_classify"
+    },
+    {
+      "path": "crates/browser_oxide/tests/holistic_sweep.rs",
+      "derived_file": "moli-benchmark/fixtures/browser-oxide/corpus.json",
+      "symbol": "sites_list"
+    },
+    {
+      "path": "crates/browser_oxide/examples/sweep_metrics.rs",
+      "derived_file": "moli-benchmark/moli_benchmark/browser_oxide_scoring.py",
+      "symbol": "pass_count"
+    }
+  ],
+  "notes": [
+    "Classifier tags are ported from engine_classify at the pinned revision.",
+    "Strict pass is L3-RENDERED with original UTF-8 body length at least 15000 bytes.",
+    "Loose pass is any L3-RENDERED tag, including the 1000-14999-byte thin-shell band."
+  ]
+}

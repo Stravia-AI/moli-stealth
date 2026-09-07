@@ -13,8 +13,9 @@ class ConfigTests(unittest.TestCase):
     def test_moli_binary_prefers_release_build(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             repo_root = Path(temp)
-            debug_bin = repo_root / "target" / "debug" / "moli"
-            release_bin = repo_root / "target" / "release" / "moli"
+            binary_name = "moli.exe" if os.name == "nt" else "moli"
+            debug_bin = repo_root / "target" / "debug" / binary_name
+            release_bin = repo_root / "target" / "release" / binary_name
             debug_bin.parent.mkdir(parents=True)
             release_bin.parent.mkdir(parents=True)
             debug_bin.write_text("debug", encoding="utf-8")

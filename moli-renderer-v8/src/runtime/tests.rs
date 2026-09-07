@@ -16101,6 +16101,63 @@ globalThis.__lm_owner_document_write_events.push('inline-after');
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn ordered_external_script_cannot_destructively_write_after_parsing() {
+    let runtime = JsRuntime::initialize();
+    let loader =
+        ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
+    let (base_url, server) = spawn_owner_wake_server_with_content_type(
+        "/ordered-write.js",
+        "document.write('<title>destroyed</title>'); globalThis.orderedWriteRan = true;",
+        "application/javascript",
+        Duration::ZERO,
+    )
+    .await;
+    let page_url = url::Url::parse(&format!("{base_url}/page")).expect("page url");
+    let mut page = create_test_html_page(
+        &runtime,
+        &loader,
+        page_url,
+        "<!doctype html><title>retained</title><body><main>original content</main>",
+    )
+    .await;
+    let (reply, _) = tokio::time::timeout(
+        Duration::from_secs(5),
+        page.run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"new Promise((resolve, reject) => {
+  const script = document.createElement('script');
+  script.async = false;
+  script.src = '/ordered-write.js';
+  script.onerror = () => reject(new Error('external script failed'));
+  script.onload = () => resolve(JSON.stringify({
+    ran: globalThis.orderedWriteRan,
+    title: document.title,
+    body: document.body.textContent,
+    readyState: document.readyState
+  }));
+  document.body.appendChild(script);
+})"#
+            .to_owned(),
+            await_promise: true,
+        }),
+    )
+    .await
+    .expect("ordered external script should finish without replacing the Document")
+    .expect("ordered external script should evaluate");
+    assert_eq!(
+        renderer_json_value(reply),
+        Some(serde_json::json!(
+            r#"{"ran":true,"title":"retained","body":"original content","readyState":"complete"}"#
+        )),
+    );
+    server
+        .await
+        .expect("ordered external script server should finish");
+    page.close_async()
+        .await
+        .expect("ordered script page should close");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn owner_scheduler_applies_popup_terminal_from_stable_page_route() {
     let runtime = JsRuntime::initialize();
     let loader =

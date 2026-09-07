@@ -3399,16 +3399,19 @@ fn css_animation_iteration_count_list_is_supported(value: &str) -> bool {
 pub(in crate::native_bridge::element::styles) fn style_entries(
     runtime: &JsContextHost,
     handle: DomHandle,
-) -> Vec<StyleEntry> {
+) -> std::rc::Rc<[StyleEntry]> {
     if runtime.element_inline_style_csp_state(handle)
         == crate::style_engine::InlineStyleCspState::BlockedAttribute
     {
-        return Vec::new();
+        return std::rc::Rc::from([]);
     }
-    if let Some(state) = runtime.element_inline_style_declaration_state(handle) {
-        return state.entries();
-    }
-    parse_inline_css_text_with_base(&style_string(runtime, handle), None)
+    runtime.cached_inline_style_entries(handle, style_string(runtime, handle), |text| {
+        if let Some(state) = runtime.element_inline_style_declaration_state(handle) {
+            state.entries()
+        } else {
+            parse_inline_css_text_with_base(text, None)
+        }
+    })
 }
 
 fn style_entries_with_base(
@@ -3416,6 +3419,9 @@ fn style_entries_with_base(
     handle: DomHandle,
     base_url: Option<&url::Url>,
 ) -> Vec<StyleEntry> {
+    if base_url.is_none() {
+        return style_entries(runtime, handle).to_vec();
+    }
     if runtime.element_inline_style_csp_state(handle)
         == crate::style_engine::InlineStyleCspState::BlockedAttribute
     {

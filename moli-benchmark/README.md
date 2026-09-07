@@ -84,6 +84,78 @@ canvas dependencies. Failed reftests retain `test.png`, `reference-N.png`, and
 An unfiltered full `default` or `all` run refreshes the unified status lists
 directly under `wpt-cross-current/`.
 
+### BrowserOxide corpus validation
+
+The standalone BrowserOxide-compatible runner checks Moli against BrowserOxide's
+pinned 126-site corpus and HTML-output classifier. It launches a
+fresh `moli fetch` process for every site with Moli's only supported stealth
+profile, `chrome`, and the existing `done` wait followed by an 8-second
+event-loop window. `done` currently uses the native `load` lifecycle boundary;
+it is not a network-idle or background-work drain. The additional window samples
+asynchronous SPA work without requiring DOM stability. It cannot guarantee that
+the native lifecycle or an executing script will finish; the unchanged per-site
+wall-clock budget remains authoritative. This sampling policy does not change
+the CLI's default lifecycle contract:
+
+```bash
+uv run python -m moli_benchmark.browser_oxide run \
+  --moli-bin ../target/release/moli \
+  --output-dir results/browser-oxide-moli
+```
+
+The default per-site timeout is 240 seconds. Use `--timeout SECONDS` to change
+it, or repeat `--site NAME_OR_URL` for a deliberately selected subset. The
+executable is named `moli.exe` on Windows. Reports record the executable SHA-256,
+wait mode, post-load window, and timeout so different binaries or budgets remain
+distinguishable.
+
+The runner writes `report.json` after every completed site, appends the same rows to
+`results.jsonl`, and retains HTML and stderr separately under `artifacts/`.
+Timed-out launches and nonzero exits keep their partial output but are always
+recorded as failures; partial HTML is never classified as a pass. A successful
+exit after the wall-clock budget is also a failure, including a best-effort
+readiness timeout that returned the current page.
+
+Compare a complete Moli report with actual per-site JSON emitted by upstream
+`sweep_metrics` runs:
+
+```bash
+uv run python -m moli_benchmark.browser_oxide compare \
+  results/browser-oxide-moli/report.json \
+  --browser-oxide-report browser-oxide/chrome-macos.json \
+  --browser-oxide-report browser-oxide/pixel-chrome.json \
+  --browser-oxide-report browser-oxide/firefox-macos.json \
+  --browser-oxide-report browser-oxide/iphone-safari.json \
+  --output results/browser-oxide-comparison.json
+```
+
+Each upstream report must have the `summary` plus `results` shape written by
+`crates/browser_oxide/examples/sweep_metrics.rs`, contain no duplicate URLs,
+and cover exactly the URLs in the Moli report. The comparison recomputes strict
+and loose counts from the site rows rather than trusting aggregate claims:
+strict means `L3-RENDERED` with UTF-8 HTML length at least 15,000 bytes; loose
+means any `L3-RENDERED` result. With four reports it includes a four-profile
+table and routed strict/loose unions. Profile rows remain BrowserOxide profiles;
+they are not presented as Moli profiles, because Moli supports only `chrome`.
+Differential failures are listed only when a supplied upstream site row passes
+and the matching Moli row fails. Historical README totals from upstream are not
+accepted as comparison evidence.
+
+SDK-generated observations require explicit normalization to this schema.
+Preserve the original observations, SDK version, navigation options, and
+normalization provenance; do not label a bindings-based probe as a
+`sweep_metrics` executable run.
+
+These are output-shape scores, not proof of identical navigation policies.
+For example, upstream may follow a country selector's region link automatically.
+The fixed post-load window is a reproducible sampling policy, not an exact
+reproduction of upstream's adaptive event-loop drain. Later scripted navigation
+can therefore produce a different snapshot.
+Inspect destinations and artifacts before treating a differential as an engine
+failure; this runner does not copy region-selection or CSP-relaxation policies.
+
+### Public-web and synthetic suites
+
 Public-web suites read a `rank,target` CSV seed list. A minimal `sites.csv` looks like:
 
 ```csv

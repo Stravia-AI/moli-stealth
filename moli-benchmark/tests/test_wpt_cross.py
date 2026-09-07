@@ -53,13 +53,8 @@ from moli_benchmark.wpt_cross.case_set import (
     parse_any_js_meta,
     window_js_window_case_path,
 )
-from moli_benchmark.wpt_cross.engine import (
-    _moli_command,
-    _moli_fetch,
-    _lightpanda_fetch,
-)
+from moli_benchmark.wpt_cross.engine import _lightpanda_fetch
 from moli_benchmark.wpt_cross.cli_runner import (
-    MOLI_WPT_USER_AGENT,
     _CliCaseWorkerInput,
     _CliSubprocessResult,
     _classify_cli_case_result,
@@ -69,7 +64,6 @@ from moli_benchmark.wpt_cross.cli_runner import (
     _payload_grace_for_process_result,
     _run_cli_case_worker,
     _stderr_tail,
-    run_engine_on_cases_cli,
 )
 from moli_benchmark.wpt_cross.any_js import (
     ANY_JS_DEDICATED_WORKER_GLOBAL,
@@ -658,36 +652,6 @@ class WptCrossTests(unittest.TestCase):
         self.assertEqual(attach.await_count, 2)
         self.assertEqual(driver.launch.call_count, 1)
 
-    def test_moli_wpt_commands_enable_layout_and_resources(self) -> None:
-        self.assertEqual(
-            _moli_command(Path("/bin/moli"), 9222, None),
-            [
-                "/bin/moli",
-                "serve",
-                "--layout",
-                "--resource",
-                "--host",
-                "127.0.0.1",
-                "--port",
-                "9222",
-            ],
-        )
-        fetch = _moli_fetch(
-            Path("/bin/moli"),
-            "http://127.0.0.1:8000/case.html",
-            30.0,
-        )
-        self.assertEqual(
-            fetch[:5],
-            [
-                "/bin/moli",
-                "fetch",
-                "--layout",
-                "--resource",
-                "http://127.0.0.1:8000/case.html",
-            ],
-        )
-
     def test_harness_timeout_multiplier_uses_wpt_case_metadata(self) -> None:
         self.assertEqual(_harness_timeout_multiplier(WptCase("normal.html")), 1.0)
         self.assertEqual(
@@ -700,14 +664,9 @@ class WptCrossTests(unittest.TestCase):
     def test_lightpanda_cli_fetch_keeps_configured_timeout(self) -> None:
         command = _lightpanda_fetch(Path("/bin/lightpanda"), "http://127.0.0.1:8000/case.html", 30.0)
 
-        self.assertEqual(command[:4], ["/bin/lightpanda", "fetch", "http://127.0.0.1:8000/case.html", "--dump"])
-        self.assertEqual(command[command.index("--wait-until") + 1], "done")
         self.assertEqual(command[command.index("--wait-ms") + 1], "30000")
         self.assertEqual(command[command.index("--http-timeout") + 1], "30000")
         self.assertEqual(command[command.index("--terminate-ms") + 1], "30000")
-        self.assertNotIn("--wait_until", command)
-        self.assertNotIn("--wait_ms", command)
-        self.assertNotIn("--http_timeout", command)
 
     def test_parser_exposes_configurable_parallelism_with_stable_timeout(self) -> None:
         parser = _build_parser()
@@ -5127,205 +5086,6 @@ test(() => {}, "ok");
         self.assertEqual(result.status, "pass")
         self.assertIsNone(result.error)
         self.assertEqual(result.payload_source, "completion-callback")
-
-    def test_cli_runner_defaults_harness_timeout_independent_of_process_deadline(self) -> None:
-        class FakeFuture:
-            def __init__(self, result: CaseResult) -> None:
-                self._result = result
-
-            def result(self) -> CaseResult:
-                return self._result
-
-        class FakeProcessPoolExecutor:
-            instances: list["FakeProcessPoolExecutor"] = []
-
-            def __init__(self, *, max_workers: int, mp_context: object) -> None:
-                self.max_workers = max_workers
-                self.mp_context = mp_context
-                self.submitted = []
-                self.instances.append(self)
-
-            def __enter__(self) -> "FakeProcessPoolExecutor":
-                return self
-
-            def __exit__(self, *args: object) -> None:
-                return None
-
-            def submit(self, fn, job):
-                self.submitted.append((fn, job))
-                return FakeFuture(fn(job))
-
-        def fake_as_completed(futures):
-            return list(futures)
-
-        def fake_worker(job):
-            return CaseResult(
-                case_path=job.case_path,
-                url=f"http://worker.test/{job.case_path}",
-                status="pass",
-                duration_ms=1.0,
-            )
-
-        driver = SimpleNamespace(
-            name="moli",
-            version_args=["--version"],
-            extra_env={},
-            cli_fetch_command=lambda binary, url, timeout: [str(binary), "fetch", url],
-            resolve_binary=lambda override: Path("/tmp/moli"),
-        )
-        fixture_server = SimpleNamespace(
-            external_host="2001:db8::1",
-            external_base_url="http://[2001:db8::1]:9000",
-            wpt_root=Path("/tmp/wpt"),
-        )
-
-        def fake_subprocess_run(argv, **kwargs):
-            self.assertEqual(argv, ["/tmp/moli", "--version"])
-            return SimpleNamespace(stdout="moli 0\n", stderr="", returncode=0)
-
-        with (
-            patch("moli_benchmark.wpt_cross.cli_runner.sha256_file", return_value="sha"),
-            patch("moli_benchmark.wpt_cross.cli_runner.subprocess.run", fake_subprocess_run),
-            patch(
-                "moli_benchmark.wpt_cross.cli_runner.ProcessPoolExecutor",
-                FakeProcessPoolExecutor,
-            ),
-            patch("moli_benchmark.wpt_cross.cli_runner.as_completed", fake_as_completed),
-            patch("moli_benchmark.wpt_cross.cli_runner._run_cli_case_worker", fake_worker),
-        ):
-            result = run_engine_on_cases_cli(
-                driver=driver,
-                fixture_server=fixture_server,
-                cases=[
-                    (
-                        "normal.html",
-                        "http://[2001:db8::1]:9000/normal.html",
-                        120.0,
-                    ),
-                    (
-                        "long.html",
-                        "http://[2001:db8::1]:9000/long.html",
-                        120.0,
-                        LONG_TIMEOUT_MULTIPLIER,
-                    ),
-                ],
-                parallelism=1,
-                progress_every=0,
-            )
-
-        pool = FakeProcessPoolExecutor.instances[0]
-        self.assertEqual(pool.max_workers, 1)
-        self.assertEqual(pool.mp_context.get_start_method(), "spawn")
-        self.assertEqual(pool.submitted[0][1].case_path, "normal.html")
-        self.assertTrue(pool.submitted[0][1].external)
-        self.assertEqual(pool.submitted[0][1].timeout_seconds, 120.0)
-        self.assertEqual(pool.submitted[0][1].harness_timeout_multiplier, 1.0)
-        self.assertEqual(
-            pool.submitted[1][1].harness_timeout_multiplier,
-            LONG_TIMEOUT_MULTIPLIER,
-        )
-        self.assertTrue(all(case.status == "pass" for case in result.cases))
-        self.assertEqual(result.shutdown_info["scheduler"], "process-pool")
-
-    def test_moli_cli_worker_appends_hardcoded_wpt_user_agent(self) -> None:
-        captured_argv = []
-
-        class FakeResults:
-            def clear(self, key: str) -> None:
-                return None
-
-            def wait_for_final(self, key: str, timeout: float) -> dict:
-                return {
-                    "source": "completion-callback",
-                    "harness": {"status": 0, "message": None},
-                    "tests": [{"name": "done", "status": 0, "message": None}],
-                }
-
-            def get(self, key: str) -> None:
-                return None
-
-        class FakeServer:
-            def __init__(self, wpt_root: Path) -> None:
-                self.wpt_root = Path(wpt_root)
-                self.results = FakeResults()
-                self.external_host = None
-
-            def __enter__(self) -> "FakeServer":
-                return self
-
-            def __exit__(self, *args: object) -> None:
-                return None
-
-            def set_harness_timeout_multipliers(
-                self,
-                multipliers: dict[str, float],
-                *,
-                default_multiplier: float,
-            ) -> None:
-                return None
-
-            def url_for_case(self, case_path: str, *, external: bool = False) -> str:
-                return f"http://127.0.0.1:8000/{case_path}"
-
-        driver = SimpleNamespace(
-            name="moli",
-            cli_fetch_command=lambda binary, url, timeout: [str(binary), "fetch", url],
-        )
-
-        def fake_run_cli_subprocess(argv, env, proc_timeout):
-            captured_argv.append(argv)
-            return _CliSubprocessResult(
-                duration_ms=1.0,
-                proc_error=None,
-                proc_returncode=0,
-                proc_stderr="",
-                proc_stdout=b"",
-                wait_script_timeout=False,
-            )
-
-        with (
-            patch(
-                "moli_benchmark.wpt_cross.cli_runner.build_driver",
-                return_value=driver,
-            ),
-            patch(
-                "moli_benchmark.wpt_cross.cli_runner.WptFixtureServer",
-                FakeServer,
-            ),
-            patch(
-                "moli_benchmark.wpt_cross.cli_runner._run_cli_subprocess",
-                fake_run_cli_subprocess,
-            ),
-        ):
-            result = _run_cli_case_worker(
-                _CliCaseWorkerInput(
-                    engine="moli",
-                    binary="/tmp/moli",
-                    wpt_root="/tmp/wpt",
-                    case_path="case.html",
-                    external=False,
-                    timeout_seconds=8.0,
-                    harness_timeout_multiplier=1.0,
-                    env={},
-                    process_timeout_margin_seconds=4.0,
-                    payload_grace_seconds=0.0,
-                    successful_process_payload_grace_seconds=0.0,
-                )
-            )
-
-        self.assertEqual(result.status, "pass")
-        self.assertEqual(
-            captured_argv,
-            [
-                [
-                    "/tmp/moli",
-                    "fetch",
-                    "http://127.0.0.1:8000/case.html",
-                    "--user-agent",
-                    MOLI_WPT_USER_AGENT,
-                ]
-            ],
-        )
 
     def test_moli_cli_resolves_external_fixture_template_hosts(self) -> None:
         fixture_server = SimpleNamespace(

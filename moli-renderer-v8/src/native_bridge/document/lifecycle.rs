@@ -134,11 +134,12 @@ fn current_script_ignores_document_write_without_parser_insertion_point(
         return true;
     }
 
-    let has_src = element
+    // Every external script ignores destructive writes, including dynamically
+    // inserted ordered scripts with async=false. Parser-blocking writes still
+    // use their active insertion point and never reach this guard.
+    element
         .script_source_attribute()
-        .is_some_and(|src| !src.is_empty());
-    has_src
-        && (element.script_async() || (element.is_html_script() && element.has_attribute("defer")))
+        .is_some_and(|src| !src.is_empty())
 }
 
 pub(in crate::native_bridge) fn node_document_open_callback<'s>(

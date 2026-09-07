@@ -135,7 +135,7 @@ def moli_binary(override: str | None = None) -> Path:
         return path
 
     candidates = [
-        REPO_ROOT / "target" / "release" / "moli",
+        REPO_ROOT / "target" / "release" / ("moli.exe" if os.name == "nt" else "moli"),
     ]
     existing = [candidate for candidate in candidates if candidate.exists()]
     if existing:

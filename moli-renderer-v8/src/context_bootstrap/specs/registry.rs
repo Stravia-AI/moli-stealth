@@ -495,7 +495,7 @@ const CONSTRUCTOR_SPECS_BEFORE_STREAMS: &[ConstructorSpec] = &[
     },
     ConstructorSpec {
         name: "Animation",
-        parent: None,
+        parent: Some("EventTarget"),
         kind: ConstructorKind::Animation,
     },
     ConstructorSpec {

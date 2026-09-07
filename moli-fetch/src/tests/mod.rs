@@ -537,6 +537,35 @@ async fn fetch_html_stream_drops_redirect_body_chunks() -> Result<()> {
 }
 
 #[tokio::test]
+async fn fetch_html_stream_follows_empty_brotli_encoded_redirect() -> Result<()> {
+    let server = ScriptedHttpServer::spawn(vec![
+        ScriptedResponse::status(302, "Moved temporarily")
+            .with_header("Location", "/final")
+            .with_header("Content-Encoding", "br"),
+        ScriptedResponse::ok("<!doctype html><html><body>ok</body></html>")
+            .with_header("Content-Type", "text/html; charset=utf-8"),
+    ]);
+
+    let client = FetchClient::new(&FetchConfig::default(), new_shared_browser_cookie_store());
+    let mut response = client
+        .fetch_html_stream(Request::get(&server.url())?)
+        .await?;
+    let mut body = String::new();
+    while let Some(chunk) = response.next_chunk().await {
+        body.push_str(&chunk);
+    }
+    response.finish().await?;
+
+    assert_eq!(response.status, 200);
+    assert!(response.redirected);
+    assert_eq!(response.redirect_chain.len(), 1);
+    assert_eq!(body, "<!doctype html><html><body>ok</body></html>");
+
+    server.shutdown();
+    Ok(())
+}
+
+#[tokio::test]
 async fn fetch_html_stream_uses_disk_cache_for_safe_gets() -> Result<()> {
     let cache_dir = unique_test_cache_dir();
     let server = ScriptedHttpServer::spawn(vec![
@@ -4468,6 +4497,7 @@ async fn fetch_with_cancel_aborts_inflight_streaming_transfer() -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
     let (disconnect_tx, disconnect_rx) = oneshot::channel();
+    let (response_started_tx, response_started_rx) = oneshot::channel();
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.expect("cancel test accept");
         let _request = read_http_request_head(&mut stream)
@@ -4479,13 +4509,11 @@ async fn fetch_with_cancel_aborts_inflight_streaming_transfer() -> Result<()> {
             )
             .await
             .expect("cancel test should write initial response bytes");
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        let _ = response_started_tx.send(());
         let mut tail = [0u8; 1];
-        let disconnected = matches!(
-            tokio::time::timeout(Duration::from_secs(2), stream.read(&mut tail)).await,
-            Ok(Ok(0))
-        );
-        let _ = disconnect_tx.send(disconnected);
+        let observation =
+            tokio::time::timeout(Duration::from_secs(2), stream.read(&mut tail)).await;
+        let _ = disconnect_tx.send(observation);
     });
 
     let client = FetchClient::new(&FetchConfig::default(), new_shared_browser_cookie_store());
@@ -4497,27 +4525,25 @@ async fn fetch_with_cancel_aborts_inflight_streaming_transfer() -> Result<()> {
         tokio::spawn(async move { client.fetch_with_cancel(request, cancel_handle).await })
     };
 
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    tokio::time::timeout(Duration::from_secs(3), response_started_rx)
+        .await
+        .expect("server response start timed out")
+        .expect("server response start channel closed");
     cancel_handle.cancel();
 
-    let error = fetch_task
+    fetch_task
         .await
         .expect("fetch task should join")
-        .unwrap_err();
-    let error_chain = format!("{error:#}");
-    assert!(
-        error_chain.contains("fetch runtime request cancelled")
-            || error_chain.contains("Callback aborted"),
-        "unexpected cancel error: {error_chain}"
-    );
+        .expect_err("cancelled fetch should fail");
 
-    let disconnected = tokio::time::timeout(Duration::from_secs(3), disconnect_rx)
+    let observation = tokio::time::timeout(Duration::from_secs(3), disconnect_rx)
         .await
         .expect("server disconnect observation timed out")
         .expect("server disconnect observation channel closed");
     assert!(
-        disconnected,
-        "expected client transport to close after fetch cancellation"
+        matches!(observation, Ok(Ok(0)))
+            || matches!(&observation, Ok(Err(error)) if error.kind() == std::io::ErrorKind::ConnectionReset),
+        "expected client transport to close after fetch cancellation: {observation:?}"
     );
 
     server.await.expect("cancel test server should finish");

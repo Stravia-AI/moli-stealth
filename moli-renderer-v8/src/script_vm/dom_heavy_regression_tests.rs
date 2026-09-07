@@ -85,6 +85,46 @@ fn dom_heavy_appends_2000_buttons_with_text_and_dataset() {
 }
 
 #[test]
+fn mock_geometry_tracks_inline_style_changes_after_repeated_reads() {
+    let mut vm = new_dom_regression_vm();
+    vm.set_layout_policy(moli_page_types::LayoutPolicy::Mock);
+    let result = eval_with_body(
+        &mut vm,
+        r#"(() => {
+            const spacer = document.createElement('div');
+            const target = document.createElement('div');
+            spacer.setAttribute('style', 'height:24px;color:red');
+            document.body.append(spacer, target);
+            const top = () => target.getBoundingClientRect().top;
+            const initial = top();
+            document.body.style.padding = '1px';
+            const repeated = top();
+            spacer.setAttribute('style', 'height:72px;color:blue');
+            const attributeChanged = top();
+            spacer.style.height = '120px';
+            const cssomChanged = top();
+            spacer.removeAttribute('style');
+            const removed = top();
+            spacer.setAttribute('style', 'display:none;height:240px');
+            const hidden = spacer.getBoundingClientRect().width === 0;
+            spacer.setAttribute('style', 'display:block;height:24px');
+            return JSON.stringify({
+                repeated: repeated === initial,
+                attributeChanged: attributeChanged - initial === 48,
+                cssomChanged: cssomChanged - initial === 96,
+                removed: removed === initial,
+                hidden,
+                restored: top() === initial
+            });
+        })()"#,
+    );
+    assert_eq!(
+        result,
+        r#"{"repeated":true,"attributeChanged":true,"cssomChanged":true,"removed":true,"hidden":true,"restored":true}"#,
+    );
+}
+
+#[test]
 fn live_html_collection_for_in_does_not_abort_v8() {
     // V8 expects indexed interceptor enumerators to return integer keys.
     // Returning string keys here trips a fatal Object::ToUint32 check during for-in.

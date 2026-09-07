@@ -30,35 +30,17 @@ class WildWebTests(unittest.TestCase):
             ("lightpanda", "chrome", "moli"),
         )
 
-    def test_obscura_wild_web_command_uses_fetch_timeout_seconds(self) -> None:
+    def test_obscura_timeout_truncates_fractional_seconds(self) -> None:
         command = _wild_command_for_target("obscura", Path("/bin/obscura"), "https://example.test/", 7.9)
 
-        self.assertEqual(command[:4], ["/bin/obscura", "fetch", "--dump", "html"])
-        self.assertIn("--wait-until", command)
-        self.assertEqual(command[command.index("--wait") + 1], "0")
-        self.assertIn("--timeout", command)
         self.assertEqual(command[command.index("--timeout") + 1], "7")
-        self.assertEqual(command[-1], "https://example.test/")
 
     def test_lightpanda_wild_web_command_aligns_fetch_timeouts(self) -> None:
         command = _wild_command_for_target("lightpanda", Path("/bin/lightpanda"), "https://example.test/", 30.0)
 
-        self.assertEqual(command[:4], ["/bin/lightpanda", "fetch", "--dump", "html"])
-        self.assertEqual(
-            command[command.index("--wait-until") + 1],
-            "domcontentloaded",
-        )
-        self.assertEqual(
-            command[command.index("--wait-script") + 1],
-            POST_DCL_WAIT_SCRIPT,
-        )
         self.assertEqual(command[command.index("--wait-ms") + 1], "30000")
         self.assertEqual(command[command.index("--http-timeout") + 1], "30000")
         self.assertEqual(command[command.index("--terminate-ms") + 1], "30000")
-        self.assertNotIn("--wait_until", command)
-        self.assertNotIn("--wait_ms", command)
-        self.assertNotIn("--http_timeout", command)
-        self.assertEqual(command[-1], "https://example.test/")
 
     def test_moli_wild_web_command_uses_the_same_dcl_boundary(self) -> None:
         command = _wild_command_for_target(

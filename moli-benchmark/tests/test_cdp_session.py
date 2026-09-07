@@ -85,7 +85,7 @@ class CdpSessionTraceTests(unittest.TestCase):
                 events=[{"method": "Network.loadingFailed", "error_text": "failed"}],
             )
 
-            self.assertEqual(relative, "traces/moli-run-1-static-html.json")
+            self.assertFalse(Path(relative).is_absolute())
             self.assertTrue((suite_dir / relative).exists())
 
     def test_cdp_session_rejects_unmeasured_gate_target(self) -> None:

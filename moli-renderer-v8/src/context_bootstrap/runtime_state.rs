@@ -1770,6 +1770,8 @@ pub(crate) fn finish_context_bootstrap(
         ),
         ("TextEncoderStream", "TextEncoderStream"),
         ("TextDecoderStream", "TextDecoderStream"),
+        ("CompressionStream", "CompressionStream"),
+        ("DecompressionStream", "DecompressionStream"),
         ("Performance", "Performance"),
         ("PerformanceEntry", "PerformanceEntry"),
         ("PerformanceMark", "PerformanceMark"),

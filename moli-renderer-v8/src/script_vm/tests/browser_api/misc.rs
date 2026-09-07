@@ -5076,6 +5076,43 @@ fn element_animate_autoplays_and_settles_finished_promise() {
 }
 
 #[test]
+fn animation_dispatches_finish_through_event_target() {
+    let mut vm = new_parsed_test_vm("https://animation-events.test/", "<body></body>");
+
+    vm.eval(
+        r#"
+        globalThis.animationEvents = [];
+        const animation = document.body.animate({ opacity: [0, 1] }, { duration: 1 });
+        animationEvents.push(animation instanceof EventTarget);
+        const removed = () => animationEvents.push("removed");
+        animation.addEventListener("finish", removed);
+        animation.removeEventListener("finish", removed);
+        animation.addEventListener("finish", function (event) {
+            animationEvents.push([
+                event.type,
+                event instanceof Event,
+                event.target === animation,
+                event.currentTarget === animation,
+                this === animation,
+                event.isTrusted,
+            ].join(":"));
+        }, { once: true });
+        animation.onfinish = () => animationEvents.push("replaced");
+        animation.onfinish = event => animationEvents.push(`handler:${event.type}`);
+        animation.addEventListener("finish", () => animationEvents.push("listener"));
+        animation.finish();
+        "#,
+    )
+    .expect("animation listeners should execute");
+
+    assert_eq!(
+        vm.eval("animation.dispatchEvent(new Event('finish')); animationEvents.join('|')")
+            .expect("animation events should be readable"),
+        "true|finish:true:true:true:true:true|handler:finish|listener|handler:finish|listener"
+    );
+}
+
+#[test]
 fn element_get_animations_tracks_script_created_animations() {
     let mut vm = new_parsed_test_vm(
         "https://animation-registry.test/",
