@@ -4,6 +4,7 @@ mod base64;
 mod date_locale;
 mod dialogs;
 mod navigator;
+mod obsolete;
 mod performance;
 mod service_worker;
 mod structured_clone;
@@ -32,7 +33,6 @@ pub(super) use navigator::{
     MEDIA_DEVICES_BRAND_SLOT, PERMISSIONS_BRAND_SLOT, build_legacy_storage_info_object,
     build_legacy_storage_quota_object, build_navigator_ua_data_object,
     global_caches_getter_callback, navigator_get_battery_callback, navigator_java_enabled_callback,
-    navigator_media_devices_enumerate_devices_callback,
     navigator_media_devices_get_user_media_callback, navigator_permissions_query_callback,
     navigator_send_beacon_callback, navigator_storage_estimate_callback,
     navigator_storage_get_directory_callback, navigator_storage_persist_callback,
@@ -47,6 +47,7 @@ pub(super) use navigator::{
     storage_bucket_persist_callback, storage_bucket_persisted_callback,
     storage_bucket_set_expires_callback,
 };
+pub(super) use obsolete::window_obsolete_noop_callback;
 pub(super) use performance::performance_now_callback;
 pub(crate) use service_worker::{
     ServiceWorkerClientMessageCallbackDispatchEffect, ServiceWorkerClientMessageDispatchEffect,

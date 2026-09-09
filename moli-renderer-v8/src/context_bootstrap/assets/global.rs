@@ -1,7 +1,7 @@
 use super::super::shared::define_global_template_value;
 use super::super::{
     exposed_interfaces::{
-        ExposedInterfaceTemplateRegistry, TemplateBuildProfile, constructor_spec_is_lazy,
+        ExposedInterfaceTemplateRegistry, TemplateBuildProfile, constructor_spec_is_eager,
         install_window_exposed_interfaces,
     },
     specs::constructor_specs,
@@ -42,6 +42,14 @@ impl ContextBootstrapAssets {
             .id_by_name("Window")
             .ok_or_else(|| anyhow!("missing constructor template metadata `Window`"))?;
         let window_template = registry.get_or_build_template(scope, window_id)?;
+        // WindowProxy's [[SetPrototypeOf]] only succeeds when the requested
+        // prototype is already its current prototype. Set the invariant on
+        // Window's instance template before deriving the same- and
+        // cross-origin global templates so it remains attached to V8's global
+        // proxy rather than only to the inner global object.
+        window_template
+            .instance_template(scope)
+            .set_immutable_proto();
         // A cross-origin WindowProxy shell must retain Window's V8 wrapper
         // identity so that detaching and reusing it for the committed child
         // realm discards the facade's temporary own properties. It must not,
@@ -59,7 +67,7 @@ impl ContextBootstrapAssets {
 
         install_window_exposed_interfaces(scope, global_template, &registry)?;
         for spec in &constructor_specs {
-            if constructor_spec_is_lazy(*spec) {
+            if !constructor_spec_is_eager(*spec) {
                 continue;
             }
             let id = registry

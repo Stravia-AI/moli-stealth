@@ -1397,6 +1397,7 @@ fn font_face_declared_slots_ignore_prototype_spoofing() {
   face.__moliFontFaceStatus = 'error';
   face.__moliFontFaceLoaded = Promise.resolve('ownBad');
   const fake = Object.create(FontFace.prototype);
+  globalThis.fakeLoadedResult = 'not called';
   return JSON.stringify({
     values: [
       face.family,
@@ -1410,13 +1411,19 @@ fn font_face_declared_slots_ignore_prototype_spoofing() {
       face.status,
       typeof face.loaded.then
     ].join('|'),
-    fake: [
-      fake.family,
-      fake.source,
-      fake.style,
-      fake.status,
-      fake.loaded
-    ].map(value => value === undefined ? 'undefined' : String(value)).join('|'),
+    fake: ['family', 'source', 'style', 'status', 'loaded'].map(name => {
+      try {
+        const value = fake[name];
+        if (name === 'loaded' && value instanceof Promise) {
+          value.then(
+            () => fakeLoadedResult = 'resolved',
+            error => fakeLoadedResult = error instanceof TypeError ? 'rejected:TypeError' : error.name
+          );
+          return 'Promise';
+        }
+        return String(value);
+      } catch (error) { return error.name; }
+    }).join('|'),
     descriptors: [
       'family',
       'style',
@@ -1438,8 +1445,9 @@ fn font_face_declared_slots_ignore_prototype_spoofing() {
 
     assert_eq!(
         result,
-        r#"{"values":"Changed|url(demo.woff)|italic|700|condensed|small-caps|\"kern\"|swap|loaded|function","fake":"undefined|undefined|undefined|undefined|undefined","descriptors":["family:function:get family:0:function:set family:1:true:true:false","style:function:get style:0:function:set style:1:true:true:false","weight:function:get weight:0:function:set weight:1:true:true:false","stretch:function:get stretch:0:function:set stretch:1:true:true:false","variant:function:get variant:0:function:set variant:1:true:true:false","featureSettings:function:get featureSettings:0:function:set featureSettings:1:true:true:false","display:function:get display:0:function:set display:1:true:true:false","source:function:get source:0:undefined:undefined:undefined:true:true:false","status:function:get status:0:undefined:undefined:undefined:true:true:false","loaded:function:get loaded:0:undefined:undefined:undefined:true:true:false"],"ownSlots":[]}"#
+        r#"{"values":"Changed|url(demo.woff)|italic|700|condensed|small-caps|\"kern\"|swap|loaded|function","fake":"TypeError|TypeError|TypeError|TypeError|Promise","descriptors":["family:function:get family:0:function:set family:1:true:true:false","style:function:get style:0:function:set style:1:true:true:false","weight:function:get weight:0:function:set weight:1:true:true:false","stretch:function:get stretch:0:function:set stretch:1:true:true:false","variant:function:get variant:0:function:set variant:1:true:true:false","featureSettings:function:get featureSettings:0:function:set featureSettings:1:true:true:false","display:function:get display:0:function:set display:1:true:true:false","source:function:get source:0:undefined:undefined:undefined:true:true:false","status:function:get status:0:undefined:undefined:undefined:true:true:false","loaded:function:get loaded:0:undefined:undefined:undefined:true:true:false"],"ownSlots":[]}"#
     );
+    assert_eq!(vm.eval("fakeLoadedResult").unwrap(), "rejected:TypeError");
 }
 
 #[test]
@@ -4180,7 +4188,7 @@ fn web_platform_surface_stubs_are_present_and_brand_correctly() {
                 "CompressionStream","DecompressionStream",
                 "ReadableStreamBYOBReader","ReadableStreamBYOBRequest","ReadableByteStreamController",
                 "Geolocation","GeolocationPosition","GeolocationCoordinates","GeolocationPositionError",
-                "MediaCapabilities",
+                "MediaCapabilities","Clipboard","ClipboardItem",
               ];
               const out = [];
               for (const name of names) {
@@ -4191,6 +4199,7 @@ fn web_platform_surface_stubs_are_present_and_brand_correctly() {
               out.push(`HashChangeEvent<Event:${HashChangeEvent.prototype instanceof Event}`);
               out.push(`DOMRect<DOMRectReadOnly:${DOMRect.prototype instanceof DOMRectReadOnly}`);
               out.push(`DOMPoint<DOMPointReadOnly:${DOMPoint.prototype instanceof DOMPointReadOnly}`);
+              out.push(`Clipboard<EventTarget:${Clipboard.prototype instanceof EventTarget}`);
               return out.join("|");
             })()
             "#,
@@ -4226,10 +4235,13 @@ fn web_platform_surface_stubs_are_present_and_brand_correctly() {
         "GeolocationCoordinates:function:true",
         "GeolocationPositionError:function:true",
         "MediaCapabilities:function:true",
+        "Clipboard:function:true",
+        "ClipboardItem:function:true",
         "ToggleEvent<Event:true",
         "HashChangeEvent<Event:true",
         "DOMRect<DOMRectReadOnly:true",
         "DOMPoint<DOMPointReadOnly:true",
+        "Clipboard<EventTarget:true",
     ];
     assert_eq!(result, expected_parts.join("|"));
 }
@@ -5812,6 +5824,87 @@ fn show_and_hide_popover_throw_on_redundant_state_changes() {
 }
 
 #[test]
+fn opening_auto_popovers_preserves_flat_tree_ancestors() {
+    let mut vm = new_storage_test_vm("https://popover-flat-tree-ancestors.test/");
+
+    let result = vm
+        .eval(
+            r#"
+            (() => {
+              const html = document.appendChild(document.createElement("html"));
+              const body = html.appendChild(document.createElement("body"));
+              const outer = document.createElement("div");
+              const middle = document.createElement("div");
+              const inner = document.createElement("div");
+              const unrelated = document.createElement("div");
+              for (const popover of [outer, middle, inner, unrelated]) {
+                popover.popover = "auto";
+              }
+              outer.appendChild(middle).appendChild(inner);
+              body.append(outer, unrelated);
+
+              outer.showPopover();
+              middle.showPopover();
+              inner.showPopover();
+              const nested = [outer, middle, inner].map(popover =>
+                popover.matches(":popover-open")
+              );
+
+              unrelated.showPopover();
+              const unrelatedClosesStack = [outer, middle, inner, unrelated].map(popover =>
+                popover.matches(":popover-open")
+              );
+
+              unrelated.hidePopover();
+              const sourceOwner = document.createElement("div");
+              const sourceHost = document.createElement("span");
+              const sourced = document.createElement("div");
+              sourceOwner.popover = "auto";
+              sourced.popover = "auto";
+              const source = sourceHost
+                .attachShadow({ mode: "open" })
+                .appendChild(document.createElement("button"));
+              sourceOwner.appendChild(sourceHost);
+              body.append(sourceOwner, sourced);
+              sourceOwner.showPopover();
+              sourced.showPopover({ source });
+              const shadowSource = [sourceOwner, sourced].map(popover =>
+                popover.matches(":popover-open")
+              );
+
+              sourced.hidePopover();
+              sourceOwner.hidePopover();
+              const shadowHost = document.createElement("div");
+              const unassigned = document.createElement("div");
+              shadowHost.popover = "auto";
+              unassigned.popover = "auto";
+              shadowHost.appendChild(unassigned);
+              shadowHost.attachShadow({ mode: "open" }).innerHTML = "<span></span>";
+              body.appendChild(shadowHost);
+              shadowHost.showPopover();
+              unassigned.showPopover();
+              const unassignedLightChild = [shadowHost, unassigned].map(popover =>
+                popover.matches(":popover-open")
+              );
+
+              return JSON.stringify({
+                nested,
+                unrelatedClosesStack,
+                shadowSource,
+                unassignedLightChild
+              });
+            })()
+            "#,
+        )
+        .expect("popover flat-tree ancestor probe should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"nested":[true,true,true],"unrelatedClosesStack":[false,false,false,true],"shadowSource":[true,true],"unassignedLightChild":[false,true]}"#
+    );
+}
+
+#[test]
 fn stale_popover_element_matches_false_after_document_open_replacement() {
     let mut vm = new_storage_test_vm("https://popover-document-open.test/");
 
@@ -7329,6 +7422,37 @@ fn console_debug_is_present_and_does_not_double_read_error_stack() {
         r#"{"beforeAccess":"","afterAccess":"","afterSpoof":"__moliWindowConsole","publicSpoof":true,"sameConsole":true,"debugType":"function","reads":1}"#
     );
 }
+
+#[test]
+fn console_does_not_invoke_error_prepare_stack_trace() {
+    let mut vm = new_storage_test_vm("https://example.com/");
+
+    let result = vm
+        .eval(
+            r#"
+            (() => {
+              let accessed = false;
+              const originalPrepareStackTrace = Error.prepareStackTrace;
+              try {
+                Error.prepareStackTrace = () => {
+                  accessed = true;
+                  return "detected";
+                };
+                console.log(new Error(""));
+                const afterConsole = accessed;
+                void new Error("explicit stack access").stack;
+                return `${afterConsole}|${accessed}`;
+              } finally {
+                Error.prepareStackTrace = originalPrepareStackTrace;
+              }
+            })()
+            "#,
+        )
+        .expect("console Error.prepareStackTrace probe should evaluate");
+
+    assert_eq!(result, "false|true");
+}
+
 #[test]
 fn zhihu_probe_navigator_profile_is_chromium_like() {
     let mut vm = new_storage_test_vm("https://example.com/");
@@ -8022,20 +8146,26 @@ fn navigator_runtime_subobjects_keep_declared_brand_and_methods() {
                   mediaDevices.enumerateDevices && mediaDevices.enumerateDevices.length,
                   mediaDevices.getUserMedia && mediaDevices.getUserMedia.name,
                   mediaDevices.getUserMedia && mediaDevices.getUserMedia.length,
-                  summarizeOwnMethod(mediaDevices, "enumerateDevices"),
-                  summarizeOwnMethod(mediaDevices, "getUserMedia")
+                  summarizeOwnMethod(MediaDevices.prototype, "enumerateDevices"),
+                  summarizeOwnMethod(MediaDevices.prototype, "getUserMedia")
                 ].join("|"),
                 clipboard: [
+                  clipboard instanceof Clipboard,
+                  clipboard instanceof EventTarget,
                   Object.prototype.toString.call(clipboard),
                   Object.hasOwn(clipboard, "readText"),
                   Object.hasOwn(clipboard, "writeText"),
                   Object.keys(clipboard).join(","),
+                  Object.hasOwn(Clipboard.prototype, "read"),
+                  Object.hasOwn(Clipboard.prototype, "readText"),
+                  Object.hasOwn(Clipboard.prototype, "write"),
+                  Object.hasOwn(Clipboard.prototype, "writeText"),
                   clipboard.readText && clipboard.readText.name,
                   clipboard.readText && clipboard.readText.length,
                   clipboard.writeText && clipboard.writeText.name,
                   clipboard.writeText && clipboard.writeText.length,
-                  summarizeOwnMethod(clipboard, "readText"),
-                  summarizeOwnMethod(clipboard, "writeText"),
+                  summarizeOwnMethod(Clipboard.prototype, "readText"),
+                  summarizeOwnMethod(Clipboard.prototype, "writeText"),
                   Object.prototype.toString.call(clipboard.readText()),
                   Object.prototype.toString.call(clipboard.writeText("clip-text"))
                 ].join("|"),
@@ -8058,7 +8188,7 @@ fn navigator_runtime_subobjects_keep_declared_brand_and_methods() {
 
     assert_eq!(
         result,
-        r#"{"permissions":"true|[object Permissions]|false|function|1","storage":"true|[object StorageManager]|false|false|false|false||true|true|true|true|persisted|0|persist|0|estimate|0|false:undefined:::::|[object Promise]|[object Promise]","connection":"[object Object]|string|unknown|Infinity|string|4g|10|50|false|true|type,downlinkMax,effectiveType,downlink,rtt,saveData,onchange,addEventListener,removeEventListener||true:function:addEventListener:2:true:true:true|true:function:removeEventListener:2:true:true:true|undefined|undefined|throw:TypeError|throw:TypeError","mediaDevices":"true|[object MediaDevices]|true|true|enumerateDevices,getUserMedia|enumerateDevices|0|getUserMedia|1|true:function:enumerateDevices:0:true:true:true|true:function:getUserMedia:1:true:true:true","clipboard":"[object Object]|true|true|readText,writeText|readText|0|writeText|1|true:function:readText:0:true:true:true|true:function:writeText:1:true:true:true|[object Promise]|[object Promise]","userActivation":"undefined|[object Object]|boolean|false|false|isActive,hasBeenActive|true|throw:TypeError|throw:TypeError"}"#
+        r#"{"permissions":"true|[object Permissions]|false|function|1","storage":"true|[object StorageManager]|false|false|false|false||true|true|true|true|persisted|0|persist|0|estimate|0|false:undefined:::::|[object Promise]|[object Promise]","connection":"[object Object]|string|unknown|Infinity|string|4g|10|50|false|true|type,downlinkMax,effectiveType,downlink,rtt,saveData,onchange,addEventListener,removeEventListener||true:function:addEventListener:2:true:true:true|true:function:removeEventListener:2:true:true:true|undefined|undefined|throw:TypeError|throw:TypeError","mediaDevices":"true|[object MediaDevices]|false|false||enumerateDevices|0|getUserMedia|1|true:function:enumerateDevices:0:true:true:true|true:function:getUserMedia:1:true:true:true","clipboard":"true|true|[object Clipboard]|false|false||true|true|true|true|readText|0|writeText|1|true:function:readText:0:true:true:true|true:function:writeText:1:true:true:true|[object Promise]|[object Promise]","userActivation":"undefined|[object Object]|boolean|false|false|isActive,hasBeenActive|true|throw:TypeError|throw:TypeError"}"#
     );
     let receiver_errors = vm
         .eval(
@@ -8081,6 +8211,198 @@ fn navigator_runtime_subobjects_keep_declared_brand_and_methods() {
 }
 
 #[test]
+fn async_clipboard_interfaces_are_branded_and_round_trip_text_data() {
+    let mut vm = new_storage_test_vm("https://async-clipboard.test/");
+
+    let shape = vm
+        .eval(
+            r#"
+            (() => {
+              const clipboard = navigator.clipboard;
+              const item = new ClipboardItem(
+                { "text/plain": "hello", "not a/real type": "opaque" },
+                { presentationStyle: "inline" }
+              );
+              const writableItem = new ClipboardItem({ "text/plain": "hello" });
+              const invalidCustomItem = new ClipboardItem({
+                "application/x-private": new Blob(["x"], {
+                  type: "application/x-private"
+                })
+              });
+              const mismatchedCustomItem = new ClipboardItem({
+                "web text/plain": new Blob(["x"], { type: "text/custom" })
+              });
+              const stringPngItem = new ClipboardItem({ "image/png": "not an image" });
+              const method = (object, name) => {
+                const descriptor = Object.getOwnPropertyDescriptor(object, name);
+                return [
+                  typeof descriptor?.value,
+                  descriptor?.value?.name,
+                  descriptor?.value?.length,
+                  descriptor?.enumerable,
+                  descriptor?.writable,
+                  descriptor?.configurable
+                ].join(":");
+              };
+              const accessor = (object, name) => {
+                const descriptor = Object.getOwnPropertyDescriptor(object, name);
+                return [
+                  typeof descriptor?.get,
+                  descriptor?.get?.name,
+                  descriptor?.get?.length,
+                  typeof descriptor?.set,
+                  descriptor?.enumerable,
+                  descriptor?.configurable
+                ].join(":");
+              };
+              const errorName = callback => {
+                try {
+                  callback();
+                  return "none";
+                } catch (error) {
+                  return error && error.name;
+                }
+              };
+              const presentationStyleGetter = Object.getOwnPropertyDescriptor(
+                ClipboardItem.prototype,
+                "presentationStyle"
+              ).get;
+              const typesGetter = Object.getOwnPropertyDescriptor(
+                ClipboardItem.prototype,
+                "types"
+              ).get;
+
+              globalThis.__asyncClipboardProbe = { state: "pending" };
+              const rejectionName = promise => Promise.resolve(promise).then(
+                () => "resolved",
+                error => error && error.name
+              );
+              (async () => {
+                const initialBlob = await item.getType("text/plain");
+                const initialText = await initialBlob.text();
+                const opaqueBlob = await item.getType("not a/real type");
+                const opaqueText = await opaqueBlob.text();
+                await clipboard.write([writableItem]);
+                const writtenText = await clipboard.readText();
+                const readItems = await clipboard.read({ unsanitized: ["text/html"] });
+                await clipboard.writeText("next");
+                const textItems = await clipboard.read();
+                const textBlob = await textItems[0].getType("text/plain");
+                const roundTripText = await textBlob.text();
+                const rejections = await Promise.all([
+                  rejectionName(Clipboard.prototype.read.call({})),
+                  rejectionName(Clipboard.prototype.write.call({}, [item])),
+                  rejectionName(clipboard.writeText()),
+                  rejectionName(clipboard.write([])),
+                  rejectionName(clipboard.read({ unsanitized: ["text/html", "text/plain"] })),
+                  rejectionName(item.getType()),
+                  rejectionName(item.getType("missing/type")),
+                  rejectionName(ClipboardItem.prototype.getType.call({}, "text/plain")),
+                  rejectionName(clipboard.write([invalidCustomItem])),
+                  rejectionName(clipboard.write([mismatchedCustomItem])),
+                  rejectionName(clipboard.write([stringPngItem]))
+                ]);
+                globalThis.__asyncClipboardProbe = {
+                  state: "done",
+                  initialBlob: [initialBlob instanceof Blob, initialBlob.type, initialText],
+                  writtenText,
+                  read: [
+                    readItems.length,
+                    readItems[0] === writableItem,
+                    opaqueText,
+                    Object.isFrozen(readItems)
+                  ],
+                  textWrite: [
+                    textItems.length,
+                    textItems[0] instanceof ClipboardItem,
+                    textItems[0].types.join(","),
+                    roundTripText
+                  ],
+                  rejections
+                };
+              })().catch(error => {
+                globalThis.__asyncClipboardProbe = {
+                  state: "failed",
+                  error: `${error && error.name}:${error && error.message}`
+                };
+              });
+
+              return JSON.stringify({
+                constructors: [
+                  typeof Clipboard,
+                  Clipboard.name,
+                  Clipboard.length,
+                  typeof ClipboardItem,
+                  ClipboardItem.name,
+                  ClipboardItem.length
+                ],
+                clipboard: [
+                  navigator.clipboard === navigator.clipboard,
+                  clipboard instanceof Clipboard,
+                  clipboard instanceof EventTarget,
+                  Object.getPrototypeOf(clipboard) === Clipboard.prototype,
+                  Object.prototype.toString.call(clipboard),
+                  Object.keys(clipboard).join(","),
+                  Object.keys(Clipboard.prototype).join(",")
+                ],
+                methods: [
+                  method(Clipboard.prototype, "read"),
+                  method(Clipboard.prototype, "readText"),
+                  method(Clipboard.prototype, "write"),
+                  method(Clipboard.prototype, "writeText")
+                ],
+                item: [
+                  item instanceof ClipboardItem,
+                  Object.getPrototypeOf(item) === ClipboardItem.prototype,
+                  Object.prototype.toString.call(item),
+                  Object.keys(item).join(","),
+                  item.presentationStyle,
+                  item.types.join(","),
+                  Object.isFrozen(item.types),
+                  Object.keys(ClipboardItem.prototype).join(",")
+                ],
+                itemMembers: [
+                  accessor(ClipboardItem.prototype, "presentationStyle"),
+                  accessor(ClipboardItem.prototype, "types"),
+                  method(ClipboardItem.prototype, "getType"),
+                  method(ClipboardItem, "supports")
+                ],
+                supports: [
+                  ClipboardItem.supports("text/plain"),
+                  ClipboardItem.supports("web foo/bar"),
+                  ClipboardItem.supports("foo/bar")
+                ],
+                syncErrors: [
+                  errorName(() => new Clipboard()),
+                  errorName(() => Clipboard()),
+                  errorName(() => ClipboardItem({ "text/plain": "x" })),
+                  errorName(() => new ClipboardItem()),
+                  errorName(() => new ClipboardItem(null)),
+                  errorName(() => new ClipboardItem({})),
+                  errorName(() => presentationStyleGetter.call({})),
+                  errorName(() => typesGetter.call({}))
+                ]
+              });
+            })()
+            "#,
+        )
+        .expect("Async Clipboard interface shape should evaluate");
+
+    assert_eq!(
+        shape,
+        r#"{"constructors":["function","Clipboard",0,"function","ClipboardItem",1],"clipboard":[true,true,true,true,"[object Clipboard]","","read,readText,write,writeText"],"methods":["function:read:0:true:true:true","function:readText:0:true:true:true","function:write:1:true:true:true","function:writeText:1:true:true:true"],"item":[true,true,"[object ClipboardItem]","","inline","text/plain,not a/real type",true,"presentationStyle,types,getType"],"itemMembers":["function:get presentationStyle:0:undefined:true:true","function:get types:0:undefined:true:true","function:getType:1:true:true:true","function:supports:1:true:true:true"],"supports":[true,true,false],"syncErrors":["TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError"]}"#
+    );
+
+    vm.eval("0")
+        .expect("Async Clipboard promise operations should drain");
+    assert_eq!(
+        vm.eval("JSON.stringify(globalThis.__asyncClipboardProbe)")
+            .expect("Async Clipboard promise result should evaluate"),
+        r#"{"state":"done","initialBlob":[true,"text/plain","hello"],"writtenText":"hello","read":[1,true,"opaque",false],"textWrite":[1,true,"text/plain","next"],"rejections":["TypeError","TypeError","TypeError","NotAllowedError","NotAllowedError","TypeError","NotFoundError","TypeError","NotAllowedError","NotAllowedError","TypeError"]}"#
+    );
+}
+
+#[test]
 fn navigator_storage_apis_are_secure_context_only() {
     let mut vm = new_storage_test_vm("http://insecure-storage-surface.test/");
 
@@ -8094,16 +8416,21 @@ fn navigator_storage_apis_are_secure_context_only() {
               const childProto = Object.getPrototypeOf(frame.contentWindow.navigator);
               return JSON.stringify({
                 secure: globalThis.isSecureContext === true,
+                clipboardInNavigator: "clipboard" in navigator,
                 storageInNavigator: "storage" in navigator,
                 storageBucketsInNavigator: "storageBuckets" in navigator,
                 userAgentDataInNavigator: "userAgentData" in navigator,
+                clipboardInProto: Object.prototype.hasOwnProperty.call(proto, "clipboard"),
                 storageInProto: Object.prototype.hasOwnProperty.call(proto, "storage"),
                 storageBucketsInProto: Object.prototype.hasOwnProperty.call(proto, "storageBuckets"),
                 userAgentDataInProto:
                   Object.prototype.hasOwnProperty.call(proto, "userAgentData"),
+                clipboardValueType: typeof navigator.clipboard,
                 storageValueType: typeof navigator.storage,
                 storageBucketsValueType: typeof navigator.storageBuckets,
                 userAgentDataValueType: typeof navigator.userAgentData,
+                clipboardGlobal: "Clipboard" in globalThis,
+                clipboardItemGlobal: "ClipboardItem" in globalThis,
                 storageManagerGlobal: "StorageManager" in globalThis,
                 storageEstimateGlobal: "StorageEstimate" in globalThis,
                 storageBucketManagerGlobal: "StorageBucketManager" in globalThis,
@@ -8115,14 +8442,19 @@ fn navigator_storage_apis_are_secure_context_only() {
                   "FileSystemWritableFileStream" in globalThis,
                 fileSystemSyncAccessHandleGlobal:
                   "FileSystemSyncAccessHandle" in globalThis,
+                childClipboardInNavigator: "clipboard" in frame.contentWindow.navigator,
                 childStorageInNavigator: "storage" in frame.contentWindow.navigator,
                 childStorageBucketsInNavigator: "storageBuckets" in frame.contentWindow.navigator,
                 childUserAgentDataInNavigator:
                   "userAgentData" in frame.contentWindow.navigator,
+                childClipboardInProto:
+                  Object.prototype.hasOwnProperty.call(childProto, "clipboard"),
                 childStorageInProto: Object.prototype.hasOwnProperty.call(childProto, "storage"),
                 childStorageBucketsInProto: Object.prototype.hasOwnProperty.call(childProto, "storageBuckets"),
                 childUserAgentDataInProto:
                   Object.prototype.hasOwnProperty.call(childProto, "userAgentData"),
+                childClipboardGlobal: "Clipboard" in frame.contentWindow,
+                childClipboardItemGlobal: "ClipboardItem" in frame.contentWindow,
                 childFileSystemHandleGlobal:
                   "FileSystemHandle" in frame.contentWindow,
                 childFileSystemFileHandleGlobal:
@@ -8141,7 +8473,7 @@ fn navigator_storage_apis_are_secure_context_only() {
 
     assert_eq!(
         result,
-        r#"{"secure":false,"storageInNavigator":false,"storageBucketsInNavigator":false,"userAgentDataInNavigator":false,"storageInProto":false,"storageBucketsInProto":false,"userAgentDataInProto":false,"storageValueType":"undefined","storageBucketsValueType":"undefined","userAgentDataValueType":"undefined","storageManagerGlobal":false,"storageEstimateGlobal":false,"storageBucketManagerGlobal":false,"storageBucketGlobal":false,"fileSystemHandleGlobal":false,"fileSystemFileHandleGlobal":false,"fileSystemDirectoryHandleGlobal":false,"fileSystemWritableFileStreamGlobal":false,"fileSystemSyncAccessHandleGlobal":false,"childStorageInNavigator":false,"childStorageBucketsInNavigator":false,"childUserAgentDataInNavigator":false,"childStorageInProto":false,"childStorageBucketsInProto":false,"childUserAgentDataInProto":false,"childFileSystemHandleGlobal":false,"childFileSystemFileHandleGlobal":false,"childFileSystemDirectoryHandleGlobal":false,"childFileSystemWritableFileStreamGlobal":false,"childFileSystemSyncAccessHandleGlobal":false}"#
+        r#"{"secure":false,"clipboardInNavigator":false,"storageInNavigator":false,"storageBucketsInNavigator":false,"userAgentDataInNavigator":false,"clipboardInProto":false,"storageInProto":false,"storageBucketsInProto":false,"userAgentDataInProto":false,"clipboardValueType":"undefined","storageValueType":"undefined","storageBucketsValueType":"undefined","userAgentDataValueType":"undefined","clipboardGlobal":false,"clipboardItemGlobal":false,"storageManagerGlobal":false,"storageEstimateGlobal":false,"storageBucketManagerGlobal":false,"storageBucketGlobal":false,"fileSystemHandleGlobal":false,"fileSystemFileHandleGlobal":false,"fileSystemDirectoryHandleGlobal":false,"fileSystemWritableFileStreamGlobal":false,"fileSystemSyncAccessHandleGlobal":false,"childClipboardInNavigator":false,"childStorageInNavigator":false,"childStorageBucketsInNavigator":false,"childUserAgentDataInNavigator":false,"childClipboardInProto":false,"childStorageInProto":false,"childStorageBucketsInProto":false,"childUserAgentDataInProto":false,"childClipboardGlobal":false,"childClipboardItemGlobal":false,"childFileSystemHandleGlobal":false,"childFileSystemFileHandleGlobal":false,"childFileSystemDirectoryHandleGlobal":false,"childFileSystemWritableFileStreamGlobal":false,"childFileSystemSyncAccessHandleGlobal":false}"#
     );
 }
 
@@ -21753,6 +22085,45 @@ fn zhihu_probe_navigator_plugin_and_mime_surfaces_match_chromium_pdf_builtins() 
     );
 }
 #[test]
+fn navigator_plugin_collection_lengths_are_branded_readonly_prototype_attributes() {
+    let mut vm = new_storage_test_vm("https://navigator-collections-length.test/");
+    let result = vm.eval(r#"
+        (() => {
+          const collections = [navigator.plugins, navigator.mimeTypes, navigator.plugins[0]];
+          function throwsTypeError(callback) {
+            try { callback(); return false; } catch (error) { return error instanceof TypeError; }
+          }
+          for (const [index, collection] of collections.entries()) {
+            const prototype = Object.getPrototypeOf(collection);
+            const descriptor = Object.getOwnPropertyDescriptor(prototype, 'length');
+            if (!descriptor || descriptor.get.name !== 'get length' || descriptor.get.length !== 0 ||
+                descriptor.set !== undefined || !descriptor.enumerable || !descriptor.configurable ||
+                Object.hasOwn(collection, 'length') || Array.isArray(collection)) return 'descriptor';
+            const length = index === 0 ? 5 : 2;
+            const first = collection[0];
+            collection.length = 0;
+            collection.__moliNavigatorCollectionLength = 0;
+            if (collection.length !== length || collection[0] !== first ||
+                Array.from(collection).length !== length || collection.item(0) !== first)
+              return 'assignment changed collection';
+            if (!throwsTypeError(() => { 'use strict'; collection.length = 0; })) return 'strict';
+            for (const fake of [{}, [], Object.create(collection), prototype, collections[(index + 1) % 3]]) {
+              if (!throwsTypeError(() => descriptor.get.call(fake))) return 'brand';
+            }
+          }
+          const iframe = document.createElement('iframe');
+          document.appendChild(document.createElement('html')).appendChild(iframe);
+          const foreign = iframe.contentWindow.navigator;
+          const foreignCollections = [foreign.plugins, foreign.mimeTypes, foreign.plugins[0]];
+          return collections.every((collection, i) =>
+            Object.getOwnPropertyDescriptor(Object.getPrototypeOf(collection), 'length')
+              .get.call(foreignCollections[i]) === collection.length);
+        })()
+    "#).expect("collection length probe should evaluate");
+    assert_eq!(result, "true");
+}
+
+#[test]
 fn navigator_plugin_collections_parse_webidl_arguments() {
     let mut vm = new_storage_test_vm("https://navigator-collections-webidl.test/");
 
@@ -23315,6 +23686,98 @@ fn standalone_dialog_handler_without_page_residence_uses_headless_defaults() {
         vm.take_pending_javascript_dialogs().is_empty(),
         "a realm without an exact Page residence must not claim a protocol dialog"
     );
+}
+
+#[tokio::test]
+async fn sandboxed_child_without_allow_modals_uses_dialog_defaults_without_opening_one() {
+    let mut vm = new_storage_test_vm("https://sandbox-dialogs.test/");
+    vm.eval(
+        r#"
+(() => {
+  const frame = document.createElement("iframe");
+  frame.id = "sandboxed-dialog-frame";
+  frame.sandbox = "allow-scripts allow-same-origin";
+  frame.srcdoc = `<script>
+    function openDialogs() {
+      return [
+        String(alert("blocked alert")),
+        String(confirm("blocked confirm")),
+        String(prompt("blocked prompt", "default"))
+      ].join("|");
+    }
+  <\/script>`;
+  (document.body || document.documentElement || document).appendChild(frame);
+})()
+"#,
+    )
+    .expect("sandboxed dialog child setup should evaluate");
+    run_realm_prerequisite_then_expected_child_frame_semantic_turn_for_test(
+        &mut vm,
+        ChildFrameSemanticTurnKind::NavigationCommit,
+        "sandboxed dialog child should commit before its parser script",
+    )
+    .await;
+    run_realm_prerequisite_then_expected_child_frame_semantic_turn_for_test(
+        &mut vm,
+        ChildFrameSemanticTurnKind::DocumentScriptReady,
+        "sandboxed dialog child script should run",
+    )
+    .await;
+    run_child_document_lifecycle_and_host_load_for_test(&mut vm, "sandboxed dialog child").await;
+
+    assert_eq!(
+        vm.eval("document.getElementById('sandboxed-dialog-frame').contentWindow.openDialogs()")
+            .expect("sandboxed child dialog defaults should evaluate"),
+        "undefined|false|null"
+    );
+    assert!(
+        vm.take_pending_javascript_dialogs().is_empty(),
+        "a child without allow-modals must not publish a JavaScript dialog"
+    );
+}
+
+#[tokio::test]
+async fn sandboxed_child_with_allow_modals_can_open_a_dialog() {
+    let mut vm = new_storage_test_vm("https://sandbox-dialogs.test/");
+    vm.eval(
+        r#"
+(() => {
+  const frame = document.createElement("iframe");
+  frame.id = "allowed-dialog-frame";
+  frame.sandbox = "allow-scripts allow-same-origin allow-modals";
+  frame.srcdoc = `<script>
+    function openAlert() { return alert("allowed alert"); }
+  <\/script>`;
+  (document.body || document.documentElement || document).appendChild(frame);
+})()
+"#,
+    )
+    .expect("allowed dialog child setup should evaluate");
+    run_realm_prerequisite_then_expected_child_frame_semantic_turn_for_test(
+        &mut vm,
+        ChildFrameSemanticTurnKind::NavigationCommit,
+        "allowed dialog child should commit before its parser script",
+    )
+    .await;
+    run_realm_prerequisite_then_expected_child_frame_semantic_turn_for_test(
+        &mut vm,
+        ChildFrameSemanticTurnKind::DocumentScriptReady,
+        "allowed dialog child script should run",
+    )
+    .await;
+    run_child_document_lifecycle_and_host_load_for_test(&mut vm, "allowed dialog child").await;
+
+    assert_eq!(
+        vm.eval(
+            "String(document.getElementById('allowed-dialog-frame').contentWindow.openAlert())"
+        )
+        .expect("allowed child dialog should evaluate"),
+        "undefined"
+    );
+    let dialogs = vm.take_pending_javascript_dialogs();
+    assert_eq!(dialogs.len(), 1);
+    assert_eq!(dialogs[0].dialog_type(), "alert");
+    assert_eq!(dialogs[0].message(), "allowed alert");
 }
 
 #[test]

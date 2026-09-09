@@ -15145,6 +15145,8 @@ fn decode_png_dimensions_from_data_url(data_url: &str) -> (u32, u32) {
 }
 
 mod browser_api;
+mod canvas_arguments;
+mod canvas_paths;
 mod canvas_webgl;
 mod dom_elements;
 mod dom_xhr;
@@ -15161,6 +15163,7 @@ mod script_terminal_completion;
 mod streams;
 mod webidl_collections;
 mod webidl_fetch;
+mod webidl_receivers;
 mod webidl_trusted_types;
 mod websocket;
 mod window_execution_context;

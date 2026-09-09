@@ -14,7 +14,6 @@ pub enum TransformMode {
     Callback,
     TextEncoder,
     TextDecoder,
-    Compression,
 }
 
 impl TransformMode {
@@ -23,7 +22,6 @@ impl TransformMode {
         match mode {
             Some("text-encoder") => Self::TextEncoder,
             Some("text-decoder") => Self::TextDecoder,
-            Some("compression") | Some("decompression") => Self::Compression,
             _ if has_transformer => Self::Callback,
             _ => Self::Identity,
         }
@@ -36,7 +34,6 @@ impl TransformMode {
             Self::Callback => TransformWriteAlgorithm::Callback,
             Self::TextEncoder => TransformWriteAlgorithm::TextEncoder,
             Self::TextDecoder => TransformWriteAlgorithm::TextDecoder,
-            Self::Compression => TransformWriteAlgorithm::Compression,
         }
     }
 
@@ -45,7 +42,6 @@ impl TransformMode {
         match self {
             Self::Callback => TransformFlushAlgorithm::Callback,
             Self::TextDecoder => TransformFlushAlgorithm::TextDecoder,
-            Self::Compression => TransformFlushAlgorithm::Compression,
             Self::Identity | Self::TextEncoder => TransformFlushAlgorithm::None,
         }
     }
@@ -54,7 +50,7 @@ impl TransformMode {
     pub const fn cancel_algorithm(self) -> TransformCancelAlgorithm {
         match self {
             Self::Callback => TransformCancelAlgorithm::Callback,
-            Self::Identity | Self::TextEncoder | Self::TextDecoder | Self::Compression => {
+            Self::Identity | Self::TextEncoder | Self::TextDecoder => {
                 TransformCancelAlgorithm::None
             }
         }
@@ -67,7 +63,6 @@ pub enum TransformWriteAlgorithm {
     Callback,
     TextEncoder,
     TextDecoder,
-    Compression,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -75,7 +70,6 @@ pub enum TransformFlushAlgorithm {
     None,
     Callback,
     TextDecoder,
-    Compression,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -627,22 +621,6 @@ mod tests {
                 TransformMode::TextDecoder,
                 TransformWriteAlgorithm::TextDecoder,
                 TransformFlushAlgorithm::TextDecoder,
-                TransformCancelAlgorithm::None,
-            ),
-            (
-                Some("compression"),
-                false,
-                TransformMode::Compression,
-                TransformWriteAlgorithm::Compression,
-                TransformFlushAlgorithm::Compression,
-                TransformCancelAlgorithm::None,
-            ),
-            (
-                Some("decompression"),
-                false,
-                TransformMode::Compression,
-                TransformWriteAlgorithm::Compression,
-                TransformFlushAlgorithm::Compression,
                 TransformCancelAlgorithm::None,
             ),
         ];

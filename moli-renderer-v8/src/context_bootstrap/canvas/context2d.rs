@@ -2,9 +2,7 @@ use super::backing_store::{
     canvas_like_pixels_copy, canvas_owner_from_context, with_canvas_like_pixels_mut,
 };
 use super::helpers::{canonical_canvas_fill_style, canvas_unrestricted_double_arg};
-use super::path::{
-    CANVAS_CONTEXT_PATH_STATE_ID_SLOT, allocate_canvas_path_state_id, with_canvas_path_state_mut,
-};
+use super::state::canvas_path_state;
 use super::*;
 use crate::context_bootstrap::image_data::{
     build_image_data_object, build_image_data_object_with_bytes, image_data_bytes_from_object,
@@ -27,12 +25,52 @@ use std::str::FromStr;
 
 const DEFAULT_IMAGE_SMOOTHING_QUALITY: &str = "low";
 const CANVAS_CONTEXT_LINE_DASH_SLOT: &str = "__moliCanvasContextLineDash";
+const TEXT_METRICS_WIDTH_SLOT: &str = "__moliTextMetricsWidth";
+
+pub(super) fn reset_canvas_context_state<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    context: v8::Local<'s, v8::Object>,
+) {
+    super::helpers::init_canvas_like_context_object(scope, context);
+    let dash = v8::Array::new(scope, 0);
+    set_private_value(scope, context, CANVAS_CONTEXT_LINE_DASH_SLOT, dash.into());
+    super::state::reset_canvas_path_state(scope, context);
+}
 
 #[derive(WebApiObject)]
-#[webapi(interface = "Object")]
+#[webapi(interface = "TextMetrics")]
 struct CanvasTextMetricsDeclaration {
-    #[webapi(data_property)]
+    #[webapi(slot = TEXT_METRICS_WIDTH_SLOT)]
     width: f64,
+}
+
+#[derive(WebApiFunctionTemplate)]
+#[webapi(name = "TextMetrics", enumerable)]
+struct TextMetricsPrototypeDeclaration {
+    #[webapi(accessor_property, getter = text_metrics_width_getter)]
+    width: (),
+}
+
+pub(super) fn install_text_metrics_template_bindings<'s>(
+    scope: &mut v8::PinScope<'s, '_, ()>,
+    template: v8::Local<'s, v8::FunctionTemplate>,
+) {
+    TextMetricsPrototypeDeclaration::initialize_prototype_template(
+        scope,
+        template.prototype_template(scope),
+    );
+}
+
+fn text_metrics_width_getter<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'_, v8::Value>,
+) {
+    let Some(width) = get_private_value(scope, args.this(), TEXT_METRICS_WIDTH_SLOT) else {
+        throw_type_error(scope, "TextMetrics.width called on incompatible receiver.");
+        return;
+    };
+    rv.set(width);
 }
 
 #[derive(
@@ -262,23 +300,6 @@ struct CanvasContextEllipseArgs {
     end_angle: f64,
     #[webidl(default = false)]
     counterclockwise: bool,
-}
-
-#[derive(webidl::WebIdlArgs)]
-#[webidl(prefix = "CanvasRenderingContext2D.transform")]
-struct CanvasContextTransformArgs {
-    #[webidl(required)]
-    a: f64,
-    #[webidl(required)]
-    b: f64,
-    #[webidl(required)]
-    c: f64,
-    #[webidl(required)]
-    d: f64,
-    #[webidl(required)]
-    e: f64,
-    #[webidl(required)]
-    f: f64,
 }
 
 fn require_canvas_context_receiver<'s>(
@@ -752,10 +773,8 @@ pub(crate) fn canvas_context_rect_callback<'s>(
     let Some(parsed) = webidl::parse_args::<CanvasContextRectPathArgs>(scope, &args) else {
         return;
     };
-    let Some(id) = ensure_canvas_context_path_state_id(scope, args.this()) else {
-        return;
-    };
-    with_canvas_path_state_mut(id, |state| {
+    let path_state = canvas_path_state(scope, args.this());
+    with_path_state(&path_state, |state| {
         state.rect(parsed.x, parsed.y, parsed.width, parsed.height);
     });
 }
@@ -768,10 +787,8 @@ pub(crate) fn canvas_context_begin_path_callback<'s>(
     if !require_canvas_context_receiver(scope, args.this(), "beginPath") {
         return;
     }
-    let Some(id) = ensure_canvas_context_path_state_id(scope, args.this()) else {
-        return;
-    };
-    with_canvas_path_state_mut(id, |state| state.begin_path());
+    let path_state = canvas_path_state(scope, args.this());
+    with_path_state(&path_state, |state| state.begin_path());
 }
 
 pub(crate) fn canvas_context_close_path_callback<'s>(
@@ -782,10 +799,8 @@ pub(crate) fn canvas_context_close_path_callback<'s>(
     if !require_canvas_context_receiver(scope, args.this(), "closePath") {
         return;
     }
-    let Some(id) = ensure_canvas_context_path_state_id(scope, args.this()) else {
-        return;
-    };
-    with_canvas_path_state_mut(id, |state| state.close_path());
+    let path_state = canvas_path_state(scope, args.this());
+    with_path_state(&path_state, |state| state.close_path());
 }
 
 pub(crate) fn canvas_context_move_to_callback<'s>(
@@ -799,10 +814,8 @@ pub(crate) fn canvas_context_move_to_callback<'s>(
     let Some(parsed) = webidl::parse_args::<CanvasContextMoveToArgs>(scope, &args) else {
         return;
     };
-    let Some(id) = ensure_canvas_context_path_state_id(scope, args.this()) else {
-        return;
-    };
-    with_canvas_path_state_mut(id, |state| state.move_to(parsed.x, parsed.y));
+    let path_state = canvas_path_state(scope, args.this());
+    with_path_state(&path_state, |state| state.move_to(parsed.x, parsed.y));
 }
 
 pub(crate) fn canvas_context_line_to_callback<'s>(
@@ -816,10 +829,8 @@ pub(crate) fn canvas_context_line_to_callback<'s>(
     let Some(parsed) = webidl::parse_args::<CanvasContextLineToArgs>(scope, &args) else {
         return;
     };
-    let Some(id) = ensure_canvas_context_path_state_id(scope, args.this()) else {
-        return;
-    };
-    with_canvas_path_state_mut(id, |state| state.line_to(parsed.x, parsed.y));
+    let path_state = canvas_path_state(scope, args.this());
+    with_path_state(&path_state, |state| state.line_to(parsed.x, parsed.y));
 }
 
 pub(crate) fn canvas_context_quadratic_curve_to_callback<'s>(
@@ -833,10 +844,8 @@ pub(crate) fn canvas_context_quadratic_curve_to_callback<'s>(
     let Some(parsed) = webidl::parse_args::<CanvasContextQuadraticCurveToArgs>(scope, &args) else {
         return;
     };
-    let Some(id) = ensure_canvas_context_path_state_id(scope, args.this()) else {
-        return;
-    };
-    with_canvas_path_state_mut(id, |state| {
+    let path_state = canvas_path_state(scope, args.this());
+    with_path_state(&path_state, |state| {
         state.quadratic_curve_to(parsed.cpx, parsed.cpy, parsed.x, parsed.y);
     });
 }
@@ -852,10 +861,8 @@ pub(crate) fn canvas_context_bezier_curve_to_callback<'s>(
     let Some(parsed) = webidl::parse_args::<CanvasContextBezierCurveToArgs>(scope, &args) else {
         return;
     };
-    let Some(id) = ensure_canvas_context_path_state_id(scope, args.this()) else {
-        return;
-    };
-    with_canvas_path_state_mut(id, |state| {
+    let path_state = canvas_path_state(scope, args.this());
+    with_path_state(&path_state, |state| {
         state.bezier_curve_to(
             parsed.cp1x,
             parsed.cp1y,
@@ -878,16 +885,25 @@ pub(crate) fn canvas_context_arc_callback<'s>(
     let Some(parsed) = webidl::parse_args::<CanvasContextArcArgs>(scope, &args) else {
         return;
     };
+    if ![
+        parsed.x,
+        parsed.y,
+        parsed.radius,
+        parsed.start_angle,
+        parsed.end_angle,
+    ]
+    .into_iter()
+    .all(f64::is_finite)
+    {
+        return;
+    }
     if parsed.radius < 0.0 {
         webidl::throw_index_size_error(scope);
         rv.set_undefined();
         return;
     }
-    let Some(id) = ensure_canvas_context_path_state_id(scope, args.this()) else {
-        rv.set_undefined();
-        return;
-    };
-    with_canvas_path_state_mut(id, |state| {
+    let path_state = canvas_path_state(scope, args.this());
+    with_path_state(&path_state, |state| {
         state.arc(
             parsed.x,
             parsed.y,
@@ -911,16 +927,19 @@ pub(crate) fn canvas_context_arc_to_callback<'s>(
     let Some(parsed) = webidl::parse_args::<CanvasContextArcToArgs>(scope, &args) else {
         return;
     };
+    if ![parsed.x1, parsed.y1, parsed.x2, parsed.y2, parsed.radius]
+        .into_iter()
+        .all(f64::is_finite)
+    {
+        return;
+    }
     if parsed.radius < 0.0 {
         webidl::throw_index_size_error(scope);
         rv.set_undefined();
         return;
     }
-    let Some(id) = ensure_canvas_context_path_state_id(scope, args.this()) else {
-        rv.set_undefined();
-        return;
-    };
-    with_canvas_path_state_mut(id, |state| {
+    let path_state = canvas_path_state(scope, args.this());
+    with_path_state(&path_state, |state| {
         state.arc_to(parsed.x1, parsed.y1, parsed.x2, parsed.y2, parsed.radius);
     });
     rv.set_undefined();
@@ -937,16 +956,27 @@ pub(crate) fn canvas_context_ellipse_callback<'s>(
     let Some(parsed) = webidl::parse_args::<CanvasContextEllipseArgs>(scope, &args) else {
         return;
     };
+    if ![
+        parsed.x,
+        parsed.y,
+        parsed.radius_x,
+        parsed.radius_y,
+        parsed.rotation,
+        parsed.start_angle,
+        parsed.end_angle,
+    ]
+    .into_iter()
+    .all(f64::is_finite)
+    {
+        return;
+    }
     if parsed.radius_x < 0.0 || parsed.radius_y < 0.0 {
         webidl::throw_index_size_error(scope);
         rv.set_undefined();
         return;
     }
-    let Some(id) = ensure_canvas_context_path_state_id(scope, args.this()) else {
-        rv.set_undefined();
-        return;
-    };
-    with_canvas_path_state_mut(id, |state| {
+    let path_state = canvas_path_state(scope, args.this());
+    with_path_state(&path_state, |state| {
         state.ellipse(
             parsed.x,
             parsed.y,
@@ -976,10 +1006,8 @@ pub(crate) fn canvas_context_translate_callback<'s>(
     let Some(y) = canvas_required_unrestricted_double_arg(scope, &args, 1, prefix) else {
         return;
     };
-    let Some(id) = ensure_canvas_context_path_state_id(scope, args.this()) else {
-        return;
-    };
-    with_canvas_path_state_mut(id, |state| state.translate(x, y));
+    let path_state = canvas_path_state(scope, args.this());
+    with_path_state(&path_state, |state| state.translate(x, y));
 }
 
 pub(crate) fn canvas_context_scale_callback<'s>(
@@ -997,10 +1025,8 @@ pub(crate) fn canvas_context_scale_callback<'s>(
     let Some(y) = canvas_required_unrestricted_double_arg(scope, &args, 1, prefix) else {
         return;
     };
-    let Some(id) = ensure_canvas_context_path_state_id(scope, args.this()) else {
-        return;
-    };
-    with_canvas_path_state_mut(id, |state| state.scale(x, y));
+    let path_state = canvas_path_state(scope, args.this());
+    with_path_state(&path_state, |state| state.scale(x, y));
 }
 
 pub(crate) fn canvas_context_rotate_callback<'s>(
@@ -1015,10 +1041,8 @@ pub(crate) fn canvas_context_rotate_callback<'s>(
     let Some(angle) = canvas_required_unrestricted_double_arg(scope, &args, 0, prefix) else {
         return;
     };
-    let Some(id) = ensure_canvas_context_path_state_id(scope, args.this()) else {
-        return;
-    };
-    with_canvas_path_state_mut(id, |state| state.rotate(angle));
+    let path_state = canvas_path_state(scope, args.this());
+    with_path_state(&path_state, |state| state.rotate(angle));
 }
 
 pub(crate) fn canvas_context_transform_callback<'s>(
@@ -1029,14 +1053,14 @@ pub(crate) fn canvas_context_transform_callback<'s>(
     if !require_canvas_context_receiver(scope, args.this(), "transform") {
         return;
     }
-    let Some(parsed) = webidl::parse_args::<CanvasContextTransformArgs>(scope, &args) else {
+    let Some([a, b, c, d, e, f]) =
+        super::transform::transform_arguments(scope, &args, "CanvasRenderingContext2D.transform")
+    else {
         return;
     };
-    let Some(id) = ensure_canvas_context_path_state_id(scope, args.this()) else {
-        return;
-    };
-    with_canvas_path_state_mut(id, |state| {
-        state.concatenate_transform(parsed.a, parsed.b, parsed.c, parsed.d, parsed.e, parsed.f);
+    let path_state = canvas_path_state(scope, args.this());
+    with_path_state(&path_state, |state| {
+        state.concatenate_transform(a, b, c, d, e, f);
     });
 }
 
@@ -1048,14 +1072,12 @@ pub(crate) fn canvas_context_set_transform_callback<'s>(
     if !require_canvas_context_receiver(scope, args.this(), "setTransform") {
         return;
     }
-    let Some(parsed) = webidl::parse_args::<CanvasContextTransformArgs>(scope, &args) else {
+    let Some([a, b, c, d, e, f]) = super::transform::set_transform_arguments(scope, &args) else {
         return;
     };
-    let Some(id) = ensure_canvas_context_path_state_id(scope, args.this()) else {
-        return;
-    };
-    with_canvas_path_state_mut(id, |state| {
-        state.set_transform(parsed.a, parsed.b, parsed.c, parsed.d, parsed.e, parsed.f);
+    let path_state = canvas_path_state(scope, args.this());
+    with_path_state(&path_state, |state| {
+        state.set_transform(a, b, c, d, e, f);
     });
 }
 
@@ -1067,10 +1089,8 @@ pub(crate) fn canvas_context_reset_transform_callback<'s>(
     if !require_canvas_context_receiver(scope, args.this(), "resetTransform") {
         return;
     }
-    let Some(id) = ensure_canvas_context_path_state_id(scope, args.this()) else {
-        return;
-    };
-    with_canvas_path_state_mut(id, |state| state.reset_transform());
+    let path_state = canvas_path_state(scope, args.this());
+    with_path_state(&path_state, |state| state.reset_transform());
 }
 
 pub(crate) fn canvas_context_fill_callback<'s>(
@@ -1084,18 +1104,15 @@ pub(crate) fn canvas_context_fill_callback<'s>(
     let Some(canvas) = canvas_owner_from_context(scope, args.this()) else {
         return;
     };
-    let Some(id) = ensure_canvas_context_path_state_id(scope, args.this()) else {
-        rv.set_undefined();
-        return;
-    };
-    let fragment = with_canvas_path_state_mut(id, |state| {
-        if state.is_empty() {
+    let path_state = canvas_path_state(scope, args.this());
+    let fragment = with_path_state(&path_state, |state| {
+        if state.is_empty() || state.inverse_transform().is_none() {
             return None;
         }
         Some(PaintFragment::Fill {
             shape: PaintShape::Path(state.paint_path()),
             brush: PaintBrush::Solid(context_fill_color(scope, args.this())),
-            transform: state.transform(),
+            transform: PaintTransform2D::IDENTITY,
         })
     });
     if let Some(fragment) = fragment {
@@ -1115,18 +1132,15 @@ pub(crate) fn canvas_context_stroke_callback<'s>(
     let Some(canvas) = canvas_owner_from_context(scope, args.this()) else {
         return;
     };
-    let Some(id) = ensure_canvas_context_path_state_id(scope, args.this()) else {
-        rv.set_undefined();
-        return;
-    };
-    let fragment = with_canvas_path_state_mut(id, |state| {
+    let path_state = canvas_path_state(scope, args.this());
+    let fragment = with_path_state(&path_state, |state| {
         if state.is_empty() {
             return None;
         }
         Some(PaintFragment::Stroke(context_stroke(
             scope,
             args.this(),
-            state.paint_path(),
+            state.stroke_path()?,
             state.transform(),
         )))
     });
@@ -1164,17 +1178,17 @@ pub(crate) fn canvas_context_stroke_rect_callback<'s>(
         rv.set_undefined();
         return;
     };
-    let Some(id) = ensure_canvas_context_path_state_id(scope, args.this()) else {
-        rv.set_undefined();
+    let path_state = canvas_path_state(scope, args.this());
+    // strokeRect must not alter the current default path.
+    let path = with_path_state(&path_state, |state| {
+        let mut rect_path = super::path::Canvas2dPathState::default();
+        rect_path.rect(x, y, width, height);
+        state.inverse_transform()?;
+        Some((rect_path.paint_path(), state.transform()))
+    });
+    let Some((path, transform)) = path else {
         return;
     };
-    // strokeRect must not alter the current default path.
-    let (path, transform) = with_canvas_path_state_mut(id, |state| {
-        let mut rect_path = state.clone();
-        rect_path.begin_path();
-        rect_path.rect(x, y, width, height);
-        (rect_path.paint_path(), state.transform())
-    });
     let stroke = context_stroke(scope, args.this(), path, transform);
     rasterize_canvas_fragment(scope, canvas, PaintFragment::Stroke(stroke));
     rv.set_undefined();
@@ -1201,7 +1215,7 @@ pub(crate) fn canvas_context_line_width_setter_callback<'s>(
     if !require_canvas_context_receiver(scope, args.this(), "lineWidth setter") {
         return;
     }
-    canvas_context_nonnegative_number_assign(
+    canvas_context_positive_number_assign(
         scope,
         args.this(),
         args.get(0),
@@ -1231,7 +1245,7 @@ pub(crate) fn canvas_context_miter_limit_setter_callback<'s>(
     if !require_canvas_context_receiver(scope, args.this(), "miterLimit setter") {
         return;
     }
-    canvas_context_nonnegative_number_assign(
+    canvas_context_positive_number_assign(
         scope,
         args.this(),
         args.get(0),
@@ -1398,7 +1412,7 @@ pub(crate) fn canvas_context_stroke_style_setter_callback<'s>(
     rv.set_undefined();
 }
 
-fn canvas_context_nonnegative_number_assign<'s>(
+fn canvas_context_positive_number_assign<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     holder: v8::Local<'s, v8::Object>,
     value: v8::Local<'s, v8::Value>,
@@ -1411,7 +1425,7 @@ fn canvas_context_nonnegative_number_assign<'s>(
     );
     if let Ok(value) = value {
         let value = f64::from(value);
-        if value.is_finite() && value >= 0.0 {
+        if value.is_finite() && value > 0.0 {
             set_context_number_slot(scope, holder, slot, value);
         }
     }
@@ -1434,16 +1448,11 @@ fn canvas_context_enum_string_assign<'s>(
     }
 }
 
-fn ensure_canvas_context_path_state_id<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    context: v8::Local<'s, v8::Object>,
-) -> Option<u64> {
-    if let Some(id) = context_number_slot(scope, context, CANVAS_CONTEXT_PATH_STATE_ID_SLOT) {
-        return Some(id as u64);
-    }
-    let id = allocate_canvas_path_state_id();
-    set_context_number_slot(scope, context, CANVAS_CONTEXT_PATH_STATE_ID_SLOT, id as f64);
-    Some(id)
+fn with_path_state<T>(
+    state: &std::cell::RefCell<super::path::Canvas2dPathState>,
+    update: impl FnOnce(&mut super::path::Canvas2dPathState) -> T,
+) -> T {
+    update(&mut state.borrow_mut())
 }
 
 fn context_fill_color<'s>(
@@ -1838,6 +1847,9 @@ pub(crate) fn canvas_context_measure_text_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
+    if !require_canvas_context_receiver(scope, args.this(), "measureText") {
+        return;
+    }
     let Some(parsed) = webidl::parse_args::<CanvasContextMeasureTextArgs>(scope, &args) else {
         return;
     };
@@ -1846,10 +1858,25 @@ pub(crate) fn canvas_context_measure_text_callback<'s>(
     let declaration = CanvasTextMetricsDeclaration {
         width: measure_text_width(&parsed.text, &font),
     };
-    let Ok(metrics) = declaration.bind(scope) else {
+    let relevant_context = canvas_context_relevant_context(scope, args.this())
+        .unwrap_or_else(|| scope.get_current_context());
+    let target_scope = &mut v8::ContextScope::new(scope, relevant_context);
+    let Ok(metrics) = declaration.bind(target_scope) else {
         return;
     };
     rv.set(metrics.into());
+}
+
+fn canvas_context_relevant_context<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    context: v8::Local<'s, v8::Object>,
+) -> Option<v8::Local<'s, v8::Context>> {
+    canvas_owner_from_context(scope, context)
+        .and_then(|canvas| {
+            crate::context_bootstrap::shared::node_owner_document_or_self(scope, canvas)
+        })
+        .and_then(|document| crate::native_bridge::node_relevant_context(scope, document))
+        .or_else(|| context.get_creation_context(scope))
 }
 
 pub(crate) fn canvas_context_create_image_data_callback<'s>(

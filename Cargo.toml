@@ -99,6 +99,7 @@ bitflags = "2.11.0"
 boring-sys2 = { package = "btls-sys", git = "https://github.com/Stravia-AI/btls.git", rev = "5ee7faa63188777eb0c1d4a28ef1f465d7bb02b9" }
 boring2 = { package = "btls", git = "https://github.com/Stravia-AI/btls.git", rev = "5ee7faa63188777eb0c1d4a28ef1f465d7bb02b9" }
 brotli = "8"
+brotlic = "0.8.2"
 bytes = "1"
 chromiumoxide_cdp = "0.9.1"
 cidr = "0.3.2"
@@ -116,6 +117,7 @@ dom = { package = "stylo_dom", git = "https://github.com/Stravia-AI/stylo.git", 
 ed448-goldilocks = { version = "=0.14.0-pre.15", default-features = false }
 encoding_rs = "0.8"
 euclid = "=0.22.14"
+fastrand = "2.3.0"
 flate2 = "1.1.9"
 font8x8 = "0.3"
 foreign-types = "0.5"
@@ -244,7 +246,7 @@ selectors = { git = "https://github.com/Stravia-AI/stylo.git", rev = "953bc7f148
 serde = "1.0.228"
 serde_json = "1.0.145"
 serde_path_to_error = "0.1"
-serde_v8 = { git = "https://github.com/Stravia-AI/deno.git", rev = "63326c42f67f11613c399880745ccfe383311328" }
+serde_v8 = { git = "https://github.com/Stravia-AI/deno.git", rev = "da2cf6a9b7acd6a65c5d8a72c7abb7bb5d8bd9ac" }
 servo_arc = { git = "https://github.com/Stravia-AI/stylo.git", rev = "953bc7f148614e2b0c1657e844a57fdde2269302" }
 sha1 = "0.10"
 socket2 = "0.6.3"
@@ -263,7 +265,9 @@ thiserror = "2.0.17"
 tikv-jemalloc-sys = { version = "0.7.1", default-features = false }
 tikv-jemallocator = { version = "0.7.0", default-features = false }
 time = "0.3.47"
-tokio = "1.51.0"
+# Tokio >=1.53 releases a dropped mpsc receiver's waker even while context-wide
+# senders remain (tokio-rs/tokio#8095), avoiding retired renderer I/O driver leaks.
+tokio = "1.53.1"
 tokio-boring2 = { package = "tokio-btls", git = "https://github.com/Stravia-AI/btls.git", rev = "5ee7faa63188777eb0c1d4a28ef1f465d7bb02b9" }
 tokio-rustls = { version = "0.26", default-features = false }
 tokio-stream = "0.1.17"
@@ -276,7 +280,7 @@ typed-num = { version = "0.3.0", default-features = false }
 url = "2.5.7"
 usvg = "=0.48.1"
 uuid = { version = "1.23.1", default-features = false }
-v8 = { git = "https://github.com/Stravia-AI/rusty_v8.git", rev = "01aac5af08108b24da1a821775f48c7fb91167e2" }
+v8 = { git = "https://github.com/Stravia-AI/rusty_v8.git", rev = "ef7a55c0c71ae904b1f963aa33d6d0076168a1b5" }
 vergen-gitcl = "10.0.2"
 wasm_dep_analyzer = { git = "https://github.com/Stravia-AI/wasm_dep_analyzer.git", rev = "c572905c84d734bbacf56e69e572a704b141f9b5" }
 webpki-root-certs = "1.0"

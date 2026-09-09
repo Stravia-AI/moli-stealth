@@ -1,30 +1,15 @@
-//! Canvas 2D current-path geometry.
-//!
-//! The CanvasRenderingContext2D path methods are thin V8 callbacks that
-//! translate into this module's geometry. The accumulated path is kept in a
-//! per-context side table keyed by a private-slot id (V8 private slots can
-//! only hold `Value`, so a numeric id + global map is used instead of storing
-//! a `Vec` directly on the object).
-//!
-//! Path elements map 1:1 onto [`moli_layout::PaintPathElement`] so the
-//! existing `moli_paint::raster_snapshot` pipeline (vello CPU) can fill and
-//! stroke them.
-
-use std::collections::HashMap;
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
+//! Canvas 2D current-path geometry, owned by the context's native state.
 
 use moli_layout::{
     LayoutPoint, LayoutRect, LayoutTransform2D, PaintPath, PaintPathElement, PaintRect,
 };
-use parking_lot::Mutex;
-
-pub(crate) const CANVAS_CONTEXT_PATH_STATE_ID_SLOT: &str = "__moliCanvasContextPathStateId";
 
 /// A Bezier path in the same flat form as a kurbo path: one `MoveTo` starts a
 /// subpath, `Close` ends it, and a new `MoveTo` begins the next one.
 #[derive(Clone, Debug)]
 pub(crate) struct Canvas2dPathState {
+    // Default-path geometry is already in canvas coordinates. The current
+    // transform only affects newly recorded commands, never earlier elements.
     elements: Vec<PaintPathElement>,
     current: (f64, f64),
     current_subpath_start: (f64, f64),
@@ -46,28 +31,6 @@ impl Default for Canvas2dPathState {
     }
 }
 
-static NEXT_CANVAS_PATH_STATE_ID: AtomicU64 = AtomicU64::new(1);
-static CANVAS_PATH_STATES: OnceLock<Mutex<HashMap<u64, Canvas2dPathState>>> = OnceLock::new();
-
-fn canvas_path_states() -> &'static Mutex<HashMap<u64, Canvas2dPathState>> {
-    CANVAS_PATH_STATES.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-pub(crate) fn allocate_canvas_path_state_id() -> u64 {
-    NEXT_CANVAS_PATH_STATE_ID.fetch_add(1, Ordering::Relaxed)
-}
-
-/// Runs `update` against the current-path state for `id`, inserting a fresh
-/// state when the context has never recorded one.
-pub(crate) fn with_canvas_path_state_mut<T>(
-    id: u64,
-    update: impl FnOnce(&mut Canvas2dPathState) -> T,
-) -> T {
-    let mut states = canvas_path_states().lock();
-    let state = states.entry(id).or_default();
-    update(state)
-}
-
 const TWO_PI: f64 = std::f64::consts::TAU;
 
 impl Canvas2dPathState {
@@ -80,6 +43,10 @@ impl Canvas2dPathState {
     }
 
     pub(super) fn move_to(&mut self, x: f64, y: f64) {
+        if ![x, y].into_iter().all(f64::is_finite) {
+            return;
+        }
+        let (x, y) = self.map_point(x, y);
         self.elements.push(PaintPathElement::MoveTo(point(x, y)));
         self.current = (x, y);
         self.current_subpath_start = (x, y);
@@ -87,8 +54,7 @@ impl Canvas2dPathState {
         self.just_closed = false;
     }
 
-    /// Returns `false` when the path has no subpath, matching the spec: line
-    /// and curve commands must do nothing when the path has no subpaths.
+    /// Reopens a closed subpath; callers establish the initial point for an empty path.
     fn ensure_open_subpath(&mut self) -> bool {
         if !self.has_subpath {
             return false;
@@ -105,17 +71,27 @@ impl Canvas2dPathState {
     }
 
     pub(super) fn line_to(&mut self, x: f64, y: f64) {
-        if !self.ensure_open_subpath() {
+        if ![x, y].into_iter().all(f64::is_finite) {
             return;
         }
+        if !self.ensure_open_subpath() {
+            self.move_to(x, y);
+            return;
+        }
+        let (x, y) = self.map_point(x, y);
         self.elements.push(PaintPathElement::LineTo(point(x, y)));
         self.current = (x, y);
     }
 
     pub(super) fn quadratic_curve_to(&mut self, cpx: f64, cpy: f64, x: f64, y: f64) {
-        if !self.ensure_open_subpath() {
+        if ![cpx, cpy, x, y].into_iter().all(f64::is_finite) {
             return;
         }
+        if !self.ensure_open_subpath() {
+            self.move_to(cpx, cpy);
+        }
+        let (cpx, cpy) = self.map_point(cpx, cpy);
+        let (x, y) = self.map_point(x, y);
         self.elements
             .push(PaintPathElement::QuadTo(point(cpx, cpy), point(x, y)));
         self.current = (x, y);
@@ -130,9 +106,15 @@ impl Canvas2dPathState {
         x: f64,
         y: f64,
     ) {
-        if !self.ensure_open_subpath() {
+        if ![c1x, c1y, c2x, c2y, x, y].into_iter().all(f64::is_finite) {
             return;
         }
+        if !self.ensure_open_subpath() {
+            self.move_to(c1x, c1y);
+        }
+        let (c1x, c1y) = self.map_point(c1x, c1y);
+        let (c2x, c2y) = self.map_point(c2x, c2y);
+        let (x, y) = self.map_point(x, y);
         self.elements.push(PaintPathElement::CubicTo(
             point(c1x, c1y),
             point(c2x, c2y),
@@ -151,6 +133,11 @@ impl Canvas2dPathState {
     }
 
     pub(super) fn rect(&mut self, x: f64, y: f64, width: f64, height: f64) {
+        if ![x, y, width, height].into_iter().all(f64::is_finite)
+            || self.inverse_transform().is_none()
+        {
+            return;
+        }
         self.move_to(x, y);
         self.line_to(x + width, y);
         self.line_to(x + width, y + height);
@@ -158,8 +145,7 @@ impl Canvas2dPathState {
         self.close_path();
     }
 
-    /// Appends the path for `ctx.arc(...)`. Returns `false` when the arguments
-    /// are non-finite or the radius is negative (caller reports the error).
+    /// Canvas arcs use positive angles clockwise in the screen's y-down space.
     pub(super) fn arc(
         &mut self,
         x: f64,
@@ -169,33 +155,9 @@ impl Canvas2dPathState {
         end: f64,
         ccw: bool,
     ) -> bool {
-        if !x.is_finite()
-            || !y.is_finite()
-            || !radius.is_finite()
-            || !start.is_finite()
-            || !end.is_finite()
-        {
-            return false;
-        }
-        if radius < 0.0 {
-            return false;
-        }
-        if radius == 0.0 {
-            return true;
-        }
-        let (start, end) = normalized_arc_angles(start, end, ccw);
-        let start_point = (x + radius * start.cos(), y + radius * start.sin());
-        if !self.has_subpath {
-            self.move_to(start_point.0, start_point.1);
-        } else if self.current != start_point {
-            self.line_to(start_point.0, start_point.1);
-        }
-        self.push_arc_cubics((x, y), radius, start, end, ccw);
-        self.current = (x + radius * end.cos(), y + radius * end.sin());
-        true
+        self.ellipse(x, y, radius, radius, 0.0, start, end, ccw)
     }
 
-    /// Appends the path for `ctx.ellipse(...)`.
     pub(super) fn ellipse(
         &mut self,
         x: f64,
@@ -207,186 +169,88 @@ impl Canvas2dPathState {
         end: f64,
         ccw: bool,
     ) -> bool {
-        if !x.is_finite()
-            || !y.is_finite()
-            || !radius_x.is_finite()
-            || !radius_y.is_finite()
-            || !rotation.is_finite()
-            || !start.is_finite()
-            || !end.is_finite()
+        if ![x, y, radius_x, radius_y, rotation, start, end]
+            .into_iter()
+            .all(f64::is_finite)
+            || radius_x < 0.0
+            || radius_y < 0.0
+            || self.inverse_transform().is_none()
         {
             return false;
         }
-        if radius_x < 0.0 || radius_y < 0.0 {
-            return false;
-        }
-        if radius_x == 0.0 || radius_y == 0.0 {
-            return true;
-        }
-        let (start, end) = normalized_arc_angles(start, end, ccw);
-        // Map unit-circle angles through the ellipse's scale + rotation.
-        let ellipse_transform = LayoutTransform2D::IDENTITY
-            .concatenate(LayoutTransform2D::rotation(rotation))
-            .concatenate(LayoutTransform2D::scale(radius_x, radius_y))
-            .concatenate(LayoutTransform2D::translation(x as f32, y as f32));
-        let start_point = transform_point(ellipse_transform, start.cos(), start.sin());
-        if !self.has_subpath {
-            self.move_to(start_point.0, start_point.1);
-        } else if self.current != start_point {
-            self.line_to(start_point.0, start_point.1);
-        }
-        self.push_ellipse_cubics(ellipse_transform, start, end, ccw);
-        let end_point = transform_point(ellipse_transform, end.cos(), end.sin());
-        self.current = end_point;
+        let (start, sweep) = arc_angles(start, end, ccw);
+        self.append_arc(kurbo::Arc::new(
+            (x, y),
+            (radius_x, radius_y),
+            start,
+            sweep,
+            rotation.rem_euclid(TWO_PI),
+        ));
         true
     }
 
-    /// Appends the path for `ctx.arcTo(...)`.
     pub(super) fn arc_to(&mut self, x1: f64, y1: f64, x2: f64, y2: f64, radius: f64) -> bool {
-        if !x1.is_finite()
-            || !y1.is_finite()
-            || !x2.is_finite()
-            || !y2.is_finite()
-            || !radius.is_finite()
-        {
-            return false;
-        }
-        if radius < 0.0 {
+        if ![x1, y1, x2, y2, radius].into_iter().all(f64::is_finite) || radius < 0.0 {
             return false;
         }
         if !self.has_subpath {
+            self.move_to(x1, y1);
             return true;
         }
-        let (x0, y0) = self.current;
-        let (p1, p2) = ((x1, y1), (x2, y2));
-        if (x0, y0) == p1 || p1 == p2 || radius == 0.0 {
+        let Some(inverse) = self.inverse_transform() else {
+            self.line_to(x1, y1);
+            return true;
+        };
+        // arcTo constructs a circular arc in the current user coordinate
+        // system. The previous point was recorded under a possibly older CTM.
+        let p0 = inverse * kurbo::Point::from(self.current);
+        let p1 = kurbo::Point::new(x1, y1);
+        let p2 = kurbo::Point::new(x2, y2);
+        let incoming = p0 - p1;
+        let outgoing = p2 - p1;
+        if incoming.hypot() == 0.0 || outgoing.hypot() == 0.0 || radius == 0.0 {
             self.line_to(x1, y1);
             return true;
         }
-        let (x01, y01) = (p1.0 - x0, p1.1 - y0);
-        let (x12, y12) = (p2.0 - p1.0, p2.1 - p1.1);
-        let d01 = x01.hypot(y01);
-        let d12 = x12.hypot(y12);
-        if d01 <= f64::EPSILON || d12 <= f64::EPSILON {
+        // Both rays originate at the corner. There is no radius clamp: the
+        // tangent points may lie beyond either of the supplied line segments.
+        let u = incoming / incoming.hypot();
+        let v = outgoing / outgoing.hypot();
+        let cross = u.cross(v);
+        if cross == 0.0 || !cross.is_finite() {
             self.line_to(x1, y1);
             return true;
         }
-        let cross = x01 * y12 - y01 * x12;
-        if cross.abs() <= f64::EPSILON {
-            self.line_to(x1, y1);
-            return true;
-        }
-        let (ux01, uy01) = (x01 / d01, y01 / d01);
-        let (ux12, uy12) = (x12 / d12, y12 / d12);
-        let cos_theta = (x01 * x12 + y01 * y12) / (d01 * d12);
-        let cos_theta = cos_theta.clamp(-1.0, 1.0);
-        let theta = cos_theta.acos();
-        let half = theta / 2.0;
-        let tan_half = half.tan();
-        if !tan_half.is_finite() || tan_half.abs() <= f64::EPSILON {
-            self.line_to(x1, y1);
-            return true;
-        }
-        let max_radius = d01.min(d12) * tan_half;
-        let radius = radius.min(max_radius);
-        let tangent = radius / tan_half;
-        let (ta_x, ta_y) = (p1.0 + ux01 * tangent, p1.1 + uy01 * tangent);
-        let (tb_x, tb_y) = (p1.0 + ux12 * tangent, p1.1 + uy12 * tangent);
-        let (bx, by) = normalize((ux01 + ux12, uy01 + uy12));
-        let sin_half = half.sin();
-        if !sin_half.is_finite() || sin_half.abs() <= f64::EPSILON {
-            self.line_to(x1, y1);
-            return true;
-        }
-        let center = (
-            p1.0 + bx * (radius / sin_half),
-            p1.1 + by * (radius / sin_half),
-        );
-        let start_angle = (ta_y - center.1).atan2(ta_x - center.0);
-        let end_angle = (tb_y - center.1).atan2(tb_x - center.0);
-        let ccw = cross < 0.0;
-        self.push_arc_cubics(center, radius, start_angle, end_angle, ccw);
-        self.current = (tb_x, tb_y);
+        let tangent_distance = radius * ((1.0 + u.dot(v).clamp(-1.0, 1.0)) / cross.abs());
+        let tangent = p1 + u * tangent_distance;
+        let center = tangent + kurbo::Vec2::new(-u.y, u.x) * (radius * cross.signum());
+        let end = p1 + v * tangent_distance;
+        let start_angle = (tangent - center).atan2();
+        let end_angle = (end - center).atan2();
+        let (start, sweep) = arc_angles(start_angle, end_angle, cross > 0.0);
+        self.append_arc(kurbo::Arc::new(center, (radius, radius), start, sweep, 0.0));
         true
     }
 
-    /// Adds a straight connector to the current point when `connect` and the
-    /// current point differs from `target`, then appends cubic approximations
-    /// of the arc from `start` to `end` around `center` with radius `radius`.
-    fn push_arc_cubics(
-        &mut self,
-        center: (f64, f64),
-        radius: f64,
-        start: f64,
-        end: f64,
-        ccw: bool,
-    ) {
-        let sweep = signed_arc_sweep(start, end, ccw);
-        if sweep.abs() <= f64::EPSILON {
-            return;
-        }
-        let segments = (sweep.abs() / (std::f64::consts::FRAC_PI_2)).ceil() as usize;
-        let segments = segments.max(1);
-        let delta = sweep / segments as f64;
-        let mut angle = start;
-        for _ in 0..segments {
-            let next = angle + delta;
-            let (cos_a, sin_a) = angle.sin_cos();
-            let (cos_b, sin_b) = next.sin_cos();
-            let alpha = (4.0 / 3.0) * (1.0 - (delta / 2.0).cos()) / (delta / 2.0).sin();
-            let (p0x, p0y) = (center.0 + radius * cos_a, center.1 + radius * sin_a);
-            let (c1x, c1y) = (p0x - alpha * radius * sin_a, p0y + alpha * radius * cos_a);
-            let (p3x, p3y) = (center.0 + radius * cos_b, center.1 + radius * sin_b);
-            let (c2x, c2y) = (p3x + alpha * radius * sin_b, p3y - alpha * radius * cos_b);
-            self.elements.push(PaintPathElement::CubicTo(
-                point(c1x, c1y),
-                point(c2x, c2y),
-                point(p3x, p3y),
-            ));
-            self.current = (p3x, p3y);
-            angle = next;
-        }
-    }
+    fn append_arc(&mut self, arc: kurbo::Arc) {
+        use kurbo::{PathEl, Shape};
 
-    fn push_ellipse_cubics(
-        &mut self,
-        transform: LayoutTransform2D,
-        start: f64,
-        end: f64,
-        ccw: bool,
-    ) {
-        let sweep = signed_arc_sweep(start, end, ccw);
-        if sweep.abs() <= f64::EPSILON {
-            return;
-        }
-        let segments = (sweep.abs() / (std::f64::consts::FRAC_PI_2)).ceil() as usize;
-        let segments = segments.max(1);
-        let delta = sweep / segments as f64;
-        let mut angle = start;
-        for _ in 0..segments {
-            let next = angle + delta;
-            let (cos_a, sin_a) = angle.sin_cos();
-            let (cos_b, sin_b) = next.sin_cos();
-            let alpha = (4.0 / 3.0) * (1.0 - (delta / 2.0).cos()) / (delta / 2.0).sin();
-            let (p0x, p0y) = transform_point(transform, cos_a, sin_a);
-            let (p3x, p3y) = transform_point(transform, cos_b, sin_b);
-            // Tangents on the unit circle, then mapped through the transform.
-            let tangent_a = radius_tangent(transform, -sin_a, cos_a);
-            let tangent_b = radius_tangent(transform, -sin_b, cos_b);
-            let (c1x, c1y) = (p0x + alpha * tangent_a.0, p0y + alpha * tangent_a.1);
-            let (c2x, c2y) = (p3x - alpha * tangent_b.0, p3y - alpha * tangent_b.1);
-            self.elements.push(PaintPathElement::CubicTo(
-                point(c1x, c1y),
-                point(c2x, c2y),
-                point(p3x, p3y),
-            ));
-            self.current = (p3x, p3y);
-            angle = next;
+        // A relative floor also bounds subdivision for enormous but finite
+        // radii. It prevents resource usage growing without bound with radius.
+        let tolerance = 0.01_f64.max(arc.radii.x.max(arc.radii.y) / 4096.0);
+        for element in arc.path_elements(tolerance) {
+            match element {
+                PathEl::MoveTo(p) => self.line_to(p.x, p.y),
+                PathEl::CurveTo(a, b, p) => self.bezier_curve_to(a.x, a.y, b.x, b.y, p.x, p.y),
+                _ => unreachable!("kurbo arcs contain only a start point and cubic segments"),
+            }
         }
     }
 
     pub(super) fn set_transform(&mut self, a: f64, b: f64, c: f64, d: f64, e: f64, f: f64) {
-        self.transform = LayoutTransform2D::new([a, b, c, d, e, f]);
+        if [a, b, c, d, e, f].into_iter().all(f64::is_finite) {
+            self.transform = LayoutTransform2D::new([a, b, c, d, e, f]);
+        }
     }
 
     pub(super) fn reset_transform(&mut self) {
@@ -394,75 +258,115 @@ impl Canvas2dPathState {
     }
 
     pub(super) fn translate(&mut self, x: f64, y: f64) {
-        self.transform = self
-            .transform
-            .concatenate(LayoutTransform2D::translation(x as f32, y as f32));
+        self.concatenate_transform(1.0, 0.0, 0.0, 1.0, x, y);
     }
 
     pub(super) fn scale(&mut self, x: f64, y: f64) {
-        self.transform = self.transform.concatenate(LayoutTransform2D::scale(x, y));
+        self.concatenate_transform(x, 0.0, 0.0, y, 0.0, 0.0);
     }
 
     pub(super) fn rotate(&mut self, radians: f64) {
-        self.transform = self
-            .transform
-            .concatenate(LayoutTransform2D::rotation(radians));
+        let (sin, cos) = radians.sin_cos();
+        self.concatenate_transform(cos, sin, -sin, cos, 0.0, 0.0);
     }
 
     pub(super) fn concatenate_transform(&mut self, a: f64, b: f64, c: f64, d: f64, e: f64, f: f64) {
-        self.transform = self
-            .transform
-            .concatenate(LayoutTransform2D::new([a, b, c, d, e, f]));
+        if [a, b, c, d, e, f].into_iter().all(f64::is_finite) {
+            self.transform = self
+                .transform
+                .concatenate(LayoutTransform2D::new([a, b, c, d, e, f]));
+        }
     }
 
     pub(super) fn transform(&self) -> LayoutTransform2D {
         self.transform
     }
 
+    fn map_point(&self, x: f64, y: f64) -> (f64, f64) {
+        let p = kurbo::Affine::new(self.transform.coefficients) * kurbo::Point::new(x, y);
+        (p.x, p.y)
+    }
+
+    pub(super) fn inverse_transform(&self) -> Option<kurbo::Affine> {
+        let transform = kurbo::Affine::new(self.transform.coefficients);
+        let determinant = transform.determinant();
+        // A small nonzero scale is still invertible; do not use EPSILON as
+        // a singularity threshold (e.g. scale(1e-9,1e-9) is valid).
+        (determinant != 0.0 && determinant.is_finite()).then(|| transform.inverse())
+    }
+
+    /// Stroke metrics are in the *current* user space. Bring the frozen path
+    /// back to that space and let the painter transform the resulting stroke,
+    /// so anisotropic line widths, joins and dashes change without moving it.
+    pub(super) fn stroke_path(&self) -> Option<PaintPath> {
+        let inverse = self.inverse_transform()?;
+        let map = |p: LayoutPoint| {
+            let p = inverse * kurbo::Point::new(f64::from(p.x), f64::from(p.y));
+            point(p.x, p.y)
+        };
+        let elements = self
+            .elements
+            .iter()
+            .map(|element| match *element {
+                PaintPathElement::MoveTo(p) => PaintPathElement::MoveTo(map(p)),
+                PaintPathElement::LineTo(p) => PaintPathElement::LineTo(map(p)),
+                PaintPathElement::QuadTo(a, p) => PaintPathElement::QuadTo(map(a), map(p)),
+                PaintPathElement::CubicTo(a, b, p) => {
+                    PaintPathElement::CubicTo(map(a), map(b), map(p))
+                }
+                PaintPathElement::Close => PaintPathElement::Close,
+            })
+            .collect::<Vec<_>>();
+        Some(PaintPath {
+            bounds: path_bounds(&elements),
+            elements,
+        })
+    }
+
     /// Builds an owned `PaintPath` with conservative local bounds.
     pub(super) fn paint_path(&self) -> PaintPath {
         PaintPath {
             elements: self.elements.clone(),
-            bounds: self.bounds(),
+            bounds: path_bounds(&self.elements),
         }
     }
 
     pub(super) fn is_empty(&self) -> bool {
         self.elements.is_empty()
     }
+}
 
-    fn bounds(&self) -> PaintRect {
-        let mut min_x = f64::INFINITY;
-        let mut min_y = f64::INFINITY;
-        let mut max_x = f64::NEG_INFINITY;
-        let mut max_y = f64::NEG_INFINITY;
-        for element in &self.elements {
-            match *element {
-                PaintPathElement::MoveTo(point) | PaintPathElement::LineTo(point) => {
-                    expand(&mut min_x, &mut min_y, &mut max_x, &mut max_y, point);
-                }
-                PaintPathElement::QuadTo(first, second) => {
-                    expand(&mut min_x, &mut min_y, &mut max_x, &mut max_y, first);
-                    expand(&mut min_x, &mut min_y, &mut max_x, &mut max_y, second);
-                }
-                PaintPathElement::CubicTo(first, second, third) => {
-                    expand(&mut min_x, &mut min_y, &mut max_x, &mut max_y, first);
-                    expand(&mut min_x, &mut min_y, &mut max_x, &mut max_y, second);
-                    expand(&mut min_x, &mut min_y, &mut max_x, &mut max_y, third);
-                }
-                PaintPathElement::Close => {}
+fn path_bounds(elements: &[PaintPathElement]) -> PaintRect {
+    let mut min_x = f64::INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+    for element in elements {
+        match *element {
+            PaintPathElement::MoveTo(point) | PaintPathElement::LineTo(point) => {
+                expand(&mut min_x, &mut min_y, &mut max_x, &mut max_y, point);
             }
+            PaintPathElement::QuadTo(first, second) => {
+                expand(&mut min_x, &mut min_y, &mut max_x, &mut max_y, first);
+                expand(&mut min_x, &mut min_y, &mut max_x, &mut max_y, second);
+            }
+            PaintPathElement::CubicTo(first, second, third) => {
+                expand(&mut min_x, &mut min_y, &mut max_x, &mut max_y, first);
+                expand(&mut min_x, &mut min_y, &mut max_x, &mut max_y, second);
+                expand(&mut min_x, &mut min_y, &mut max_x, &mut max_y, third);
+            }
+            PaintPathElement::Close => {}
         }
-        if !min_x.is_finite() {
-            return LayoutRect::ZERO;
-        }
-        LayoutRect::new(
-            min_x as f32,
-            min_y as f32,
-            (max_x - min_x) as f32,
-            (max_y - min_y) as f32,
-        )
     }
+    if !min_x.is_finite() {
+        return LayoutRect::ZERO;
+    }
+    LayoutRect::new(
+        min_x as f32,
+        min_y as f32,
+        (max_x - min_x) as f32,
+        (max_y - min_y) as f32,
+    )
 }
 
 fn point(x: f64, y: f64) -> LayoutPoint {
@@ -478,51 +382,102 @@ fn expand(min_x: &mut f64, min_y: &mut f64, max_x: &mut f64, max_y: &mut f64, po
     *max_y = (*max_y).max(y);
 }
 
-fn normalize(vector: (f64, f64)) -> (f64, f64) {
-    let length = vector.0.hypot(vector.1);
-    if length <= f64::EPSILON {
-        (0.0, 0.0)
-    } else {
-        (vector.0 / length, vector.1 / length)
-    }
-}
-
-fn normalized_arc_angles(start: f64, end: f64, ccw: bool) -> (f64, f64) {
-    let mut end = end;
-    if ccw {
-        while end > start {
-            end -= TWO_PI;
-        }
-    } else {
-        while end < start {
-            end += TWO_PI;
-        }
-    }
-    (start, end)
-}
-
-/// Signed sweep angle (positive counterclockwise, negative clockwise) in
-/// `(-TAU, TAU]`. An exact full-circle difference is preserved as ±TAU.
-fn signed_arc_sweep(start: f64, end: f64, ccw: bool) -> f64 {
+/// Normalize in constant time, including opposite-sign finite angles whose
+/// subtraction overflows. Never repeatedly add/subtract TAU: at large f64
+/// magnitudes that operation does not advance at all.
+fn arc_angles(start: f64, end: f64, ccw: bool) -> (f64, f64) {
     let difference = end - start;
-    if difference.abs() >= TWO_PI {
-        return if ccw { TWO_PI } else { -TWO_PI };
-    }
-    if ccw {
-        difference.rem_euclid(TWO_PI)
+    let normalized_start = start.rem_euclid(TWO_PI);
+    let sweep = if !ccw && difference >= TWO_PI {
+        TWO_PI
+    } else if ccw && difference <= -TWO_PI {
+        -TWO_PI
+    } else if difference == 0.0 {
+        0.0
     } else {
-        -((start - end).rem_euclid(TWO_PI))
+        let remainder = if difference.is_finite() {
+            difference.rem_euclid(TWO_PI)
+        } else {
+            (end.rem_euclid(TWO_PI) - normalized_start).rem_euclid(TWO_PI)
+        };
+        if ccw {
+            // Like Blink's AdjustEndAngle, preserve a whole turn for opposite-
+            // direction endpoints separated by an exact multiple of TAU.
+            if remainder == 0.0 && difference < 0.0 {
+                0.0
+            } else {
+                remainder - TWO_PI
+            }
+        } else if remainder == 0.0 && difference < 0.0 {
+            TWO_PI
+        } else {
+            remainder
+        }
+    };
+    (normalized_start, sweep)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::f64::consts::FRAC_PI_2;
+
+    #[test]
+    fn arc_angles_preserve_direction_full_turns_and_equal_endpoints() {
+        for (start, end, ccw, expected) in [
+            (0.0, FRAC_PI_2, false, FRAC_PI_2),
+            (0.0, FRAC_PI_2, true, -3.0 * FRAC_PI_2),
+            (0.0, -FRAC_PI_2, true, -FRAC_PI_2),
+            (0.0, -FRAC_PI_2, false, 3.0 * FRAC_PI_2),
+            (0.0, TWO_PI, false, TWO_PI),
+            (0.0, -TWO_PI, true, -TWO_PI),
+            (0.0, TWO_PI, true, -TWO_PI),
+            (0.0, -TWO_PI, false, TWO_PI),
+            (2.0, 2.0, true, 0.0),
+            (2.0, 2.0, false, 0.0),
+        ] {
+            assert!((arc_angles(start, end, ccw).1 - expected).abs() < 1e-12);
+        }
     }
-}
 
-fn transform_point(transform: LayoutTransform2D, x: f64, y: f64) -> (f64, f64) {
-    let mapped = transform.map_point(LayoutPoint::new(x as f32, y as f32));
-    (f64::from(mapped.x), f64::from(mapped.y))
-}
+    #[test]
+    fn finite_extreme_angles_produce_bounded_path_work() {
+        for start in [0.0, 1e20, -1e20, f64::MAX, -f64::MAX] {
+            for end in [0.0, 1e20, -1e20, f64::MAX, -f64::MAX] {
+                for ccw in [false, true] {
+                    let (angle, sweep) = arc_angles(start, end, ccw);
+                    assert!(angle.is_finite() && (0.0..TWO_PI).contains(&angle));
+                    assert!(sweep.is_finite() && sweep.abs() <= TWO_PI);
+                    assert!(if ccw { sweep <= 0.0 } else { sweep >= 0.0 });
+                    let mut state = Canvas2dPathState::default();
+                    assert!(state.arc(10.0, 10.0, 5.0, start, end, ccw));
+                    assert!(state.elements.len() <= 7);
+                }
+            }
+        }
+    }
 
-/// Maps a unit-circle tangent through the ellipse's linear part only
-/// (scale + rotation, excluding translation).
-fn radius_tangent(transform: LayoutTransform2D, x: f64, y: f64) -> (f64, f64) {
-    let [a, b, c, d, _, _] = transform.coefficients;
-    (a * x + c * y, b * x + d * y)
+    #[test]
+    fn arc_to_has_the_correct_tangent_and_endpoint() {
+        let mut state = Canvas2dPathState::default();
+        state.move_to(0.0, 0.0);
+        assert!(state.arc_to(10.0, 0.0, 10.0, 10.0, 5.0));
+        let PaintPathElement::LineTo(tangent) = state.elements[1] else {
+            panic!("arcTo must connect to its first tangent");
+        };
+        assert!((tangent.x - 5.0).abs() < 1e-5 && tangent.y.abs() < 1e-5);
+        assert!((state.current.0 - 10.0).abs() < 1e-5);
+        assert!((state.current.1 - 5.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn rejected_arc_geometry_does_not_mutate_the_path() {
+        let mut state = Canvas2dPathState::default();
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
+            assert!(!state.arc(0.0, 0.0, invalid, 0.0, 1.0, false));
+            assert!(!state.ellipse(0.0, 0.0, 5.0, invalid, 0.0, 0.0, 1.0, false));
+            assert!(!state.arc_to(0.0, 0.0, 1.0, 1.0, invalid));
+            assert!(state.is_empty());
+        }
+    }
 }

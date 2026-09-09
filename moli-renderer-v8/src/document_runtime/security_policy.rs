@@ -162,6 +162,11 @@ impl DocumentPolicyContainer {
                     headers,
                     final_url,
                 ),
+            permissions_policy:
+                crate::permissions_policy::DocumentPermissionsPolicy::from_navigation_response_headers(
+                    headers,
+                    final_url,
+                ),
             ..Self::default()
         }
     }
@@ -2229,26 +2234,28 @@ mod tests {
             DocumentSandboxPolicy {
                 forces_opaque_origin: true,
                 allows_scripts: false,
+                allows_modals: false,
                 allows_popups_to_escape: false,
                 sandboxes_document_domain: true,
             }
         );
 
         runtime.set_response_content_security_policies(&[String::from(
-            "sandbox allow-scripts allow-same-origin allow-popups-to-escape-sandbox",
+            "sandbox allow-scripts allow-same-origin allow-modals allow-popups-to-escape-sandbox",
         )]);
         assert_eq!(
             runtime.document_sandbox_policy(),
             DocumentSandboxPolicy {
                 forces_opaque_origin: false,
                 allows_scripts: true,
+                allows_modals: true,
                 allows_popups_to_escape: true,
                 sandboxes_document_domain: true,
             }
         );
 
         runtime.set_response_content_security_policies(&[
-            String::from("sandbox allow-scripts allow-popups-to-escape-sandbox"),
+            String::from("sandbox allow-scripts allow-modals allow-popups-to-escape-sandbox"),
             String::from("sandbox allow-same-origin"),
         ]);
         assert_eq!(
@@ -2256,6 +2263,7 @@ mod tests {
             DocumentSandboxPolicy {
                 forces_opaque_origin: true,
                 allows_scripts: false,
+                allows_modals: false,
                 allows_popups_to_escape: false,
                 sandboxes_document_domain: true,
             }

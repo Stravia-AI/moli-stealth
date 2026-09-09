@@ -1,9 +1,7 @@
 use super::super::window_runtime::{
-    MEDIA_DEVICES_BRAND_SLOT, PERMISSIONS_BRAND_SLOT, build_legacy_storage_quota_object,
-    build_navigator_ua_data_object, install_initial_service_worker_ready_promise,
-    navigator_get_battery_callback, navigator_java_enabled_callback,
-    navigator_media_devices_enumerate_devices_callback,
-    navigator_media_devices_get_user_media_callback, navigator_permissions_query_callback,
+    PERMISSIONS_BRAND_SLOT, build_legacy_storage_quota_object, build_navigator_ua_data_object,
+    install_initial_service_worker_ready_promise, navigator_get_battery_callback,
+    navigator_java_enabled_callback, navigator_permissions_query_callback,
     navigator_send_beacon_callback, navigator_service_worker_controller_getter_callback,
     navigator_service_worker_controllerchange_handler_getter_callback,
     navigator_service_worker_controllerchange_handler_setter_callback,
@@ -21,13 +19,16 @@ use super::super::window_runtime::{
     service_worker_object_set_owner_scope,
 };
 use super::super::*;
+use super::clipboard::{build_clipboard_object, install_clipboard_template_bindings};
 use super::collections::{
     build_navigator_plugin_collections, install_navigator_collection_template_bindings,
 };
+use super::gamepad::navigator_get_gamepads_callback;
 use super::geolocation::{build_geolocation_object, install_geolocation_template_bindings};
 use super::media_capabilities::{
     build_media_capabilities_object, install_media_capabilities_template_bindings,
 };
+use super::media_devices::{build_media_devices_object, install_media_devices_template_bindings};
 use super::navigator_subobjects::{NavigatorSubobject, ensure_navigator_subobject};
 use crate::document_runtime::DomHandle;
 use crate::native_bridge::OwnerDispatchScope;
@@ -106,7 +107,6 @@ const SERVICE_WORKER_CONTAINER_ONMESSAGEERROR_SLOT: &str =
 const SERVICE_WORKER_CONTAINER_ONCONTROLLERCHANGE_SLOT: &str =
     "__moliServiceWorkerContainerOncontrollerchange";
 const SERVICE_WORKER_CONTAINER_CONTROLLER_SLOT: &str = "__moliServiceWorkerContainerController";
-const CLIPBOARD_TEXT_SLOT: &str = "__moliClipboardText";
 pub(in crate::context_bootstrap) const SERVICE_WORKER_OWNER_TOKEN_SLOT: &str =
     "__moliServiceWorkerOwner";
 const USER_ACTIVATION_BRAND_SLOT: &str = "__moliUserActivationBrand";
@@ -212,6 +212,9 @@ struct NavigatorRuntimeDataPrototypeDeclaration {
 #[derive(Default, WebApiFunctionTemplate)]
 #[webapi(name = "Navigator")]
 struct NavigatorPrototypeMethodsDeclaration {
+    #[webapi(method, enumerable, length = 0, callback = navigator_get_gamepads_callback)]
+    get_gamepads: (),
+
     #[webapi(method, enumerable, length = 0, callback = navigator_java_enabled_callback)]
     java_enabled: (),
 
@@ -410,19 +413,6 @@ struct NavigatorUaDataPrototypeMethodsDeclaration {
 }
 
 #[derive(Default, WebApiObject)]
-#[webapi(interface = "MediaDevices")]
-struct MediaDevicesObjectDeclaration {
-    #[webapi(slot = MEDIA_DEVICES_BRAND_SLOT, init = true)]
-    brand: (),
-
-    #[webapi(method, enumerable, length = 0, callback = navigator_media_devices_enumerate_devices_callback)]
-    enumerate_devices: (),
-
-    #[webapi(method, enumerable, length = 1, callback = navigator_media_devices_get_user_media_callback)]
-    get_user_media: (),
-}
-
-#[derive(Default, WebApiObject)]
 #[webapi(interface = "Object")]
 struct ServiceWorkerContainerDeclaration {
     #[webapi(slot = SIMPLE_EVENT_TARGET_SLOT, value = SERVICE_WORKER_CONTAINER_LISTENERS_SLOT)]
@@ -487,19 +477,6 @@ struct ServiceWorkerContainerDeclaration {
         setter = navigator_service_worker_controllerchange_handler_setter_callback
     )]
     oncontrollerchange: (),
-}
-
-#[derive(Default, WebApiObject)]
-#[webapi(interface = "Object")]
-struct ClipboardObjectDeclaration {
-    #[webapi(slot = CLIPBOARD_TEXT_SLOT, init = "")]
-    text: (),
-
-    #[webapi(method, enumerable, length = 0, callback = clipboard_read_text_callback)]
-    read_text: (),
-
-    #[webapi(method, enumerable, length = 1, callback = clipboard_write_text_callback)]
-    write_text: (),
 }
 
 #[derive(Default, WebApiObject)]
@@ -752,44 +729,6 @@ fn navigator_user_activation_state_getter_callback<'s>(
     rv.set(v8::Boolean::new(scope, active).into());
 }
 
-fn set_resolved_promise(
-    scope: &mut v8::PinScope<'_, '_>,
-    rv: &mut v8::ReturnValue<'_, v8::Value>,
-    value: v8::Local<'_, v8::Value>,
-) {
-    let Some(resolver) = v8::PromiseResolver::new(scope) else {
-        rv.set(v8::undefined(scope).into());
-        return;
-    };
-    let promise = resolver.get_promise(scope);
-    let _ = resolver.resolve(scope, value);
-    rv.set(promise.into());
-}
-
-fn clipboard_read_text_callback<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    args: v8::FunctionCallbackArguments<'s>,
-    mut rv: v8::ReturnValue<'_, v8::Value>,
-) {
-    let value = get_private_value(scope, args.this(), CLIPBOARD_TEXT_SLOT)
-        .filter(|value| value.is_string())
-        .unwrap_or_else(|| v8::String::empty(scope).into());
-    set_resolved_promise(scope, &mut rv, value);
-}
-
-fn clipboard_write_text_callback<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    args: v8::FunctionCallbackArguments<'s>,
-    mut rv: v8::ReturnValue<'_, v8::Value>,
-) {
-    let text = args
-        .get(0)
-        .to_string(scope)
-        .unwrap_or_else(|| v8::String::empty(scope));
-    set_private_value(scope, args.this(), CLIPBOARD_TEXT_SLOT, text.into());
-    set_resolved_promise(scope, &mut rv, v8::undefined(scope).into());
-}
-
 fn navigator_connection_event_target_noop_callback<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     args: v8::FunctionCallbackArguments<'s>,
@@ -866,11 +805,13 @@ pub(in crate::context_bootstrap) fn install_navigator_template_bindings<'s>(
     template: v8::Local<'s, v8::FunctionTemplate>,
     interface_name: &str,
 ) {
+    install_clipboard_template_bindings(scope, template, interface_name);
     install_geolocation_template_bindings(scope, template, interface_name);
     install_navigator_collection_template_bindings(scope, template, interface_name);
     install_media_capabilities_template_bindings(scope, template, interface_name);
     let prototype = template.prototype_template(scope);
     match interface_name {
+        "MediaDevices" => install_media_devices_template_bindings(scope, template),
         "Navigator" => {
             NavigatorRuntimeDataPrototypeDeclaration::initialize_prototype_template(
                 scope, prototype,
@@ -903,6 +844,8 @@ fn filter_navigator_secure_context_exposure<'s>(
     secure_context: bool,
 ) -> Result<()> {
     if !secure_context {
+        delete_object_property(scope, prototype, "clipboard")?;
+        delete_object_property(scope, prototype, "mediaDevices")?;
         delete_object_property(scope, prototype, "storage")?;
         delete_object_property(scope, prototype, "storageBuckets")?;
         delete_object_property(scope, prototype, "serviceWorker")?;
@@ -1047,17 +990,13 @@ pub(super) fn build_lazy_navigator_subobject_in_current_realm<'s>(
         | NavigatorSubobject::WebkitPersistentStorage => {
             build_legacy_storage_quota_object(scope)?.into()
         }
-        NavigatorSubobject::MediaDevices => MediaDevicesObjectDeclaration::default()
-            .bind(scope)
-            .map_err(|error| anyhow!("failed to bind MediaDevices object: {error}"))?
+        NavigatorSubobject::MediaDevices => build_media_devices_object(scope)
+            .ok_or_else(|| anyhow!("failed to bind MediaDevices object"))?
             .into(),
         NavigatorSubobject::ServiceWorker => {
             build_service_worker_container(scope, owner_child, owner_popup)?.into()
         }
-        NavigatorSubobject::Clipboard => ClipboardObjectDeclaration::default()
-            .bind(scope)
-            .map_err(|error| anyhow!("failed to bind navigator.clipboard object: {error}"))?
-            .into(),
+        NavigatorSubobject::Clipboard => build_clipboard_object(scope)?.into(),
         NavigatorSubobject::UserActivation => build_user_activation(scope)?.into(),
         NavigatorSubobject::StorageBuckets => {
             build_storage_bucket_manager(scope, owner_child, owner_popup)?.into()

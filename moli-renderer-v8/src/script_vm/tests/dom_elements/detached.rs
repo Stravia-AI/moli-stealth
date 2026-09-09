@@ -124,6 +124,69 @@ fn detached_document_write_preserves_existing_noscript_text() {
 }
 
 #[test]
+fn obsolete_document_and_window_event_methods_are_branded_noops() {
+    let mut vm = new_storage_test_vm("https://obsolete-noop-methods.test/");
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const html = document.implementation.createHTMLDocument("");
+  const xml = document.implementation.createDocument("urn:test", "root");
+  const marker = document.createElement("p");
+  const markerParent = document.body || document.documentElement || document;
+  markerParent.append(marker);
+  const error = callback => {
+    try {
+      callback();
+      return "none";
+    } catch (exception) {
+      return exception.name;
+    }
+  };
+  const shape = (prototype, name) => {
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, name);
+    return [
+      typeof descriptor?.value,
+      descriptor?.value?.name,
+      descriptor?.value?.length,
+      descriptor?.writable,
+      descriptor?.enumerable,
+      descriptor?.configurable
+    ].join(":");
+  };
+
+  const values = [];
+  for (const name of ["clear", "captureEvents", "releaseEvents"]) {
+    values.push(shape(Document.prototype, name));
+    values.push(String(Document.prototype[name].call(document)));
+    values.push(String(Document.prototype[name].call(html, { ignored: true })));
+    values.push(String(Document.prototype[name].call(xml)));
+    values.push(error(() => Document.prototype[name].call({})));
+  }
+  for (const name of ["captureEvents", "releaseEvents"]) {
+    values.push(shape(window, name));
+    values.push(String(window[name].call(window, { ignored: true })));
+    values.push(error(() => window[name].call({})));
+    values.push(error(() => window[name].call(document)));
+    const forged = document.createElement("div");
+    Object.setPrototypeOf(forged, Window.prototype);
+    values.push(error(() => window[name].call(forged)));
+  }
+  values.push(String(marker.isConnected), String(markerParent.contains(marker)));
+  return values.join("|");
+})()
+"#,
+        )
+        .expect("obsolete Document and Window no-op methods should evaluate");
+
+    assert_eq!(
+        result,
+        "function:clear:0:true:true:true|undefined|undefined|undefined|TypeError|function:captureEvents:0:true:true:true|undefined|undefined|undefined|TypeError|function:releaseEvents:0:true:true:true|undefined|undefined|undefined|TypeError|function:captureEvents:0:true:true:true|undefined|TypeError|TypeError|TypeError|function:releaseEvents:0:true:true:true|undefined|TypeError|TypeError|TypeError|true|true"
+    );
+}
+
+#[test]
 fn detached_domparser_query_and_element_collections_use_native_handles() {
     let mut vm = new_storage_test_vm("https://detached-domparser-query.test/");
 
@@ -2676,6 +2739,7 @@ fn detached_global_html_attributes_use_html_element_prototype_accessors() {
     "accessKey",
     "draggable",
     "spellcheck",
+    "writingSuggestions",
     "enterKeyHint",
     "inputMode",
     "autofocus",
@@ -2702,6 +2766,7 @@ fn detached_global_html_attributes_use_html_element_prototype_accessors() {
     descriptors.translate.set.call(element, false);
     descriptors.draggable.set.call(element, true);
     descriptors.spellcheck.set.call(element, false);
+    descriptors.writingSuggestions.set.call(element, false);
     descriptors.tabIndex.set.call(element, 7);
 
     assert(descriptors.title.get.call(element) === "Title", `${label}.title`);
@@ -2717,10 +2782,12 @@ fn detached_global_html_attributes_use_html_element_prototype_accessors() {
     assert(descriptors.translate.get.call(element) === false, `${label}.translate`);
     assert(descriptors.draggable.get.call(element) === true, `${label}.draggable`);
     assert(descriptors.spellcheck.get.call(element) === false, `${label}.spellcheck`);
+    assert(descriptors.writingSuggestions.get.call(element) === "false", `${label}.writingSuggestions`);
     assert(descriptors.tabIndex.get.call(element) === 7, `${label}.tabIndex`);
     assert(element.getAttribute("translate") === "no", `${label}.translate attr`);
     assert(element.getAttribute("draggable") === "true", `${label}.draggable attr`);
     assert(element.getAttribute("spellcheck") === "false", `${label}.spellcheck attr`);
+    assert(element.getAttribute("writingsuggestions") === "false", `${label}.writingsuggestions attr`);
     assert(element.getAttribute("tabindex") === "7", `${label}.tabindex attr`);
 
     descriptors.hidden.set.call(element, false);
@@ -7254,6 +7321,14 @@ fn detached_resource_template_accessors_use_owner_prototypes() {
     if (!condition) throw new Error(message);
   };
   const own = (object, name) => Object.prototype.hasOwnProperty.call(object, name);
+  const throwsTypeError = callback => {
+    try {
+      callback();
+      return false;
+    } catch (error) {
+      return error.name === "TypeError";
+    }
+  };
   const accessor = (prototype, name, hasSetter = true) => {
     const descriptor = Object.getOwnPropertyDescriptor(prototype, name);
     assert(!!descriptor, `${prototype.constructor.name}.${name} descriptor missing`);
@@ -7267,6 +7342,7 @@ fn detached_resource_template_accessors_use_owner_prototypes() {
     accessor(HTMLStyleElement.prototype, name);
   }
   accessor(HTMLLinkElement.prototype, "disabled");
+  accessor(HTMLIFrameElement.prototype, "csp");
   accessor(HTMLIFrameElement.prototype, "sandbox");
   accessor(HTMLIFrameElement.prototype, "allowFullscreen");
   for (const name of ["default", "kind", "src", "srclang", "label"]) {
@@ -7276,10 +7352,14 @@ fn detached_resource_template_accessors_use_owner_prototypes() {
   accessor(HTMLTrackElement.prototype, "track", false);
 
   const div = document.createElement("div");
-  for (const name of ["blocking", "sandbox", "allowFullscreen", "default", "srclang", "readyState", "track"]) {
+  for (const name of ["blocking", "csp", "sandbox", "allowFullscreen", "default", "srclang", "readyState", "track"]) {
     assert(!own(HTMLElement.prototype, name), `${name} should not be on HTMLElement.prototype`);
     assert(!(name in div), `${name} should not be on div`);
   }
+  const cspDescriptor = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, "csp");
+  assert(throwsTypeError(() => cspDescriptor.get.call(div)), "iframe csp getter brand");
+  assert(throwsTypeError(() => cspDescriptor.set.call(div, "script-src 'none'")), "iframe csp setter brand");
+  assert(!div.hasAttribute("csp"), "iframe csp setter must not mutate an incompatible receiver");
 
   const detachedDocument = document.implementation.createHTMLDocument("");
   const styleElements = [document.createElement("style"), detachedDocument.createElement("style")];
@@ -7325,18 +7405,23 @@ fn detached_resource_template_accessors_use_owner_prototypes() {
   }
 
   for (const iframe of iframeElements) {
-    for (const name of ["sandbox", "allowFullscreen"]) {
+    for (const name of ["csp", "sandbox", "allowFullscreen"]) {
       assert(!own(iframe, name), `iframe.${name} should not be own before set`);
     }
+    assert(iframe.csp === "", "iframe csp default");
+    iframe.csp = 123456;
     iframe.sandbox = "allow-scripts";
     iframe.allowFullscreen = true;
+    assert(iframe.csp === "123456" && iframe.getAttribute("csp") === "123456", "iframe csp");
     assert(iframe.sandbox === "allow-scripts" && iframe.getAttribute("sandbox") === "allow-scripts", "iframe sandbox");
     assert(iframe.allowFullscreen === true && iframe.getAttribute("allowfullscreen") === "", "iframe allowFullscreen");
-    for (const name of ["sandbox", "allowFullscreen"]) {
+    for (const name of ["csp", "sandbox", "allowFullscreen"]) {
       assert(!own(iframe, name), `iframe.${name} should stay inherited after set`);
       assert(delete iframe[name], `iframe.${name} delete`);
       assert(!own(iframe, name), `iframe.${name} should stay inherited after delete`);
     }
+    iframe.setAttribute("csp", "default-src 'self'");
+    assert(iframe.csp === "default-src 'self'", "iframe csp after delete");
     assert(iframe.sandbox === "allow-scripts", "iframe sandbox after delete");
     assert(iframe.allowFullscreen === true, "iframe allowFullscreen after delete");
   }

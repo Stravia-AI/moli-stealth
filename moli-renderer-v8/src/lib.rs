@@ -57,6 +57,7 @@ mod frame_owner_model;
 mod host;
 mod host_bindings;
 mod inspector_microtasks;
+mod inspector_session;
 mod javascript_url;
 mod layout_renderer;
 mod link_as;
@@ -79,6 +80,7 @@ mod page_task_queue;
 mod parser_module_evaluation;
 mod parser_module_pending;
 mod parser_script;
+mod permissions_policy;
 mod queue_microtask;
 mod range_boundary;
 mod referrer_policy;
@@ -111,6 +113,7 @@ mod window_document_identity;
 mod window_host;
 mod window_webidl_callback;
 pub(crate) mod worker;
+mod worker_owner_wake;
 mod xml_serializer;
 
 pub(crate) mod planning {

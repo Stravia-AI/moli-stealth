@@ -101,20 +101,6 @@ struct TextDecoderStreamConstructorArgs {
 }
 
 #[derive(webidl::WebIdlArgs)]
-#[webidl(prefix = "CompressionStream")]
-struct CompressionStreamConstructorArgs {
-    #[webidl(required, name = "format")]
-    format: String,
-}
-
-#[derive(webidl::WebIdlArgs)]
-#[webidl(prefix = "DecompressionStream")]
-struct DecompressionStreamConstructorArgs {
-    #[webidl(required, name = "format")]
-    format: String,
-}
-
-#[derive(webidl::WebIdlArgs)]
 #[webidl(prefix = "CountQueuingStrategy")]
 struct CountQueuingStrategyConstructorArgs {
     #[webidl(required, with = parse_queuing_strategy_init_arg)]
@@ -352,86 +338,6 @@ pub(in crate::context_bootstrap) fn text_decoder_stream_constructor_callback<'s>
     TextDecoderStreamObjectDeclaration::new(encoding_name, fatal, ignore_bom)
         .initialize(scope, args.this())
         .expect("TextDecoderStream declaration should initialize object");
-    rv.set(args.this().into());
-}
-
-pub(in crate::context_bootstrap) fn compression_stream_constructor_callback<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    args: v8::FunctionCallbackArguments<'s>,
-    mut rv: v8::ReturnValue<'_, v8::Value>,
-) {
-    construct_compression_stream(scope, args, &mut rv, false);
-}
-
-pub(in crate::context_bootstrap) fn decompression_stream_constructor_callback<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    args: v8::FunctionCallbackArguments<'s>,
-    mut rv: v8::ReturnValue<'_, v8::Value>,
-) {
-    construct_compression_stream(scope, args, &mut rv, true);
-}
-
-fn construct_compression_stream<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    args: v8::FunctionCallbackArguments<'s>,
-    rv: &mut v8::ReturnValue<'_, v8::Value>,
-    decompress: bool,
-) {
-    let interface = if decompress {
-        "DecompressionStream"
-    } else {
-        "CompressionStream"
-    };
-    if !args.is_construct_call() {
-        throw_type_error(
-            scope,
-            &format!("Failed to construct '{interface}': Please use the 'new' operator."),
-        );
-        return;
-    }
-    let parsed_format = if decompress {
-        webidl::parse_args::<DecompressionStreamConstructorArgs>(scope, &args)
-            .map(|parsed| parsed.format)
-    } else {
-        webidl::parse_args::<CompressionStreamConstructorArgs>(scope, &args)
-            .map(|parsed| parsed.format)
-    };
-    let Some(format) = parsed_format else {
-        return;
-    };
-    let codec = match super::compression_codec::CompressionCodec::new(&format, decompress) {
-        Ok(codec) => codec,
-        Err(_) => {
-            throw_type_error(
-                scope,
-                &format!(
-                    "Failed to construct '{interface}': The provided value '{format}' is not a valid enum value of type CompressionFormat."
-                ),
-            );
-            return;
-        }
-    };
-    let mode = if decompress {
-        "decompression"
-    } else {
-        "compression"
-    };
-    initialize_transform_stream_object(scope, args.this(), None, Some(mode), 1.0, None, 0.0, None);
-    let Some(writable) = stream_slot_object(scope, args.this(), TRANSFORM_STREAM_WRITABLE_SLOT)
-    else {
-        throw_type_error(
-            scope,
-            "Failed to initialize compression stream writable endpoint",
-        );
-        return;
-    };
-    super::compression::install_compression_stream_codec(scope, writable, codec);
-    set_private_value(
-        scope,
-        args.this(),
-        super::compression::COMPRESSION_STREAM_BRAND_SLOT,
-        v8::Boolean::new(scope, decompress).into(),
-    );
     rv.set(args.this().into());
 }
 

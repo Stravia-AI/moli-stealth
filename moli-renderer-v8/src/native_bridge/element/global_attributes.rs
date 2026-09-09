@@ -2161,6 +2161,85 @@ pub(in crate::native_bridge) fn node_spellcheck_setter_function<'s>(
     rv.set_undefined();
 }
 
+fn computed_writing_suggestions_value(runtime: &JsContextHost, handle: DomHandle) -> &'static str {
+    let mut current = Some(handle);
+    while let Some(candidate) = current {
+        if let Some(value) = runtime
+            .dom_host()
+            .node(candidate)
+            .and_then(Node::as_element)
+            .and_then(|element| element.attribute_ns("", "writingsuggestions"))
+        {
+            return if value.eq_ignore_ascii_case("false") {
+                "false"
+            } else {
+                "true"
+            };
+        }
+        current = runtime.dom_host().parent_node(candidate);
+    }
+    "true"
+}
+
+pub(in crate::native_bridge) fn node_writing_suggestions_getter_function<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s, v8::Value>,
+) {
+    let Ok((runtime_ptr, handle)) =
+        node_runtime_and_handle_from_object_or_detached(scope, args.this())
+    else {
+        throw_incompatible_getter_receiver(scope, "HTMLElement", "writingSuggestions");
+        return;
+    };
+    let runtime = unsafe { &*runtime_ptr };
+    let is_html_element = runtime
+        .dom_host()
+        .node(handle)
+        .and_then(Node::as_element)
+        .is_some_and(|element| element.namespace() == "http://www.w3.org/1999/xhtml");
+    if !is_html_element {
+        throw_incompatible_getter_receiver(scope, "HTMLElement", "writingSuggestions");
+        return;
+    }
+
+    let value = computed_writing_suggestions_value(runtime, handle);
+    let Some(value) = v8_string(scope, value) else {
+        rv.set_empty_string();
+        return;
+    };
+    rv.set(value.into());
+}
+
+pub(in crate::native_bridge) fn node_writing_suggestions_setter_function<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s, v8::Value>,
+) {
+    let Ok((runtime_ptr, handle)) =
+        node_runtime_and_handle_from_object_or_detached(scope, args.this())
+    else {
+        throw_incompatible_setter_receiver(scope, "HTMLElement", "writingSuggestions");
+        return;
+    };
+    let is_html_element = unsafe { &*runtime_ptr }
+        .dom_host()
+        .node(handle)
+        .and_then(Node::as_element)
+        .is_some_and(|element| element.namespace() == "http://www.w3.org/1999/xhtml");
+    if !is_html_element {
+        throw_incompatible_setter_receiver(scope, "HTMLElement", "writingSuggestions");
+        return;
+    }
+    let Some(value) =
+        property_dom_string_value(scope, args.get(0), "HTMLElement", "writingSuggestions")
+    else {
+        return;
+    };
+    set_reflected_attribute(scope, runtime_ptr, handle, "writingsuggestions", &value);
+    rv.set_undefined();
+}
+
 fn set_keyword_attribute_from_boolean_on_object<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     object: v8::Local<'s, v8::Object>,
@@ -2214,6 +2293,57 @@ pub(in crate::native_bridge) fn node_autofocus_getter_function<'s>(
     rv: v8::ReturnValue<'s, v8::Value>,
 ) {
     boolean_attribute_property_getter_from_object_or_detached(scope, args.this(), "autofocus", rv);
+}
+
+pub(in crate::native_bridge) fn node_focus_group_getter_function<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    rv: v8::ReturnValue<'s, v8::Value>,
+) {
+    attribute_property_getter_from_object_or_detached(scope, args.this(), "focusgroup", rv);
+}
+
+pub(in crate::native_bridge) fn node_focus_group_setter_function<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s, v8::Value>,
+) {
+    set_dom_string_attribute_property_on_object(
+        scope,
+        args.this(),
+        "focusgroup",
+        args.get(0),
+        "HTMLOrSVGOrMathMLElement",
+        "focusGroup",
+    );
+    rv.set_undefined();
+}
+
+pub(in crate::native_bridge) fn node_focus_group_start_getter_function<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    rv: v8::ReturnValue<'s, v8::Value>,
+) {
+    boolean_attribute_property_getter_from_object_or_detached(
+        scope,
+        args.this(),
+        "focusgroupstart",
+        rv,
+    );
+}
+
+pub(in crate::native_bridge) fn node_focus_group_start_setter_function<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s, v8::Value>,
+) {
+    set_boolean_attribute_property_on_object_or_detached(
+        scope,
+        args.this(),
+        "focusgroupstart",
+        args.get(0),
+    );
+    rv.set_undefined();
 }
 
 pub(in crate::native_bridge) fn node_autofocus_setter_function<'s>(

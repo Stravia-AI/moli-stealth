@@ -192,7 +192,14 @@ impl JsContextHost {
                 let existing_document_policy = existing
                     .as_ref()
                     .map(|entry| entry.document_policy_container_snapshot());
-                let name = self.dom_host().get_attribute(handle, "name");
+                // The owner element's `name` attribute seeds the navigable target name only
+                // when the child navigable is created. Preserve later `window.name` writes
+                // across ordinary DOM-to-runtime record refreshes.
+                let name = existing
+                    .as_ref()
+                    .map(|entry| entry.name.clone())
+                    .unwrap_or_else(|| self.dom_host().get_attribute(handle, "name"))
+                    .filter(|value| !value.is_empty());
                 let id = self.dom_host().get_attribute(handle, "id");
                 let credentialless = self
                     .dom_host()
@@ -255,6 +262,20 @@ impl JsContextHost {
                     && child_browsing_context_bootstrap_uses_initial_empty_load(
                         &attribute_bootstrap,
                     );
+                let pending_attribute_bootstrap_commit =
+                    ChildBrowsingContextEntry::pending_attribute_bootstrap_commit_for_refresh(
+                        existing.as_ref(),
+                        is_new,
+                        attribute_bootstrap_changed,
+                        initial_about_blank_document_is_complete,
+                    );
+                let pending_attribute_permissions_policy =
+                    pending_attribute_bootstrap_commit.then(|| {
+                        self.child_browsing_context_permissions_policy_for_navigation(
+                            handle,
+                            &attribute_bootstrap,
+                        )
+                    });
                 if is_new || attribute_bootstrap_changed || frame_identity_changed {
                     self.note_child_frame_load_started_for_parent(handle);
                 }
@@ -317,6 +338,20 @@ impl JsContextHost {
                     content_security_reporting_endpoints: refresh_policy_source
                         .map(|policy| policy.content_security_reporting_endpoints.clone())
                         .unwrap_or_default(),
+                    permissions_policy: if is_new {
+                        // The synchronous initial about:blank Document is
+                        // already subject to the iframe's container policy.
+                        // Use its live inherited origin, not a pending target
+                        // navigation's origin, when applying the allowlist.
+                        self.child_browsing_context_permissions_policy_for_navigation(
+                            handle,
+                            &live_bootstrap,
+                        )
+                    } else {
+                        refresh_policy_source
+                            .map(|policy| policy.permissions_policy)
+                            .unwrap_or_default()
+                    },
                 };
                 let initial_empty_document_init: Option<ChildInitialEmptyDocumentInit> = is_new
                     .then(|| {
@@ -332,16 +367,10 @@ impl JsContextHost {
                         current_document_loader_id: existing.as_ref().and_then(|entry| {
                             entry.current_document_loader_id().map(ToOwned::to_owned)
                         }),
-                        name: name.filter(|value| !value.is_empty()),
+                        name,
                         id: id.filter(|value| !value.is_empty()),
                         attribute_bootstrap,
-                        pending_attribute_bootstrap_commit:
-                            ChildBrowsingContextEntry::pending_attribute_bootstrap_commit_for_refresh(
-                            existing.as_ref(),
-                            is_new,
-                            attribute_bootstrap_changed,
-                            initial_about_blank_document_is_complete,
-                            ),
+                        pending_attribute_bootstrap_commit,
                         pending_live_navigation: existing.as_ref().and_then(|entry| {
                             entry.pending_live_navigation_for_refresh(attribute_bootstrap_changed)
                         }),
@@ -358,7 +387,8 @@ impl JsContextHost {
                         cached_snapshot,
                         document_policy_container,
                         completed_document_network: existing.as_ref().and_then(|entry| {
-                            entry.completed_document_network_for_refresh(attribute_bootstrap_changed)
+                            entry
+                                .completed_document_network_for_refresh(attribute_bootstrap_changed)
                         }),
                         completed_frame_owner_resource_timing: existing.as_ref().and_then(
                             |entry| {
@@ -460,6 +490,11 @@ impl JsContextHost {
                     {
                         self.register_or_update_service_worker_child_client(handle);
                     }
+                }
+                if let Some(policy) = pending_attribute_permissions_policy
+                    && let Some(entry) = self.child_browsing_contexts.get_mut(&handle)
+                {
+                    entry.set_document_permissions_policy(policy);
                 }
                 if attribute_bootstrap_changed {
                     self.cancel_child_meta_refresh_navigation(handle);

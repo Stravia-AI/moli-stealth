@@ -28,6 +28,7 @@ use super::super::{
     },
     media_source::media_source_constructor_callback,
     message_ports::{message_channel_constructor_callback, message_port_constructor_callback},
+    navigator_runtime::clipboard_item_constructor_callback,
     notification_runtime::notification_constructor_callback,
     performance_runtime::performance_observer_constructor_callback,
     range_surface::{
@@ -40,7 +41,7 @@ use super::super::{
     speech_synthesis::speech_synthesis_utterance_constructor_callback,
     streams::{
         byte_length_queuing_strategy_constructor_callback, compression_stream_constructor_callback,
-        count_queuing_strategy_constructor_callback, decompression_stream_constructor_callback,
+        count_queuing_strategy_constructor_callback,
         readable_stream_byob_reader_constructor_callback, readable_stream_constructor_callback,
         readable_stream_default_reader_constructor_callback,
         text_decoder_stream_constructor_callback, text_encoder_stream_constructor_callback,
@@ -54,7 +55,7 @@ use super::super::{
         build_audio_context_constructor_template, build_audio_worklet_node_constructor_template,
         offline_audio_context_constructor_callback,
     },
-    webrtc::rtc_peer_connection_constructor_callback,
+    webrtc::{rtc_ice_candidate_constructor_callback, rtc_peer_connection_constructor_callback},
     websocket::{
         websocket_constructor_callback, websocket_error_constructor_callback,
         websocket_stream_constructor_callback,
@@ -107,6 +108,11 @@ pub(in crate::context_bootstrap) fn build_constructor_template<'s>(
         }
         ConstructorKind::ClipboardEvent => {
             build_event_subclass_template(scope, EventSubclassKind::ClipboardEvent)
+        }
+        ConstructorKind::ClipboardItem => {
+            v8::FunctionTemplate::builder(clipboard_item_constructor_callback)
+                .length(1)
+                .build(scope)
         }
         ConstructorKind::KeyboardEvent => {
             build_event_subclass_template(scope, EventSubclassKind::KeyboardEvent)
@@ -286,12 +292,12 @@ pub(in crate::context_bootstrap) fn build_constructor_template<'s>(
                 .build(scope)
         }
         ConstructorKind::CompressionStream => {
-            v8::FunctionTemplate::builder(compression_stream_constructor_callback)
+            v8::FunctionTemplate::builder(compression_stream_constructor_callback::<false>)
                 .length(1)
                 .build(scope)
         }
         ConstructorKind::DecompressionStream => {
-            v8::FunctionTemplate::builder(decompression_stream_constructor_callback)
+            v8::FunctionTemplate::builder(compression_stream_constructor_callback::<true>)
                 .length(1)
                 .build(scope)
         }
@@ -425,6 +431,11 @@ pub(in crate::context_bootstrap) fn build_constructor_template<'s>(
             .build(scope),
         ConstructorKind::RtcPeerConnection => {
             v8::FunctionTemplate::builder(rtc_peer_connection_constructor_callback)
+                .length(0)
+                .build(scope)
+        }
+        ConstructorKind::RtcIceCandidate => {
+            v8::FunctionTemplate::builder(rtc_ice_candidate_constructor_callback)
                 .length(0)
                 .build(scope)
         }
@@ -605,6 +616,7 @@ pub(in crate::context_bootstrap) fn build_constructor_template<'s>(
         | ConstructorKind::OscillatorNode
         | ConstructorKind::DynamicsCompressorNode
         | ConstructorKind::AnalyserNode
+        | ConstructorKind::BiquadFilterNode
         | ConstructorKind::AudioParam
         | ConstructorKind::AudioBuffer => {
             v8::FunctionTemplate::builder(illegal_constructor_callback)

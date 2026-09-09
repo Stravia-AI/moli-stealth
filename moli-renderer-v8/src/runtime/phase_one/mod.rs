@@ -833,6 +833,112 @@ html, body { display: block; margin: 0; padding: 0 }
     }
 
     #[test]
+    fn layout_renderer_preserves_flex_static_position_edges_across_containing_blocks() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime should build");
+
+        runtime.block_on(tokio::task::LocalSet::new().run_until(async move {
+            let mut page_vm = parse_phase_one_html_into_page_vm_for_test(
+                r#"<!doctype html><html><head><style>
+html,body{display:block;margin:0;padding:0}
+.case{display:flex;box-sizing:border-box;width:200px;height:100px;padding:10px 20px}
+.case>div{position:absolute;width:20px;height:10px}
+#start{background:red}
+#center-parent{justify-content:center;align-items:center}#center{background:green}
+#end-parent{justify-content:flex-end;align-items:flex-end}#end{background:blue}
+#reverse-parent{flex-direction:row-reverse}#reverse{background:yellow}
+#wrap-reverse-parent{flex-wrap:wrap-reverse}#wrap-reverse{background:magenta}
+#rtl-parent{direction:rtl}#rtl{background:cyan}
+#rtl-reverse-parent{direction:rtl;flex-direction:row-reverse}#rtl-reverse{background:maroon}
+#column-parent{flex-direction:column;justify-content:center;align-items:center}
+#column{background:darkgreen}
+#vertical-parent{writing-mode:vertical-rl}#vertical{background:navy}
+#vertical-rtl-parent{writing-mode:vertical-rl;direction:rtl}#vertical-rtl{background:olive}
+#safe-parent{align-items:safe center}#safe{height:100px;background:rgb(123,45,67)}
+</style></head><body>
+<div class=case><div id=start></div></div>
+<div class=case id=center-parent><div id=center></div></div>
+<div class=case id=end-parent><div id=end></div></div>
+<div class=case id=reverse-parent><div id=reverse></div></div>
+<div class=case id=wrap-reverse-parent><div id=wrap-reverse></div></div>
+<div class=case id=rtl-parent><div id=rtl></div></div>
+<div class=case id=rtl-reverse-parent><div id=rtl-reverse></div></div>
+<div class=case id=column-parent><div id=column></div></div>
+<div class=case id=vertical-parent><div id=vertical></div></div>
+<div class=case id=vertical-rtl-parent><div id=vertical-rtl></div></div>
+<div class=case id=safe-parent><div id=safe></div></div>
+</body></html>"#,
+            )
+            .await;
+            page_vm.vm_mut().sync_live_document_style_sources();
+
+            let snapshot = page_vm
+                .vm_mut()
+                .screenshot_layout_snapshot(moli_layout::PaintViewport::new(800, 1200, 1.0))
+                .expect("native layout should succeed")
+                .expect("fixture should have a document element");
+
+            let cases = [
+                (
+                    moli_layout::PaintColor::new(1.0, 0.0, 0.0, 1.0),
+                    moli_layout::PaintRect::new(20.0, 10.0, 20.0, 10.0),
+                ),
+                (
+                    moli_layout::PaintColor::new(0.0, 128.0 / 255.0, 0.0, 1.0),
+                    moli_layout::PaintRect::new(90.0, 145.0, 20.0, 10.0),
+                ),
+                (
+                    moli_layout::PaintColor::new(0.0, 0.0, 1.0, 1.0),
+                    moli_layout::PaintRect::new(160.0, 280.0, 20.0, 10.0),
+                ),
+                (
+                    moli_layout::PaintColor::new(1.0, 1.0, 0.0, 1.0),
+                    moli_layout::PaintRect::new(160.0, 310.0, 20.0, 10.0),
+                ),
+                (
+                    moli_layout::PaintColor::new(1.0, 0.0, 1.0, 1.0),
+                    moli_layout::PaintRect::new(20.0, 480.0, 20.0, 10.0),
+                ),
+                (
+                    moli_layout::PaintColor::new(0.0, 1.0, 1.0, 1.0),
+                    moli_layout::PaintRect::new(160.0, 510.0, 20.0, 10.0),
+                ),
+                (
+                    moli_layout::PaintColor::new(128.0 / 255.0, 0.0, 0.0, 1.0),
+                    moli_layout::PaintRect::new(20.0, 610.0, 20.0, 10.0),
+                ),
+                (
+                    moli_layout::PaintColor::new(0.0, 100.0 / 255.0, 0.0, 1.0),
+                    moli_layout::PaintRect::new(90.0, 745.0, 20.0, 10.0),
+                ),
+                (
+                    moli_layout::PaintColor::new(0.0, 0.0, 128.0 / 255.0, 1.0),
+                    moli_layout::PaintRect::new(160.0, 810.0, 20.0, 10.0),
+                ),
+                (
+                    moli_layout::PaintColor::new(128.0 / 255.0, 128.0 / 255.0, 0.0, 1.0),
+                    moli_layout::PaintRect::new(160.0, 980.0, 20.0, 10.0),
+                ),
+                (
+                    moli_layout::PaintColor::new(123.0 / 255.0, 45.0 / 255.0, 67.0 / 255.0, 1.0),
+                    moli_layout::PaintRect::new(20.0, 1010.0, 20.0, 100.0),
+                ),
+            ];
+            for (color, expected) in cases {
+                assert_paint_rect(solid_paint_rect(&snapshot, color), expected);
+            }
+            assert!(
+                snapshot
+                    .diagnostics
+                    .iter()
+                    .all(|diagnostic| { diagnostic.code != "positioned-static-position-deferred" })
+            );
+        }));
+    }
+
+    #[test]
     fn layout_renderer_preserves_calc_min_width_in_float_intrinsic_contribution() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1035,6 +1141,88 @@ td{padding:0;border:0;height:10px}
                 solid_paint_rect(&snapshot, rgb(71, 72, 73)),
                 moli_layout::PaintRect::new(150.0, 0.0, 150.0, 10.0),
             );
+        }));
+    }
+
+    #[test]
+    fn fixed_percentage_table_exports_its_parent_facing_max_content_size() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime should build");
+
+        runtime.block_on(tokio::task::LocalSet::new().run_until(async move {
+            let snapshot = render_test_snapshot(
+                r#"<!doctype html><html><head><style>
+html,body{margin:0;padding:0}html{scrollbar-width:none}
+.case{width:100px}.wrapper{display:table}.cell{display:table-cell}
+.flex{display:flex;height:10px}.flex table{height:5px}
+#percent-flex{background:rgb(201,11,11)}#percent-table{background:rgb(201,12,12)}
+#calc-flex{background:rgb(202,11,11)}#calc-table{background:rgb(202,12,12)}
+#length-flex{background:rgb(203,11,11)}#length-table{background:rgb(203,12,12)}
+#auto-flex{background:rgb(204,11,11)}#auto-table{background:rgb(204,12,12)}
+</style></head><body>
+<div class=case><div class=wrapper><div class=cell><div id=percent-flex class=flex><table id=percent-table style="table-layout:fixed;width:100%"></table></div></div></div></div>
+<div class=case><div class=wrapper><div class=cell><div id=calc-flex class=flex><table id=calc-table style="table-layout:fixed;width:calc(40px + 0%)"></table></div></div></div></div>
+<div class=case><div class=wrapper><div class=cell><div id=length-flex class=flex><table id=length-table style="table-layout:fixed;width:40px"></table></div></div></div></div>
+<div class=case><div class=wrapper><div class=cell><div id=auto-flex class=flex><table id=auto-table style="table-layout:auto;width:100%"></table></div></div></div></div>
+</body></html>"#,
+            )
+            .await;
+
+            // Chromium gives a percentage-dependent fixed table an
+            // effectively unbounded max-content contribution. The wrapper
+            // therefore fills the 100px opportunity, while final layout still
+            // resolves the authored width normally. Definite and automatic
+            // controls must retain their ordinary finite contributions.
+            for (color, expected_width) in [
+                (rgb(201, 11, 11), 100.0),
+                (rgb(201, 12, 12), 100.0),
+                (rgb(202, 11, 11), 100.0),
+                (rgb(202, 12, 12), 40.0),
+                (rgb(203, 11, 11), 40.0),
+                (rgb(203, 12, 12), 40.0),
+                (rgb(204, 11, 11), 4.0),
+                (rgb(204, 12, 12), 4.0),
+            ] {
+                let rect = solid_paint_rect(&snapshot, color);
+                assert!(
+                    (rect.width - expected_width).abs() <= 0.01,
+                    "expected width {expected_width}, got {rect:?}",
+                );
+            }
+        }));
+    }
+
+    #[test]
+    fn table_layout_fixed_with_auto_width_uses_automatic_column_measurement() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime should build");
+
+        runtime.block_on(tokio::task::LocalSet::new().run_until(async move {
+            let snapshot = render_test_snapshot(
+                r#"<!doctype html><html><head><style>
+html,body{margin:0;padding:0}html{scrollbar-width:none}
+table{table-layout:fixed;width:auto;border-spacing:0;background:rgb(205,11,11)}
+td{padding:0;border:0;height:5px;background:rgb(205,12,12)}
+.wide{width:80px;height:5px;background:rgb(205,13,13)}
+</style></head><body><table><tr><td style="width:10px"></td></tr><tr><td><div class=wide></div></td></tr></table></body></html>"#,
+            )
+            .await;
+
+            // `table-layout: fixed` selects the fixed algorithm only when the
+            // table has an eligible non-auto preferred width. Chromium keeps
+            // the computed property value but measures this table with the
+            // automatic algorithm, so the second row contributes 80px.
+            for color in [rgb(205, 11, 11), rgb(205, 12, 12), rgb(205, 13, 13)] {
+                let rect = solid_paint_rect(&snapshot, color);
+                assert!(
+                    (rect.width - 80.0).abs() <= 0.01,
+                    "auto-width table should measure every row: {rect:?}",
+                );
+            }
         }));
     }
 

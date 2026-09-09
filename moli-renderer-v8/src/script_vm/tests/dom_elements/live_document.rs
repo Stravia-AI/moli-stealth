@@ -718,6 +718,7 @@ fn htmlelement_standard_accessors_live_on_owner_prototypes() {
                 "accessKey",
                 "draggable",
                 "spellcheck",
+                "writingSuggestions",
                 "contentEditable",
                 "enterKeyHint",
                 "isContentEditable",
@@ -733,7 +734,7 @@ fn htmlelement_standard_accessors_live_on_owner_prototypes() {
                 assert(!own(HTMLDivElement.prototype, name), `${name} duplicated on HTMLDivElement.prototype`);
               }
 
-              const mixinNames = ["autofocus", "tabIndex"];
+              const mixinNames = ["focusGroup", "focusGroupStart", "autofocus", "tabIndex"];
               for (const prototype of [HTMLElement.prototype, SVGElement.prototype, MathMLElement.prototype]) {
                 for (const name of mixinNames) {
                   accessor(prototype, name);
@@ -760,11 +761,14 @@ fn htmlelement_standard_accessors_live_on_owner_prototypes() {
               div.accessKey = "x";
               div.draggable = true;
               div.spellcheck = false;
+              div.writingSuggestions = false;
               div.contentEditable = "plaintext-only";
               div.enterKeyHint = "Go";
               div.inputMode = "NUMERIC";
               div.innerText = "hello text";
               div.popover = "hint";
+              div.focusGroup = "toolbar";
+              div.focusGroupStart = true;
               div.autofocus = true;
               div.tabIndex = 5;
 
@@ -778,12 +782,21 @@ fn htmlelement_standard_accessors_live_on_owner_prototypes() {
               assert(div.accessKey === "x", "accessKey behavior");
               assert(div.draggable === true && div.getAttribute("draggable") === "true", "draggable behavior");
               assert(div.spellcheck === false && div.getAttribute("spellcheck") === "false", "spellcheck behavior");
+              assert(div.writingSuggestions === "false" && div.getAttribute("writingsuggestions") === "false", "writingSuggestions behavior");
               assert(div.contentEditable === "plaintext-only" && div.isContentEditable === true, "contentEditable behavior");
               assert(div.enterKeyHint === "go", "enterKeyHint behavior");
               assert(div.inputMode === "numeric", "inputMode behavior");
               assert(div.innerText === "hello text" && div.outerText === "hello text", "innerText/outerText behavior");
               assert(div.popover === "hint", "popover behavior");
-              assert(div.autofocus === true && div.tabIndex === 5, "HTMLOrForeignElement behavior");
+              assert(
+                div.focusGroup === "toolbar" &&
+                  div.getAttribute("focusgroup") === "toolbar" &&
+                  div.focusGroupStart === true &&
+                  div.hasAttribute("focusgroupstart") &&
+                  div.autofocus === true &&
+                  div.tabIndex === 5,
+                "HTMLOrSVGOrMathMLElement behavior"
+              );
 
               const holder = document.createElement("section");
               const para = document.createElement("p");
@@ -794,8 +807,18 @@ fn htmlelement_standard_accessors_live_on_owner_prototypes() {
 
               svg.tabIndex = 9;
               svg.autofocus = true;
+              svg.focusGroup = "grid";
+              svg.focusGroupStart = true;
               assert(svg.tabIndex === 9 && svg.getAttribute("tabindex") === "9", "svg tabIndex behavior");
               assert(svg.autofocus === true && svg.hasAttribute("autofocus"), "svg autofocus behavior");
+              assert(svg.focusGroup === "grid" && svg.focusGroupStart === true, "svg focusgroup behavior");
+              const math = document.createElementNS("http://www.w3.org/1998/Math/MathML", "math");
+              math.focusGroup = "tablist inline";
+              math.focusGroupStart = true;
+              assert(
+                math.focusGroup === "tablist inline" && math.focusGroupStart === true,
+                "MathML focusgroup behavior"
+              );
               return "ok";
             })()
             "#,

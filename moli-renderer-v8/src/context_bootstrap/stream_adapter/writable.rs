@@ -746,9 +746,6 @@ pub(in crate::context_bootstrap::stream_adapter) fn transform_stream_readable_ca
         unreachable!("readable cancel must claim the transform cancel algorithm")
     };
     if matches!(algorithm, TransformCancelAlgorithm::None) {
-        if is_native_compression_stream(scope, writable) {
-            super::super::streams::discard_compression_stream_codec(scope, writable);
-        }
         clear_transform_stream_terminal_algorithms(scope, writable);
         apply_transform_source_cancel_fulfillment(scope, writable, readable, residence, reason);
         rv.set(finish_promise.into());
@@ -1065,9 +1062,6 @@ fn transform_stream_sink_abort_algorithm_in_relevant_realm<'s>(
         unreachable!("writable abort must claim the transform cancel algorithm")
     };
     if matches!(algorithm, TransformCancelAlgorithm::None) {
-        if is_native_compression_stream(scope, writable) {
-            super::super::streams::discard_compression_stream_codec(scope, writable);
-        }
         clear_transform_stream_terminal_algorithms(scope, writable);
         apply_transform_sink_abort_fulfillment(scope, writable, readable, residence, reason);
         return Some(finish_promise.into());
@@ -1614,9 +1608,6 @@ fn perform_transform_stream_write_in_relevant_realm<'s>(
             let error = text_decoder_stream_type_error_value(scope);
             return reject_transform_stream_with_value(scope, stream, readable, error);
         }
-        TransformWriteAlgorithm::Compression => {
-            return perform_compression_stream_write(scope, stream, readable, chunk);
-        }
         TransformWriteAlgorithm::Callback => {
             let transformer = stream_slot_object(scope, stream, WRITABLE_STREAM_TRANSFORMER_SLOT)?;
             let controller = stream_slot_object(scope, stream, WRITABLE_STREAM_CONTROLLER_SLOT)
@@ -1652,83 +1643,6 @@ fn perform_transform_stream_write_in_relevant_realm<'s>(
         return rejected_promise_value(scope, error);
     }
     None
-}
-
-fn is_native_compression_stream<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    writable: v8::Local<'s, v8::Object>,
-) -> bool {
-    stream_slot_string(scope, writable, WRITABLE_STREAM_MODE_SLOT)
-        .is_some_and(|mode| matches!(mode.as_str(), "compression" | "decompression"))
-}
-
-fn perform_compression_stream_write<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    writable: v8::Local<'s, v8::Object>,
-    readable: v8::Local<'s, v8::Object>,
-    chunk: v8::Local<'s, v8::Value>,
-) -> Option<v8::Local<'s, v8::Value>> {
-    let input = if chunk.is_shared_array_buffer()
-        || v8::Local::<v8::ArrayBufferView>::try_from(chunk)
-            .ok()
-            .and_then(|view| view.get_backing_store())
-            .is_some_and(|store| store.is_shared())
-    {
-        None
-    } else {
-        value_buffer_source_bytes(scope, chunk)
-    };
-    let Some(input) = input else {
-        let error = v8::Exception::type_error(
-            scope,
-            v8str(scope, "CompressionStream chunk must be a BufferSource"),
-        );
-        return reject_transform_stream_with_value(scope, writable, readable, error);
-    };
-    let output = match super::super::streams::process_compression_stream_codec(
-        scope, writable, &input, false,
-    ) {
-        Ok(output) => output,
-        Err(error) => {
-            let error = compression_stream_error_value(scope, &error);
-            return reject_transform_stream_with_value(scope, writable, readable, error);
-        }
-    };
-    if output.is_empty() {
-        return None;
-    }
-    let output = new_uint8_array_from_bytes(scope, output)
-        .expect("CompressionStream output allocation must succeed");
-    if let Err(error) = enqueue_transform_readable_chunk(scope, writable, readable, output.into()) {
-        return rejected_promise_value(scope, error);
-    }
-    None
-}
-
-fn compression_stream_error_value<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    error: &std::io::Error,
-) -> v8::Local<'s, v8::Value> {
-    let message = crate::util::v8_string(scope, &error.to_string())
-        .unwrap_or_else(|| v8::String::empty(scope));
-    v8::Exception::type_error(scope, message)
-}
-
-fn flush_compression_stream<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    writable: v8::Local<'s, v8::Object>,
-    readable: v8::Local<'s, v8::Object>,
-) -> Result<Option<v8::Local<'s, v8::Value>>, v8::Local<'s, v8::Value>> {
-    let output =
-        super::super::streams::process_compression_stream_codec(scope, writable, &[], true)
-            .map_err(|error| compression_stream_error_value(scope, &error))?;
-    if output.is_empty() {
-        return Ok(None);
-    }
-    let output = new_uint8_array_from_bytes(scope, output)
-        .expect("CompressionStream output allocation must succeed");
-    enqueue_transform_readable_chunk(scope, writable, readable, output.into())?;
-    Ok(None)
 }
 
 fn transform_write_result_promise<'s>(
@@ -2733,7 +2647,6 @@ fn perform_transform_stream_close_in_relevant_realm<'s>(
         TransformFlushAlgorithm::TextDecoder => {
             Ok(flush_text_decoder_stream(scope, stream, readable))
         }
-        TransformFlushAlgorithm::Compression => flush_compression_stream(scope, stream, readable),
         TransformFlushAlgorithm::Callback => {
             let transformer = stream_slot_object(scope, stream, WRITABLE_STREAM_TRANSFORMER_SLOT)?;
             let controller = stream_slot_object(scope, stream, WRITABLE_STREAM_CONTROLLER_SLOT)

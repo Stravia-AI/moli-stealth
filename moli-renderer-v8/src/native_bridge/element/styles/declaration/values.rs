@@ -31,6 +31,7 @@ use super::super::super::super::JsContextHost;
 use super::observation::{
     ComputedStyleRead, RetainedStyleObservation, StyleComputationContext, StyleObservation,
 };
+use super::sizing::used_size_from_layout_snapshot;
 use super::style_world::{
     effective_raw_stylesheet_sources, style_base_url, stylesheet_source_document_for_handle,
 };
@@ -185,7 +186,7 @@ impl<'a> StyleResolutionContext<'a> {
 
 impl<'a> ComputedStyleRead<'a> {
     pub(crate) fn new(runtime: &'a JsContextHost, handle: DomHandle) -> Self {
-        StyleObservation::new(runtime).read(handle)
+        StyleObservation::new_for_element(runtime, handle, None).read(handle)
     }
 
     pub(in crate::native_bridge::element::styles) fn new_with_context(
@@ -193,7 +194,7 @@ impl<'a> ComputedStyleRead<'a> {
         handle: DomHandle,
         context: StyleComputationContext,
     ) -> Self {
-        StyleObservation::new_with_context(runtime, context).read(handle)
+        StyleObservation::new_for_element(runtime, handle, Some(context)).read(handle)
     }
 
     pub(in crate::native_bridge::element) fn property(&self, property: &str) -> String {
@@ -5124,6 +5125,21 @@ fn resolve_moli_computed_style_value(
         && let Some(tracks) = resolved_grid_template_tracks(runtime, handle, property)
     {
         return tracks;
+    }
+    if matches!(property, "width" | "height" | "inline-size" | "block-size")
+        && let Some(size) = match resolution.observation {
+            Some(observation) => observation.used_size(handle),
+            None => used_size_from_layout_snapshot(runtime, handle),
+        }
+    {
+        let value = match property {
+            "width" => size.width,
+            "height" => size.height,
+            "inline-size" => size.inline_size,
+            "block-size" => size.block_size,
+            _ => unreachable!(),
+        };
+        return format_non_negative_used_css_px(f64::from(value));
     }
     if property == "width"
         && let Some(width) =

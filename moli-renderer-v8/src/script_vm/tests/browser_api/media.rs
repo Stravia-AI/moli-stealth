@@ -2143,7 +2143,7 @@ fn zhihu_probe_media_devices_surface_exposes_promise_methods() {
               const proto = Object.getPrototypeOf(devices);
               const fakeDevices = Object.create(MediaDevices.prototype);
               const summarizeMethodDescriptor = name => {
-                const descriptor = Object.getOwnPropertyDescriptor(devices, name);
+                const descriptor = Object.getOwnPropertyDescriptor(proto, name);
                 return [
                   !!descriptor,
                   typeof descriptor?.value,
@@ -2301,7 +2301,7 @@ fn zhihu_probe_offline_audio_context_supports_fingerprintjs2_audio_flow() {
 }
 
 #[test]
-fn offline_audio_context_short_buffers_expose_nonzero_samples() {
+fn offline_audio_context_without_connected_sources_renders_silence() {
     let mut vm = new_storage_test_vm("https://short-audio-fingerprint.test/");
 
     vm.exec(
@@ -2315,7 +2315,7 @@ fn offline_audio_context_short_buffers_expose_nonzero_samples() {
             done: true,
             length: data.length,
             nonzero: nonzero.length,
-            sum: nonzero.reduce((acc, value) => acc + Math.abs(value))
+            sum: nonzero.reduce((acc, value) => acc + Math.abs(value), 0)
           };
         };
         ctx.startRendering();
@@ -2331,14 +2331,8 @@ fn offline_audio_context_short_buffers_expose_nonzero_samples() {
         serde_json::from_str(&result).expect("short offline audio probe should return valid json");
     assert_eq!(value["done"], true);
     assert_eq!(value["length"], 500);
-    assert!(
-        value["nonzero"].as_u64().unwrap_or_default() > 0,
-        "short offline audio probe should expose non-zero samples: {result}"
-    );
-    assert!(
-        value["sum"].as_f64().unwrap_or_default() > 0.0,
-        "short offline audio probe should produce a positive sample sum: {result}"
-    );
+    assert_eq!(value["nonzero"], 0, "an empty graph must render silence");
+    assert_eq!(value["sum"], 0);
 }
 
 #[test]
@@ -2352,6 +2346,7 @@ fn offline_audio_context_updates_compressor_reduction_on_complete() {
         const comp = ctx.createDynamicsCompressor();
         osc.connect(comp);
         comp.connect(ctx.destination);
+        osc.start(0);
         globalThis.__compressorReductionProbe = {
           before: comp.reduction,
           afterStart: null,
@@ -2524,14 +2519,7 @@ fn web_audio_declared_fixed_own_methods_keep_descriptors() {
     ctx: ["addEventListener", "removeEventListener", "dispatchEvent"].map(name => describe(ctx, name)),
     osc: ["connect", "disconnect", "start"].map(name => describe(osc, name)),
     comp: ["connect", "disconnect"].map(name => describe(comp, name)),
-    analyser: [
-      "connect",
-      "disconnect",
-      "getFloatFrequencyData",
-      "getFloatTimeDomainData",
-      "getByteFrequencyData",
-      "getByteTimeDomainData"
-    ].map(name => describe(analyser, name)),
+    analyser: ["connect", "disconnect"].map(name => describe(analyser, name)),
     param: describe(osc.frequency, "setValueAtTime")
   });
 })()
@@ -2541,7 +2529,7 @@ fn web_audio_declared_fixed_own_methods_keep_descriptors() {
 
     assert_eq!(
         result,
-        r#"{"ctxKeys":"addEventListener,removeEventListener,dispatchEvent","oscKeys":"","compKeys":"","analyserKeys":"","paramKeys":"","ctx":["addEventListener:true:true:true:function:addEventListener:0","removeEventListener:true:true:true:function:removeEventListener:0","dispatchEvent:true:true:true:function:dispatchEvent:0"],"osc":["connect:false:true:true:function:connect:1","disconnect:false:true:true:function:disconnect:0","start:false:true:true:function:start:1"],"comp":["connect:false:true:true:function:connect:1","disconnect:false:true:true:function:disconnect:0"],"analyser":["connect:false:true:true:function:connect:1","disconnect:false:true:true:function:disconnect:0","getFloatFrequencyData:false:true:true:function:getFloatFrequencyData:1","getFloatTimeDomainData:false:true:true:function:getFloatTimeDomainData:1","getByteFrequencyData:false:true:true:function:getByteFrequencyData:1","getByteTimeDomainData:false:true:true:function:getByteTimeDomainData:1"],"param":"setValueAtTime:false:true:true:function:setValueAtTime:2"}"#
+        r#"{"ctxKeys":"addEventListener,removeEventListener,dispatchEvent","oscKeys":"","compKeys":"","analyserKeys":"","paramKeys":"","ctx":["addEventListener:true:true:true:function:addEventListener:0","removeEventListener:true:true:true:function:removeEventListener:0","dispatchEvent:true:true:true:function:dispatchEvent:0"],"osc":["connect:false:true:true:function:connect:1","disconnect:false:true:true:function:disconnect:0","start:false:true:true:function:start:1"],"comp":["connect:false:true:true:function:connect:1","disconnect:false:true:true:function:disconnect:0"],"analyser":["connect:false:true:true:function:connect:1","disconnect:false:true:true:function:disconnect:0"],"param":"setValueAtTime:false:true:true:function:setValueAtTime:2"}"#
     );
 }
 
@@ -2607,7 +2595,7 @@ fn web_audio_private_backing_slots_ignore_public_spoofing() {
 
     assert_eq!(
         result,
-        r#"{"ctxOwnInternalBefore":"","compOwnInternalBefore":"","ctxOwnInternalAfterSpoof":"__moliOfflineAudioChannelCount,__moliOfflineAudioCompleteBuffer,__moliOfflineAudioCompleteContext,__moliOfflineAudioCompressors,__moliOfflineAudioLength,__moliOfflineAudioSampleRate","reductionBefore":0,"complete":{"bufferOwnInternalBefore":"","bufferOwnInternalAfterSpoof":"__moliOfflineAudioBuffer","targetStable":true,"currentTargetStable":true,"renderedBufferStable":true,"bufferLength":32,"bufferSampleRate":8000,"dataTag":"[object Float32Array]","dataLength":32,"reductionAfter":-20.538288116455078}}"#
+        r#"{"ctxOwnInternalBefore":"","compOwnInternalBefore":"","ctxOwnInternalAfterSpoof":"__moliOfflineAudioChannelCount,__moliOfflineAudioCompleteBuffer,__moliOfflineAudioCompleteContext,__moliOfflineAudioCompressors,__moliOfflineAudioLength,__moliOfflineAudioSampleRate","reductionBefore":0,"complete":{"bufferOwnInternalBefore":"","bufferOwnInternalAfterSpoof":"__moliOfflineAudioBuffer","targetStable":true,"currentTargetStable":true,"renderedBufferStable":true,"bufferLength":32,"bufferSampleRate":8000,"dataTag":"[object Float32Array]","dataLength":32,"reductionAfter":0}}"#
     );
 }
 
@@ -2651,7 +2639,7 @@ fn offline_audio_context_analyser_supports_probe_data_methods() {
       typeof analyser.getFloatTimeDomainData,
       typeof analyser.getByteTimeDomainData
     ],
-    floats: Array.from(floats),
+    floats: Array.from(floats, String),
     time: Array.from(time),
     bytes: Array.from(bytes),
     byteTime: Array.from(byteTime)
@@ -2663,7 +2651,7 @@ fn offline_audio_context_analyser_supports_probe_data_methods() {
 
     assert_eq!(
         result,
-        r#"{"ctorType":"function","tag":"[object AnalyserNode]","ctor":"AnalyserNode","fftSize":2048,"frequencyBinCount":1024,"minDecibels":-100,"maxDecibels":-30,"smoothingTimeConstant":0.8,"connectResultCtor":"AudioDestinationNode","methods":["function","function","function","function","function"],"floats":[-90.25955200195312,-90.22233581542969,-90.11856842041016,-89.96821594238281],"time":[0,0,0,0],"bytes":[0,0,0,0],"byteTime":[128,128,128,128]}"#
+        r#"{"ctorType":"function","tag":"[object AnalyserNode]","ctor":"AnalyserNode","fftSize":2048,"frequencyBinCount":1024,"minDecibels":-100,"maxDecibels":-30,"smoothingTimeConstant":0.8,"connectResultCtor":"AudioDestinationNode","methods":["function","function","function","function","function"],"floats":["-Infinity","-Infinity","-Infinity","-Infinity"],"time":[0,0,0,0],"bytes":[0,0,0,0],"byteTime":[128,128,128,128]}"#
     );
 }
 
@@ -2723,6 +2711,7 @@ fn web_audio_internal_maps_and_errors_ignore_public_primordial_overrides() {
   globalThis.__webAudioPrimordialProbe = {
     contextTag: Object.prototype.toString.call(context),
     closedTag: Object.prototype.toString.call(closed),
+    closedState: context.state,
     rejection: "pending"
   };
   rejected.catch(error => {
@@ -2744,7 +2733,7 @@ fn web_audio_internal_maps_and_errors_ignore_public_primordial_overrides() {
         .expect("WebAudio primordial override probe should evaluate");
     assert_eq!(
         result,
-        r#"{"contextTag":"[object AudioContext]","closedTag":"[object Promise]","rejection":"TypeError:true"}"#
+        r#"{"contextTag":"[object AudioContext]","closedTag":"[object Promise]","closedState":"closed","rejection":"TypeError:true"}"#
     );
 }
 

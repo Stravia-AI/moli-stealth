@@ -1,5 +1,7 @@
 use super::*;
 
+mod compression;
+
 fn stream_test_vm() -> StandaloneScriptVmHarness {
     new_storage_test_vm("https://stream-runtime.test/")
 }
@@ -5495,62 +5497,7 @@ globalThis.__compressionBlobResult = "pending";
 }
 
 #[test]
-fn compression_stream_processes_offset_views_across_multiple_chunks_and_formats() {
-    let mut vm = stream_test_vm();
-
-    vm.eval(
-        r#"
-globalThis.__compressionFormatsResult = "pending";
-(async () => {
-  const results = {};
-  for (const format of ["gzip", "deflate", "deflate-raw", "brotli"]) {
-    const compressor = new CompressionStream(format);
-    const compressedResult = new Response(compressor.readable).arrayBuffer();
-    const writer = compressor.writable.getWriter();
-    const firstBacking = new Uint8Array([0xff, 65, 66, 0xff]);
-    const secondBacking = new Uint8Array([0xff, 67, 0xff]);
-    await writer.write(new Uint8Array(firstBacking.buffer, 1, 2));
-    await writer.write(new DataView(secondBacking.buffer, 1, 1));
-    await writer.close();
-    const compressed = new Uint8Array(await compressedResult);
-
-    const decompressor = new DecompressionStream(format);
-    const restoredResult = new Response(decompressor.readable).text();
-    const decompressorWriter = decompressor.writable.getWriter();
-    const split = Math.max(1, Math.floor(compressed.byteLength / 2));
-    await decompressorWriter.write(compressed.subarray(0, split));
-    await decompressorWriter.write(compressed.subarray(split));
-    await decompressorWriter.close();
-    results[format] = await restoredResult;
-  }
-  globalThis.__compressionFormatsResult = JSON.stringify(results);
-})().catch(error => {
-  globalThis.__compressionFormatsResult = `error:${error.name}:${error.message}`;
-});
-"#,
-    )
-    .expect("multi-chunk compression formats should start");
-
-    for _ in 0..32 {
-        let result = vm
-            .eval("globalThis.__compressionFormatsResult")
-            .expect("multi-chunk compression formats should drain microtasks");
-        if result != "pending" {
-            break;
-        }
-    }
-
-    let result = vm
-        .eval("globalThis.__compressionFormatsResult")
-        .expect("multi-chunk compression formats should settle");
-    assert_eq!(
-        result,
-        r#"{"gzip":"ABC","deflate":"ABC","deflate-raw":"ABC","brotli":"ABC"}"#
-    );
-}
-
-#[test]
-fn compression_stream_rejects_invalid_chunks_formats_and_malformed_gzip() {
+fn compression_stream_rejects_shared_buffer_chunks_and_gzip_checksum_corruption() {
     let mut vm = stream_test_vm();
 
     vm.eval(
@@ -5565,16 +5512,6 @@ globalThis.__compressionErrorsResult = "pending";
       return error instanceof TypeError;
     }
   };
-  const constructorErrors = [];
-  for (const Constructor of [CompressionStream, DecompressionStream]) {
-    try {
-      new Constructor("GZIP");
-      constructorErrors.push(false);
-    } catch (error) {
-      constructorErrors.push(error instanceof TypeError);
-    }
-  }
-
   const invalidChunkStream = new CompressionStream("gzip");
   const invalidReadable = rejectedWithTypeError(
     new Response(invalidChunkStream.readable).arrayBuffer()
@@ -5593,21 +5530,14 @@ globalThis.__compressionErrorsResult = "pending";
   ).arrayBuffer());
   const corrupt = valid.slice();
   corrupt[corrupt.length - 1] ^= 0xff;
-  const truncated = valid.slice(0, valid.length - 1);
-  const trailing = new Uint8Array(valid.length + 1);
-  trailing.set(valid);
-  trailing[valid.length] = 0;
   const decode = bytes => rejectedWithTypeError(new Response(
     new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"))
   ).arrayBuffer());
 
   globalThis.__compressionErrorsResult = JSON.stringify({
-    constructorErrors,
     invalidChunk: await invalidChunk,
     invalidReadable: await invalidReadable,
-    corrupt: await decode(corrupt),
-    truncated: await decode(truncated),
-    trailing: await decode(trailing)
+    corrupt: await decode(corrupt)
   });
 })().catch(error => {
   globalThis.__compressionErrorsResult = `error:${error.name}:${error.message}`;
@@ -5630,7 +5560,7 @@ globalThis.__compressionErrorsResult = "pending";
         .expect("compression error cases should settle");
     assert_eq!(
         result,
-        r#"{"constructorErrors":[true,true],"invalidChunk":true,"invalidReadable":true,"corrupt":true,"truncated":true,"trailing":true}"#
+        r#"{"invalidChunk":true,"invalidReadable":true,"corrupt":true}"#
     );
 }
 

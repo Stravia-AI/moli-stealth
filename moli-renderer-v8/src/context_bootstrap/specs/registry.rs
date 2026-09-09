@@ -109,6 +109,11 @@ const CONSTRUCTOR_SPECS_BEFORE_STREAMS: &[ConstructorSpec] = &[
         kind: ConstructorKind::Illegal,
     },
     ConstructorSpec {
+        name: "SVGRect",
+        parent: None,
+        kind: ConstructorKind::Illegal,
+    },
+    ConstructorSpec {
         name: "SVGAnimatedLength",
         parent: None,
         kind: ConstructorKind::Illegal,
@@ -629,6 +634,16 @@ const CONSTRUCTOR_SPECS_BEFORE_STREAMS: &[ConstructorSpec] = &[
         kind: ConstructorKind::Illegal,
     },
     ConstructorSpec {
+        name: "Clipboard",
+        parent: Some("EventTarget"),
+        kind: ConstructorKind::Illegal,
+    },
+    ConstructorSpec {
+        name: "ClipboardItem",
+        parent: None,
+        kind: ConstructorKind::ClipboardItem,
+    },
+    ConstructorSpec {
         name: "MediaCapabilities",
         parent: None,
         kind: ConstructorKind::Illegal,
@@ -1017,6 +1032,11 @@ const CONSTRUCTOR_SPECS_AFTER_STREAMS: &[ConstructorSpec] = &[
         kind: ConstructorKind::RtcPeerConnection,
     },
     ConstructorSpec {
+        name: "RTCIceCandidate",
+        parent: None,
+        kind: ConstructorKind::RtcIceCandidate,
+    },
+    ConstructorSpec {
         name: "RTCRtpReceiver",
         parent: None,
         kind: ConstructorKind::Illegal,
@@ -1355,6 +1375,11 @@ const CONSTRUCTOR_SPECS_AFTER_STREAMS: &[ConstructorSpec] = &[
         name: "AudioParam",
         parent: None,
         kind: ConstructorKind::AudioParam,
+    },
+    ConstructorSpec {
+        name: "BiquadFilterNode",
+        parent: None,
+        kind: ConstructorKind::BiquadFilterNode,
     },
     ConstructorSpec {
         name: "AudioBuffer",

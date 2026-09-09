@@ -80,7 +80,14 @@ pub(in crate::context_bootstrap) const WORKER_SHARED_INTERFACE_NAMES: &[&str] = 
     "FormData",
 ];
 
-const SECURE_CONTEXT_ONLY_INTERFACE_NAMES: &[&str] = &["SubtleCrypto", "CryptoKey", "IdleDetector"];
+const SECURE_CONTEXT_ONLY_INTERFACE_NAMES: &[&str] = &[
+    "MediaDevices",
+    "SubtleCrypto",
+    "CryptoKey",
+    "IdleDetector",
+    "Clipboard",
+    "ClipboardItem",
+];
 const WORKER_ONLY_INTERFACE_NAMES: &[&str] = &["WorkerNavigator", "WorkerLocation"];
 const WINDOW_DEDICATED_AND_SHARED_WORKER_INTERFACE_NAMES: &[&str] = &[
     "Worker",
@@ -122,6 +129,7 @@ pub(crate) fn dedicated_worker_lazy_interface_names_for_test() -> Vec<&'static s
 /// `Window` owns the concrete global template and its prototype is needed
 /// while the realm's named-properties chain is assembled.
 const EAGER_INTERFACE_NAMES: &[&str] = &["Window"];
+const NON_EXPOSED_INTERFACE_NAMES: &[&str] = &["DOMError"];
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct InterfaceId(u32);
@@ -256,9 +264,7 @@ impl ExposedInterfaceMetadata {
     }
 
     pub(super) fn is_supported_by(self, profile: TemplateBuildProfile) -> bool {
-        self.installation != GlobalInstallation::NotExposed
-            && self.exposure.contains(profile.realm_kind())
-            && profile.supports_name(self.name)
+        self.exposure.contains(profile.realm_kind()) && profile.supports_name(self.name)
     }
 }
 
@@ -351,7 +357,9 @@ impl ExposedInterfaceMetadataTable {
 }
 
 pub(super) fn installation_for_spec(spec: ConstructorSpec) -> GlobalInstallation {
-    if EAGER_INTERFACE_NAMES.contains(&spec.name) {
+    if NON_EXPOSED_INTERFACE_NAMES.contains(&spec.name) {
+        GlobalInstallation::NotExposed
+    } else if EAGER_INTERFACE_NAMES.contains(&spec.name) {
         GlobalInstallation::Eager
     } else {
         GlobalInstallation::Lazy
@@ -379,8 +387,8 @@ fn exposure_for_name(name: &str) -> ExposureSet {
     }
 }
 
-pub(in crate::context_bootstrap) fn constructor_spec_is_lazy(spec: ConstructorSpec) -> bool {
-    installation_for_spec(spec) == GlobalInstallation::Lazy
+pub(in crate::context_bootstrap) fn constructor_spec_is_eager(spec: ConstructorSpec) -> bool {
+    installation_for_spec(spec) == GlobalInstallation::Eager
 }
 
 fn validate_materialization_cycles(entries: &[ExposedInterfaceMetadata]) -> Result<()> {
@@ -570,6 +578,7 @@ mod tests {
         let table = ExposedInterfaceMetadataTable::from_constructor_specs(&[
             spec("Event", None),
             spec("Window", None),
+            spec("DOMError", None),
             ConstructorSpec {
                 name: "Audio",
                 parent: None,
@@ -600,6 +609,12 @@ mod tests {
                 .installation,
             GlobalInstallation::Lazy
         );
+        let dom_error = table
+            .metadata_by_name("DOMError")
+            .expect("DOMError metadata");
+        assert_eq!(dom_error.installation, GlobalInstallation::NotExposed);
+        assert!(!dom_error.is_exposed(RealmKind::Window, true));
+        assert!(dom_error.is_supported_by(TemplateBuildProfile::Window));
     }
 
     #[test]

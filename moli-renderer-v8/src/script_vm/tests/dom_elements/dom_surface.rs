@@ -1,5 +1,17 @@
 use super::*;
 
+#[test]
+fn svg_create_rect_supports_capability_detection_and_detached_float_values() {
+    let mut vm = new_storage_test_vm("https://svg-rect.test/");
+    assert_eq!(
+        vm.eval(include_str!(
+            "../../../../tests/fixtures/svg-create-rect.js"
+        ))
+        .expect("SVGRect contract should pass"),
+        "svg-create-rect:ok"
+    );
+}
+
 async fn expect_one_child_frame_task_source(
     vm: &mut ScriptVm,
     expected: impl Into<ChildFrameSemanticTurnKind>,
@@ -3344,6 +3356,97 @@ fn autocorrect_reflects_boolean_and_inherits_from_form_owner() {
     assert_eq!(
         result,
         r#"{"descriptor":[true,true],"canonical":[true,true,true,false,false,true,true],"truthy":[true,"on"],"falsy":[false,"off"],"inherited":["false:false:true:false","false:false:true:false","false:false:true:false","false:false:true:false","false:false:true:false","false:false:true:false"],"nonInherited":[true,true],"forcedOff":[false,false,false],"incompatible":["TypeError","TypeError"]}"#
+    );
+}
+
+#[test]
+fn writing_suggestions_reflects_and_inherits_nearest_ancestor_state() {
+    let mut vm = new_parsed_test_vm(
+        "https://writing-suggestions.test/",
+        "<!doctype html><html><body></body></html>",
+    );
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const parent = document.createElement('section');
+  const child = document.createElement('div');
+  const grandchild = document.createElement('span');
+  parent.append(child);
+  child.append(grandchild);
+  parent.setAttribute('writingsuggestions', 'FaLsE');
+
+  const inherited = [
+    parent.writingSuggestions,
+    child.writingSuggestions,
+    grandchild.writingSuggestions
+  ];
+  child.setAttribute('writingsuggestions', '');
+  const emptyOverride = [child.writingSuggestions, grandchild.writingSuggestions];
+  child.setAttribute('writingsuggestions', 'invalid');
+  const invalidOverride = [child.writingSuggestions, grandchild.writingSuggestions];
+  child.removeAttribute('writingsuggestions');
+  const restoredInheritance = grandchild.writingSuggestions;
+
+  grandchild.writingSuggestions = false;
+  const booleanSetter = [
+    grandchild.writingSuggestions,
+    grandchild.getAttribute('writingsuggestions')
+  ];
+  grandchild.writingSuggestions = { toString() { return 'TrUe'; } };
+  const domStringSetter = [
+    grandchild.writingSuggestions,
+    grandchild.getAttribute('writingsuggestions')
+  ];
+
+  const namespaceOnly = document.createElement('div');
+  namespaceOnly.setAttributeNS('urn:test', 'writingsuggestions', 'false');
+
+  const detachedParent = document.createElement('div');
+  const detachedChild = document.createElement('span');
+  detachedParent.setAttribute('writingsuggestions', 'false');
+  detachedParent.append(detachedChild);
+
+  const descriptor = Object.getOwnPropertyDescriptor(
+    HTMLElement.prototype,
+    'writingSuggestions'
+  );
+  const incompatible = operation => {
+    try {
+      operation(document.createElementNS('urn:test', 'div'));
+      return 'none';
+    } catch (error) {
+      return error.name;
+    }
+  };
+
+  return JSON.stringify({
+    descriptor: [descriptor.enumerable, descriptor.configurable],
+    inherited,
+    emptyOverride,
+    invalidOverride,
+    restoredInheritance,
+    booleanSetter,
+    domStringSetter,
+    namespaceOnly: [
+      namespaceOnly.writingSuggestions,
+      namespaceOnly.getAttribute('writingsuggestions')
+    ],
+    detached: detachedChild.writingSuggestions,
+    incompatible: [
+      incompatible(receiver => descriptor.get.call(receiver)),
+      incompatible(receiver => descriptor.set.call(receiver, 'false'))
+    ]
+  });
+})()
+"#,
+        )
+        .expect("writingSuggestions semantics should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"descriptor":[true,true],"inherited":["false","false","false"],"emptyOverride":["true","true"],"invalidOverride":["true","true"],"restoredInheritance":"false","booleanSetter":["false","false"],"domStringSetter":["true","TrUe"],"namespaceOnly":["true","false"],"detached":"false","incompatible":["TypeError","TypeError"]}"#
     );
 }
 
@@ -8737,6 +8840,72 @@ fn window_named_properties_respect_later_prototype_properties_and_descriptor_fla
 }
 
 #[test]
+fn main_and_child_window_proxies_have_immutable_prototypes() {
+    let mut vm = new_storage_test_vm("https://window-proxy-prototype.test/");
+
+    let result = vm
+        .eval(
+            r#"
+            (() => {
+                "use strict";
+                const frame = document.createElement("iframe");
+                (document.body || document.documentElement || document).appendChild(frame);
+
+                const probe = target => {
+                    const original = Object.getPrototypeOf(target);
+                    const replacement = {};
+                    const outcome = callback => {
+                        try {
+                            callback();
+                            return "returned";
+                        } catch (error) {
+                            return error && error.name;
+                        }
+                    };
+
+                    const objectDifferent = outcome(() => {
+                        Object.setPrototypeOf(target, replacement);
+                    });
+                    const dunderDifferent = outcome(() => {
+                        target.__proto__ = replacement;
+                    });
+                    const reflectDifferent = Reflect.setPrototypeOf(target, replacement);
+                    const unchanged = Object.getPrototypeOf(target) === original;
+                    const objectSame = Object.setPrototypeOf(target, original) === target;
+                    const dunderSame = outcome(() => {
+                        target.__proto__ = original;
+                    });
+                    const reflectSame = Reflect.setPrototypeOf(target, original);
+
+                    return {
+                        objectDifferent,
+                        dunderDifferent,
+                        reflectDifferent,
+                        unchanged,
+                        objectSame,
+                        dunderSame,
+                        reflectSame,
+                    };
+                };
+
+                const observations = {
+                    main: probe(window),
+                    child: probe(frame.contentWindow),
+                };
+                frame.remove();
+                return JSON.stringify(observations);
+            })()
+            "#,
+        )
+        .expect("WindowProxy immutable prototype probe should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"main":{"objectDifferent":"TypeError","dunderDifferent":"TypeError","reflectDifferent":false,"unchanged":true,"objectSame":true,"dunderSame":"returned","reflectSame":true},"child":{"objectDifferent":"TypeError","dunderDifferent":"TypeError","reflectDifferent":false,"unchanged":true,"objectSame":true,"dunderSame":"returned","reflectSame":true}}"#
+    );
+}
+
+#[test]
 fn window_internal_child_context_identity_is_not_read_from_web_properties() {
     let mut vm = new_storage_test_vm("https://window-private-identity.test/");
 
@@ -8828,6 +8997,76 @@ frame.name = 'target';
 
     assert_eq!(result, "[object Window]|true|object");
 }
+
+#[tokio::test]
+async fn child_window_name_assignment_updates_parent_named_access() {
+    let mut vm = new_storage_test_vm("https://dynamic-frame-name.test/");
+
+    let initial = vm
+        .eval(
+            r#"
+(() => {
+  const frame = document.createElement('iframe');
+  frame.id = 'frame';
+  frame.name = 'bar';
+  (document.body || document.documentElement || document).appendChild(frame);
+  return [
+    'bar' in window,
+    window.bar === frame.contentWindow,
+    frame.contentWindow.name
+  ].join('|');
+})()
+"#,
+        )
+        .expect("initial iframe browsing-context name should evaluate");
+    assert_eq!(initial, "true|true|bar");
+
+    vm.eval(
+        r#"
+document.getElementById('frame').srcdoc =
+  "<script>window.name = 'foo'<\/script>";
+"#,
+    )
+    .expect("child window.name assignment should queue through srcdoc navigation");
+    run_realm_prerequisite_then_expected_child_frame_semantic_turn_for_test(
+        &mut vm,
+        ChildFrameSemanticTurnKind::NavigationCommit,
+        "child window.name assignment srcdoc should commit before parser work",
+    )
+    .await;
+    run_realm_prerequisite_then_expected_child_frame_semantic_turn_for_test(
+        &mut vm,
+        ChildFrameSemanticTurnKind::DocumentScriptReady,
+        "child window.name assignment should run as parser script",
+    )
+    .await;
+    run_child_document_lifecycle_and_host_load_for_test(
+        &mut vm,
+        "child window.name assignment srcdoc",
+    )
+    .await;
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const frame = document.getElementById('frame');
+  return [
+    'foo' in window,
+    window.foo === frame.contentWindow,
+    'bar' in window,
+    window.bar === undefined,
+    frame.name,
+    frame.contentWindow.name
+  ].join('|');
+})()
+"#,
+        )
+        .expect("dynamic iframe browsing-context name should evaluate");
+
+    assert_eq!(result, "true|true|false|true|bar|foo");
+}
+
 #[test]
 fn iframe_in_shadow_tree_is_not_a_named_window_property() {
     let mut vm = new_storage_test_vm("https://shadow-iframe-named-property.test/");
@@ -9443,6 +9682,112 @@ async fn iframe_javascript_url_string_completion_replaces_child_document() {
         .expect("iframe javascript URL document should evaluate");
 
     assert_eq!(result, "true|text/html|text/html|false|1");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn iframe_javascript_url_replacement_preserves_later_fragment_for_reload() {
+    const HOST: &str = "iframe-javascript-url-reload.test";
+
+    let server = StaticHttpServer::spawn(2).await;
+    let top_url = server.url_for_host(HOST, "/page.html");
+    let child_url = server.url_for_host(HOST, "/blank.html");
+    let child_fragment_url = server.url_for_host(HOST, "/blank.html#foo");
+    let loader = static_http_loader([server.resolve_entry(HOST)]);
+    let mut vm = new_storage_page_task_executor_test_vm_with_loader(top_url.as_str(), &loader);
+
+    vm.eval(&format!(
+        r#"
+(() => {{
+  globalThis.__javascriptUrlReloadLoadCount = 0;
+  globalThis.__javascriptUrlReloadChildUrl = {};
+  globalThis.__javascriptUrlReloadFragmentUrl = {};
+  const frame = document.createElement('iframe');
+  frame.src = __javascriptUrlReloadChildUrl;
+  frame.onload = () => {{
+    globalThis.__javascriptUrlReloadLoadCount++;
+  }};
+  (document.body || document.documentElement || document).appendChild(frame);
+}})()
+"#,
+        serde_json::to_string(child_url.as_str()).expect("serialize child URL"),
+        serde_json::to_string(child_fragment_url.as_str()).expect("serialize fragment URL")
+    ))
+    .expect("javascript URL reload child setup should evaluate");
+    advance_page_task_executor_until_eval_equals(
+        &mut vm,
+        &loader,
+        "String(__javascriptUrlReloadLoadCount)",
+        "1",
+        "initial child document should load",
+    )
+    .await;
+
+    vm.eval(
+        r#"
+(() => {
+  const frame = document.querySelector('iframe');
+  frame.contentWindow.location =
+    "javascript:'<html>javascript generated page</html>'";
+  frame.contentWindow.location = __javascriptUrlReloadFragmentUrl;
+})()
+"#,
+    )
+    .expect("javascript URL followed by fragment navigation should evaluate");
+    advance_page_task_executor_until_eval_equals(
+        &mut vm,
+        &loader,
+        "String(__javascriptUrlReloadLoadCount)",
+        "2",
+        "javascript URL replacement should dispatch load",
+    )
+    .await;
+
+    assert_eq!(
+        vm.eval(
+            r#"
+(() => {
+  const frame = document.querySelector('iframe');
+  return [
+    frame.contentDocument.URL,
+    frame.contentDocument.body.textContent
+  ].join('|');
+})()
+"#,
+        )
+        .expect("javascript URL replacement state should evaluate"),
+        format!("{}|javascript generated page", child_fragment_url.as_str())
+    );
+
+    vm.eval("document.querySelector('iframe').contentWindow.location.reload()")
+        .expect("replacement document reload should evaluate");
+    advance_page_task_executor_until_eval_equals(
+        &mut vm,
+        &loader,
+        "String(__javascriptUrlReloadLoadCount)",
+        "3",
+        "replacement document should reload the network resource",
+    )
+    .await;
+
+    assert_eq!(
+        vm.eval(
+            r#"
+(() => {
+  const frame = document.querySelector('iframe');
+  return [
+    frame.contentDocument.URL,
+    frame.contentDocument.body.textContent
+  ].join('|');
+})()
+"#,
+        )
+        .expect("reloaded child document state should evaluate"),
+        format!("{}|child fixture", child_fragment_url.as_str())
+    );
+    assert_eq!(
+        server.finish_targets().await,
+        vec!["/blank.html", "/blank.html"]
+    );
 }
 
 #[tokio::test]

@@ -12,6 +12,7 @@ use moli_webapi_declare::WebApiObject;
 const CANVAS_BACKING_STORE_SLOT: &str = "__moliCanvasBackingStore";
 const CANVAS_OWNER_SLOT: &str = "__moliCanvasOwner";
 const CANVAS_HAS_CONTEXT_SLOT: &str = "__moliCanvasHasContext";
+const CANVAS_2D_CONTEXT_SLOT: &str = "__moliCanvas2DContext";
 
 #[derive(WebApiObject)]
 #[webapi(interface = "Object")]
@@ -25,8 +26,14 @@ pub(crate) fn attach_canvas_like_context_object<'s>(
     canvas: v8::Local<'s, v8::Object>,
     context: v8::Local<'s, v8::Object>,
 ) {
+    if canvas_owner_from_context(scope, context).is_none() {
+        super::webgl::initialize_attached_webgl_viewport(scope, canvas, context);
+    }
     let _ = CanvasContextOwnerDeclaration::new(canvas).initialize(scope, context);
     set_private_value(scope, context, CANVAS_OWNER_SLOT, canvas.into());
+    if get_private_value(scope, context, super::CANVAS_CONTEXT_FILL_STYLE_SLOT).is_some() {
+        set_private_value(scope, canvas, CANVAS_2D_CONTEXT_SLOT, context.into());
+    }
     set_private_value(
         scope,
         canvas,
@@ -48,6 +55,9 @@ pub(crate) fn reset_canvas_like_backing_store<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     canvas: v8::Local<'s, v8::Object>,
 ) {
+    if let Some(context) = canvas_2d_context(scope, canvas) {
+        super::context2d::reset_canvas_context_state(scope, context);
+    }
     let Some((width, height)) = canvas_like_dimensions(scope, canvas) else {
         remove_html_canvas_pixels(scope, canvas);
         return;
@@ -62,6 +72,13 @@ pub(crate) fn reset_canvas_like_backing_store<'s>(
     };
     set_private_value(scope, canvas, CANVAS_BACKING_STORE_SLOT, bytes.into());
     replace_html_canvas_pixels(scope, canvas, width, height, vec![0; len]);
+}
+
+pub(super) fn canvas_2d_context<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    canvas: v8::Local<'s, v8::Object>,
+) -> Option<v8::Local<'s, v8::Object>> {
+    get_private_object(scope, canvas, CANVAS_2D_CONTEXT_SLOT)
 }
 
 pub(crate) fn reset_html_canvas_backing_store_for_dimension_assignment<'s>(
@@ -200,7 +217,7 @@ fn remove_html_canvas_pixels<'s>(
     let _ = unsafe { &mut *runtime_ptr }.remove_canvas_pixels(handle);
 }
 
-fn canvas_like_dimensions<'s>(
+pub(super) fn canvas_like_dimensions<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     canvas: v8::Local<'s, v8::Object>,
 ) -> Option<(u32, u32)> {

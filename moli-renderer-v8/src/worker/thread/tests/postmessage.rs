@@ -1,6 +1,77 @@
 use super::*;
 
 #[tokio::test]
+async fn worker_compression_streams_roundtrip_all_formats() {
+    ensure_v8();
+    let mut handle = spawn_worker(
+        r#"
+        (async () => {
+            const result = [];
+            for (const format of ['deflate-raw', 'deflate', 'gzip', 'brotli']) {
+                const source = new ReadableStream({start(c) {
+                    c.enqueue(new TextEncoder().encode('worker 压缩流'));
+                    c.close();
+                }});
+                const stream = source.pipeThrough(new CompressionStream(format))
+                    .pipeThrough(new DecompressionStream(format));
+                result.push(await new Response(stream).text());
+            }
+            postMessage(result);
+        })().catch(e => postMessage([e.name,e.message]));
+        "#
+        .into(),
+        "https://compression-worker.test/worker.js".into(),
+    );
+    let msg = timeout(TIMEOUT, handle.recv())
+        .await
+        .expect("worker compression must settle")
+        .expect("worker must return roundtrip result");
+    let result: serde_json::Value = serde_json::from_str(&expect_post_json(msg)).unwrap();
+    assert_eq!(
+        result,
+        serde_json::json!([
+            "worker 压缩流",
+            "worker 压缩流",
+            "worker 压缩流",
+            "worker 压缩流"
+        ])
+    );
+}
+
+#[tokio::test]
+async fn worker_console_capture_does_not_serialize_or_coerce_page_objects() {
+    ensure_v8();
+    let mut handle = spawn_worker(
+        r#"
+        let hits = 0;
+        const object = {
+            get property() { hits++; return 1; },
+            toJSON() { hits++; return {}; },
+            [Symbol.toPrimitive]() { hits++; return 'object'; }
+        };
+        const proxy = new Proxy({}, {
+            get() { hits++; }, ownKeys() { hits++; return []; }
+        });
+        console.log(object, proxy);
+        postMessage(hits);
+    "#
+        .into(),
+        "https://console-worker.test/worker.js".into(),
+    );
+    loop {
+        let message = timeout(TIMEOUT, handle.recv())
+            .await
+            .expect("worker console probe")
+            .expect("worker result");
+        if matches!(message, WorkerToParentMessage::Console(_)) {
+            continue;
+        }
+        assert_eq!(expect_post_json(message), "0");
+        break;
+    }
+}
+
+#[tokio::test]
 async fn worker_postmessage_to_parent() {
     ensure_v8();
     let mut handle = spawn_worker(
@@ -1844,7 +1915,8 @@ async fn worker_performance_now_uses_readonly_monotonic_time_origin() {
             readonly: descriptor && descriptor.writable === false,
             unchanged: after === before,
             numeric: typeof first === "number" && typeof second === "number",
-            monotonic: second >= first
+            monotonic: second >= first,
+            noLegacyMemory: !("memory" in performance) && !("MemoryInfo" in self)
         });
         close();
         "#
@@ -1858,7 +1930,7 @@ async fn worker_performance_now_uses_readonly_monotonic_time_origin() {
         .expect("channel closed");
     assert_eq!(
         expect_post_json(msg),
-        r#"{"readonly":true,"unchanged":true,"numeric":true,"monotonic":true}"#
+        r#"{"readonly":true,"unchanged":true,"numeric":true,"monotonic":true,"noLegacyMemory":true}"#
     );
 }
 

@@ -18,14 +18,15 @@ wpt-extensions = []
 anyhow.workspace = true
 app_units.workspace = true
 base64.workspace = true
-brotli.workspace = true
+brotlic.workspace = true
 crossbeam-channel.workspace = true
 cssparser.workspace = true
 data-url.workspace = true
 dom.workspace = true
 encoding_rs.workspace = true
 euclid.workspace = true
-flate2.workspace = true
+flate2 = { workspace = true, features = ["zlib"] }
+kurbo.workspace = true
 futures-util.workspace = true
 precomputed-hash.workspace = true
 percent-encoding.workspace = true
@@ -118,6 +119,7 @@ v8 = { workspace = true, features = ["v8_enable_pointer_compression"] }
 v8.workspace = true
 
 [dev-dependencies]
+fastrand.workspace = true
 moli-fetch = { workspace = true, features = ["test-support"] }
 moli-parser = { workspace = true, features = ["test-support"] }
 moli-page-types = { workspace = true, features = ["test-support"] }

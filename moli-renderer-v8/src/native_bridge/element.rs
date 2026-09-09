@@ -441,13 +441,16 @@ pub(super) use global_attributes::{
     node_credentialless_getter_function, node_credentialless_setter_function,
     node_dir_getter_function, node_dir_setter_function, node_draggable_getter_function,
     node_draggable_setter_function, node_enter_key_hint_getter_function,
-    node_enter_key_hint_setter_function, node_hidden_getter_function, node_hidden_setter_function,
-    node_input_mode_getter_function, node_input_mode_setter_function,
+    node_enter_key_hint_setter_function, node_focus_group_getter_function,
+    node_focus_group_setter_function, node_focus_group_start_getter_function,
+    node_focus_group_start_setter_function, node_hidden_getter_function,
+    node_hidden_setter_function, node_input_mode_getter_function, node_input_mode_setter_function,
     node_is_content_editable_getter_function, node_lang_getter_function, node_lang_setter_function,
     node_sandbox_getter_function, node_sandbox_setter_function, node_spellcheck_getter_function,
     node_spellcheck_setter_function, node_tab_index_getter_function,
     node_tab_index_setter_function, node_title_getter_function, node_title_setter_function,
     node_translate_getter_function, node_translate_setter_function,
+    node_writing_suggestions_getter_function, node_writing_suggestions_setter_function,
     null_to_empty_dom_string_reflection_setter_function, object_archive_getter_function,
     object_code_base_getter_function, object_code_getter_function,
     object_code_type_getter_function, object_data_getter_function, object_declare_getter_function,
@@ -998,12 +1001,14 @@ struct HtmlElementGeometryPrototypeDeclaration {
     #[webapi(
         accessor_property = "offsetWidth",
         enumerable,
+        receiver = super::receivers::html_element,
         getter = node_offset_width_getter_function
     )]
     offset_width: (),
     #[webapi(
         accessor_property = "offsetHeight",
         enumerable,
+        receiver = super::receivers::html_element,
         getter = node_offset_height_getter_function
     )]
     offset_height: (),
@@ -1483,6 +1488,13 @@ struct HtmlElementStandardPrototypeDeclaration {
     )]
     spellcheck: (),
     #[webapi(
+        accessor_property = "writingSuggestions",
+        enumerable,
+        getter = node_writing_suggestions_getter_function,
+        setter = node_writing_suggestions_setter_function
+    )]
+    writing_suggestions: (),
+    #[webapi(
         accessor_property = "contentEditable",
         enumerable,
         getter = node_content_editable_getter_function,
@@ -1560,6 +1572,20 @@ struct HtmlOrForeignElementPrototypeDeclaration {
         setter = node_nonce_setter_function
     )]
     nonce: (),
+    #[webapi(
+        accessor_property = "focusGroup",
+        enumerable,
+        getter = node_focus_group_getter_function,
+        setter = node_focus_group_setter_function
+    )]
+    focus_group: (),
+    #[webapi(
+        accessor_property = "focusGroupStart",
+        enumerable,
+        getter = node_focus_group_start_getter_function,
+        setter = node_focus_group_start_setter_function
+    )]
+    focus_group_start: (),
     #[webapi(
         accessor_property,
         enumerable,
@@ -3223,7 +3249,6 @@ fn iframe_content_document_getter_function<'s>(
     let Ok((runtime_ptr, handle)) =
         node_runtime_and_handle_from_object_or_detached(scope, receiver)
     else {
-        rv.set_null();
         return;
     };
     if iframe_is_inside_its_own_child_context_document(scope, runtime_ptr, handle) {
@@ -3290,7 +3315,6 @@ fn iframe_content_window_getter_function<'s>(
     let Ok((runtime_ptr, handle)) =
         node_runtime_and_handle_from_object_or_detached(scope, receiver)
     else {
-        rv.set_null();
         return;
     };
     if iframe_is_inside_its_own_child_context_document(scope, runtime_ptr, handle) {
@@ -3874,6 +3898,20 @@ struct HtmlIFrameElementPrototypeDeclaration {
     srcdoc: (),
     #[webapi(
         accessor_property,
+        getter = dom_string_reflection_getter_function,
+        setter = dom_string_reflection_setter_function,
+        data = DomStringReflection::IframeAllow
+    )]
+    allow: (),
+    #[webapi(
+        accessor_property,
+        getter = dom_string_reflection_getter_function,
+        setter = dom_string_reflection_setter_function,
+        data = DomStringReflection::IframeCsp
+    )]
+    csp: (),
+    #[webapi(
+        accessor_property,
         getter = html_loading_getter_function,
         setter = dom_string_reflection_setter_function,
         setter_data = DomStringReflection::IframeLoading
@@ -3953,9 +3991,9 @@ struct HtmlIFrameElementPrototypeDeclaration {
         setter_data = NullToEmptyDomStringReflection::IframeMarginWidth
     )]
     margin_width: (),
-    #[webapi(accessor_property, getter = iframe_content_document_getter_function)]
+    #[webapi(accessor_property, getter = iframe_content_document_getter_function, receiver = super::receivers::html_iframe_element)]
     content_document: (),
-    #[webapi(accessor_property, getter = iframe_content_window_getter_function)]
+    #[webapi(accessor_property, getter = iframe_content_window_getter_function, receiver = super::receivers::html_iframe_element)]
     content_window: (),
 }
 

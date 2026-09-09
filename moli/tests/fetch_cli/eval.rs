@@ -66,6 +66,134 @@ fn run_eval_source(
 }
 
 #[test]
+fn eval_can_use_realtime_audio_oscillator_and_analyser_shims() -> Result<()> {
+    let output = run_eval(
+        "data:text/html,<!doctype html><title>Web Audio</title>",
+        r#"(async () => {
+          const context = new AudioContext();
+          const oscillator = context.createOscillator();
+          const analyser = context.createAnalyser();
+          oscillator.type = 'triangle';
+          oscillator.frequency.setValueAtTime(880, context.currentTime);
+          analyser.fftSize = 32;
+          const connected = oscillator.connect(analyser).connect(context.destination);
+          // Before starting the source, the analyser must be silent. Reading
+          // after start would depend on whether an audio quantum has run yet.
+          const frequencies = new Float32Array(analyser.frequencyBinCount + 1).fill(42);
+          const readResult = analyser.getFloatFrequencyData(frequencies);
+          const waveform = new Uint8Array(analyser.fftSize);
+          analyser.getByteTimeDomainData(waveform);
+          const startResult = oscillator.start(0);
+          oscillator.disconnect();
+          analyser.disconnect();
+          await context.close();
+          return {
+            oscillator: oscillator instanceof OscillatorNode,
+            frequency: oscillator.frequency.value,
+            analyser: analyser instanceof AnalyserNode,
+            connected: connected === context.destination,
+            readReturnedUndefined: readResult === undefined,
+            startReturnedUndefined: startResult === undefined,
+            bins: analyser.frequencyBinCount,
+            silentFrequencies: frequencies.slice(0, -1).every(value => value === -Infinity),
+            untouchedTail: frequencies[analyser.frequencyBinCount],
+            silentWaveform: waveform.every(value => value === 128),
+            state: context.state
+          };
+        })()"#,
+        &[],
+    )?;
+    assert!(output.status.success(), "{}", clean_output(&output.stderr));
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "oscillator": true,
+            "frequency": 880,
+            "analyser": true,
+            "connected": true,
+            "readReturnedUndefined": true,
+            "startReturnedUndefined": true,
+            "bins": 16,
+            "silentFrequencies": true,
+            "untouchedTail": 42,
+            "silentWaveform": true,
+            "state": "closed"
+        })
+    );
+    Ok(())
+}
+
+#[test]
+fn eval_computed_sizes_only_use_existing_geometry_with_or_without_css() -> Result<()> {
+    let url = "data:text/html,<!doctype html><div id=target style=\"max-width:20px\"></div><canvas id=canvas style=\"max-width:40px\"></canvas>";
+    let script = r#"(() => {
+      const target = document.getElementById('target');
+      const canvas = document.getElementById('canvas');
+      const targetStyle = getComputedStyle(target), canvasStyle = getComputedStyle(canvas);
+      const read = () => [targetStyle.width, targetStyle.height, canvasStyle.width, canvasStyle.height];
+      const readLogical = () => [targetStyle.inlineSize, targetStyle.blockSize, canvasStyle.inlineSize, canvasStyle.blockSize];
+      const before = read();
+      const logicalBefore = readLogical();
+      const geometry = [target.offsetWidth, target.offsetHeight, canvas.offsetWidth, canvas.offsetHeight];
+      return { before, logicalBefore, geometry, after: read(), logicalAfter: readLogical() };
+    })()"#;
+    for args in [
+        vec![],
+        vec!["--disable-css"],
+        vec!["--layout"],
+        vec!["--layout", "--disable-css"],
+    ] {
+        let output = run_eval(url, script, &args)?;
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            clean_output(&output.stderr)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(
+            value["logicalBefore"], value["before"],
+            "cold axes: {args:?}"
+        );
+        assert_eq!(
+            value["logicalAfter"], value["after"],
+            "sampled axes: {args:?}"
+        );
+        assert_eq!(
+            value["before"],
+            serde_json::json!(["auto", "auto", "auto", "auto"]),
+            "width/height must not initiate layout: {args:?}: {value}"
+        );
+        if args.contains(&"--layout") {
+            let expected = value["geometry"]
+                .as_array()
+                .expect("geometry array")
+                .iter()
+                .map(|value| format!("{}px", value.as_i64().expect("integer offset size")))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                value["after"],
+                serde_json::json!(expected),
+                "{args:?}: {value}"
+            );
+            if args.contains(&"--disable-css") {
+                assert!(value["geometry"][0].as_i64().expect("block width") > 20);
+                assert_eq!(value["geometry"][2], 300);
+                assert_eq!(value["geometry"][3], 150);
+            } else {
+                assert_eq!(value["geometry"], serde_json::json!([20, 0, 40, 20]));
+            }
+        } else {
+            assert_eq!(
+                value["after"], value["before"],
+                "Mock geometry must not manufacture a real layout snapshot"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn eval_uses_standard_document_apis_and_writes_text() -> Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
     let server = runtime.block_on(FixtureServer::spawn())?;

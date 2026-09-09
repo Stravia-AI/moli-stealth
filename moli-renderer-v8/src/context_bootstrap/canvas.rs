@@ -115,7 +115,7 @@ const WEBGL_SUPPORTED_EXTENSIONS: &[&str] = &[
 ];
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(name = "HTMLCanvasElement")]
+#[webapi(name = "HTMLCanvasElement", receiver = crate::native_bridge::receivers::html_canvas_element)]
 struct HtmlCanvasElementPrototypeAccessorsDeclaration {
     #[webapi(
         accessor_property,
@@ -188,6 +188,8 @@ mod image_bitmap;
 mod objects;
 mod offscreen;
 mod path;
+mod state;
+mod transform;
 mod webgl;
 
 pub(crate) use backing_store::{
@@ -249,10 +251,11 @@ pub(crate) use webgl::{
     webgl_create_framebuffer_callback, webgl_create_program_callback,
     webgl_create_renderbuffer_callback, webgl_create_shader_callback,
     webgl_get_attrib_location_callback, webgl_get_context_attributes_callback,
-    webgl_get_extension_callback, webgl_get_parameter_callback, webgl_get_shader_info_log_callback,
-    webgl_get_shader_precision_format_callback, webgl_get_supported_extensions_callback,
-    webgl_is_context_lost_callback, webgl_lose_context_noop_callback, webgl_noop_callback,
-    webgl_uniform_location_callback, webgl_zero_callback, webgl2_color_space_getter_callback,
+    webgl_get_error_callback, webgl_get_extension_callback, webgl_get_parameter_callback,
+    webgl_get_shader_info_log_callback, webgl_get_shader_precision_format_callback,
+    webgl_get_supported_extensions_callback, webgl_is_context_lost_callback,
+    webgl_lose_context_noop_callback, webgl_noop_callback, webgl_uniform_location_callback,
+    webgl_viewport_callback, webgl2_color_space_getter_callback,
     webgl2_color_space_setter_callback, webgl2_get_extension_callback,
     webgl2_get_internalformat_parameter_callback, webgl2_get_parameter_callback,
     webgl2_get_supported_extensions_callback,
@@ -275,6 +278,9 @@ pub(super) fn install_canvas_template_bindings<'s>(
         }
         "ImageBitmap" => {
             image_bitmap::install_image_bitmap_template_bindings(scope, template);
+        }
+        "TextMetrics" => {
+            context2d::install_text_metrics_template_bindings(scope, template);
         }
         _ => {}
     }

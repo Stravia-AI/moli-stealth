@@ -294,18 +294,52 @@ and full rendering/OS impersonation are not established by these captures.
 
 The current suite is a strong core smoke gate, not a complete Playwright compatibility suite.
 
+The `dom-input` keypress contract was calibrated on 2026-09-08 against
+headed Debian Chromium 145.0.7632.116 through CDP. It checks the full trusted
+`keydown -> keypress -> beforeinput -> input -> keyup` sequence for Playwright
+typing, cancellation at keypress, the distinct `rawKeyDown` and `char` paths,
+and the absence of keyboard events for `Input.insertText`.
+
+The default `webgl-viewport` group was calibrated on 2026-09-07 against
+Debian `/usr/bin/chromium` 145.0.7632.116. It uses the same fixture as the
+renderer tests to check WebGL1/2 on HTML and
+Offscreen canvases: viewport initialization, setter/conversion errors, copied
+Int32Array queries, context isolation, context reacquisition, resize retention,
+and clamping to the advertised maximum. It is not a GPU rendering test.
+
+The default `svg-rect` group checks the detached `SVGRect` interface used by
+SVG capability detection, sharing the renderer fixture for prototype, identity,
+and restricted-float conversion contracts. It was calibrated on 2026-09-07
+against Debian `/usr/bin/chromium` 145.0.7632.116 and runs independently of
+IndexedDB startup coverage.
+
+The default `target-lifecycle` process group locks down Moli's resource lifetime,
+not a Chromium-specific FD count. In one server it closes 800 default-context
+targets with `Target.closeTarget`, 800 with `Page.close`, 128 after detaching,
+and 64 by disposing explicit contexts. Foreground/background creation alternates.
+It waits for each exact `Target.targetDestroyed`, records Linux `/proc/<pid>/fd`
+and thread counts every batch, and checks a fixed post-warmup resource budget.
+Each phase must still load a real HTTP document and preserve a live peer Page.
+This catches closed renderer wakers retaining Tokio I/O drivers without changing
+the test to use a fresh context for each default-context Page. Batch progress,
+resource samples, and the usual server logs are retained on failure. With an
+external endpoint or on non-Linux systems, protocol churn/navigation still run;
+the artifact explicitly reports that FD sampling was unavailable. CI uses the
+managed Linux server, so the resource assertions are mandatory there.
+
 Covered well:
 
 - The default raw `debugger-breakpoints`, `runtime-exception`, and
-  `file-chooser` groups preserve six raw-CDP contracts covering seven Lexbench
-  task regressions at the public process boundary, and add two multi-attachment
-  Runtime exception contracts. They dispatch `Debugger.getPossibleBreakpoints`,
+  `file-chooser` groups preserve focused Lexbench regressions at the public
+  process boundary, including multi-attachment Runtime exception contracts.
+  They dispatch `Debugger.getPossibleBreakpoints`,
   `setBreakpoint`, `removeBreakpoint`, and `setBreakpointByUrl` while the Page
   is normally running, require an uncaught timer error to publish
   `Runtime.exceptionThrown` without a follow-up command, verify that each
   Runtime-enabled attachment receives the target-owned exception while a
-  disabled peer does not, and require a user-gesture file-input activation to
-  publish the session-scoped `Page.fileChooserOpened` event.
+  disabled peer does not, keep `Runtime.enable` from making Error stack cost
+  track JavaScript stack depth, and require a user-gesture file-input activation
+  to publish the session-scoped `Page.fileChooserOpened` event.
 - The default raw `url-policy` group holds the hosted local-file boundary at the
   public process edge. It requires an exact session-routed `Page.navigate`
   `-32000` error with no lifecycle or document replacement, verifies page

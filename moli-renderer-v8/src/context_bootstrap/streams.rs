@@ -26,7 +26,6 @@ use super::*;
 use moli_webapi_declare::WebApiFunctionTemplate;
 
 mod compression;
-mod compression_codec;
 mod constructors;
 mod readable;
 mod transferable;
@@ -43,6 +42,7 @@ enum StreamPrototypeInstaller {
     Controller,
     QueuingStrategy,
     TransformFamily,
+    Compression,
 }
 
 #[derive(Clone, Copy)]
@@ -159,7 +159,7 @@ const STREAM_INTERFACE_SPECS: &[StreamInterfaceSpec] = &[
             parent: None,
             kind: ConstructorKind::CompressionStream,
         },
-        prototype_installer: StreamPrototypeInstaller::TransformFamily,
+        prototype_installer: StreamPrototypeInstaller::Compression,
     },
     StreamInterfaceSpec {
         constructor: ConstructorSpec {
@@ -167,7 +167,7 @@ const STREAM_INTERFACE_SPECS: &[StreamInterfaceSpec] = &[
             parent: None,
             kind: ConstructorKind::DecompressionStream,
         },
-        prototype_installer: StreamPrototypeInstaller::TransformFamily,
+        prototype_installer: StreamPrototypeInstaller::Compression,
     },
     StreamInterfaceSpec {
         constructor: ConstructorSpec {
@@ -316,12 +316,9 @@ pub(super) use super::stream_objects::{
     readable_stream_default_reader_constructor_callback,
     writable_stream_default_writer_constructor_callback,
 };
-pub(in crate::context_bootstrap) use compression::{
-    discard_compression_stream_codec, process_compression_stream_codec,
-};
+pub(super) use compression::compression_stream_constructor_callback;
 pub(super) use constructors::{
-    byte_length_queuing_strategy_constructor_callback, compression_stream_constructor_callback,
-    count_queuing_strategy_constructor_callback, decompression_stream_constructor_callback,
+    byte_length_queuing_strategy_constructor_callback, count_queuing_strategy_constructor_callback,
     readable_stream_constructor_callback, text_decoder_stream_constructor_callback,
     text_encoder_stream_constructor_callback, transform_stream_constructor_callback,
     writable_stream_constructor_callback,
@@ -418,6 +415,9 @@ pub(super) fn install_stream_template_bindings<'s>(
         }
         StreamPrototypeInstaller::TransformFamily => {
             writable::install_transform_stream_template_bindings(scope, prototype, interface_name);
+        }
+        StreamPrototypeInstaller::Compression => {
+            compression::install_template_bindings(scope, prototype, interface_name);
         }
     }
 }
