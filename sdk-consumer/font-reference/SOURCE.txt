@@ -1,0 +1,85 @@
+Noto Sans CJK SC Regular outline acceptance reference
+
+Source: https://github.com/notofonts/noto-cjk/tree/523d033d6cb47f4a80c58a35753646f5c3608a78
+Official tag: Sans2.004
+Font: Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf
+Download: https://raw.githubusercontent.com/notofonts/noto-cjk/523d033d6cb47f4a80c58a35753646f5c3608a78/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf
+SHA-256: 2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b
+Embedded version: Version 2.004;hotconv 1.0.118;makeotfexe 2.5.65603
+Copyright: © 2014-2021 Adobe (http://www.adobe.com/).
+License: SIL Open Font License 1.1; verbatim upstream license plus font copyright in OFL.txt.
+The SVG is a modified/extracted three-glyph work, not an installable font.
+These assets belong only to the external acceptance consumer, never the SDK implementation package.
+
+Extraction (performed offline with fontTools 4.59.0):
+  font = TTFont(io.BytesIO(verified_download))
+  glyphset = font.getGlyphSet()
+  for index, char in enumerate('中文国'):
+      name = font.getBestCmap()[ord(char)]
+      pen = SVGPathPen(glyphset)
+      glyphset[name].draw(pen)
+      # path d=pen.getCommands(), transform=translate(index*1000, 0)
+  # group transform=translate(0 1000) scale(1 -1)
+  # viewBox=0 0 3000 1166.6666666667; width=576; height=224
+Glyphs: U+4E2D cid09544, U+6587 cid20036, U+56FD cid13185.
+All advances = 1000; unitsPerEm = 1000.
+Bounds in font units respectively:
+  (96,-79,902,840), (36,-78,967,847), (86,-80,914,795).
+SVG SHA-256: 69dc1528d75c8590286f2c8685f653d00159e516e242a193cefe3e7fcd4fd6fe
+No runtime font discovery, font file reading, or second rendering of the selected font supplies the oracle.
+
+Comparator:
+  Public Page.evaluate replaces the already-verified original fixture with a
+  192px regular text row and an independent SVG path row. Screenshot ink is
+  thresholded at 160, translated to its bounding-box origin (never resized),
+  then compared bidirectionally. Every ink pixel must have matching ink within
+  one CSS pixel (ceil(device scale)); unrelated interior ink cannot be ignored.
+  This is a deliberately strict geometric edge tolerance, NOT a calibrated
+  cross-platform golden. Main must run positive/negative GNU/Alpine x64/ARM64
+  cases before claiming platform acceptance. If correct-font rasterization
+  exceeds it, inspect the saved evidence and measured unmatched pixel counts;
+  do not replace the fixed oracle with runtime output or silently loosen it.
+  MOLI_SDK_EVIDENCE_DIR stores font-reference.png and geometry before assertion.
+
+Actual wrong-font negative (fresh process, same fonts consumer command):
+Official tag Serif2.003, commit 9b0f1436e455d902de067a2501422e5dc71ad16b.
+Download: https://raw.githubusercontent.com/notofonts/noto-cjk/9b0f1436e455d902de067a2501422e5dc71ad16b/Serif/OTF/SimplifiedChinese/NotoSerifCJKsc-Regular.otf
+SHA-256: 2a2eae2628df83556c54018c41e20fa532c1b862c5256ae8b3f23feb918d12ca
+Embedded version: Version 2.003;hotconv 1.1.1;makeotfexe 2.6.0
+This font is a full CJK font, not a missing-glyph substitute. Its three advances
+are also 1000. Its bounds respectively are (106,-78,932,838),
+(41,-81,969,836), (99,-78,944,821). At 192px/em its total ink width already
+exceeds the Sans reference by 3.84px, in addition to changed interior strokes.
+It must pass the original full-width, distinct-glyph and fallback checks, then
+fail with matches=false in font-outline-comparison.json. A missing font, clipped SVG,
+failed navigation, or earlier assertion is NOT successful negative evidence.
+
+Linux procedure (requires fontconfig tools and already-built real consumer):
+1. Download the pinned fonts above during environment preparation; verify the
+   listed SHA-256 before use. Keep them outside the SDK/package. Obtain fixed
+   DejaVu Sans 2.37 as for the existing Latin acceptance.
+2. Create separate isolated directories /tmp/sdk-font-positive and
+   /tmp/sdk-font-negative. Put DejaVuSans.ttf in both. Put ONLY the pinned Sans
+   OTF in positive and ONLY the pinned Serif OTF in negative. Do not include
+   global Fontconfig configs, which could rediscover system Sans fonts.
+3. Create two Fontconfig files from this template, replacing CASE with positive
+   or negative. The alias is needed only in the negative config:
+
+<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
+<fontconfig>
+  <dir>/tmp/sdk-font-CASE</dir>
+  <cachedir>/tmp/sdk-font-cache-CASE</cachedir>
+  <alias binding="strong"><family>Noto Sans CJK SC</family><prefer><family>Noto Serif CJK SC</family></prefer></alias>
+</fontconfig>
+
+4. FONTCONFIG_FILE=/tmp/positive.conf fc-match 'Noto Sans CJK SC'
+   FONTCONFIG_FILE=/tmp/negative.conf fc-match 'Noto Sans CJK SC'
+   Require Sans then Serif respectively (and DejaVu Sans for the Latin family).
+   fc-match is a prerequisite diagnostic, not acceptance by itself.
+5. Run the built consumer in fresh processes:
+   FONTCONFIG_FILE=/tmp/positive.conf MOLI_SDK_EVIDENCE_DIR=/tmp/font-positive ./moli-sdk-consumer fonts
+   FONTCONFIG_FILE=/tmp/negative.conf MOLI_SDK_EVIDENCE_DIR=/tmp/font-negative ./moli-sdk-consumer fonts
+   Require positive exit 0 / matches=true and negative nonzero / matches=false.
+   Preserve stderr plus both evidence directories. Repeat on GNU and Alpine,
+   both architectures; do not report these runs as completed from extraction.

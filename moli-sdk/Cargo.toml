@@ -1,0 +1,23 @@
+[package]
+name = "moli-sdk"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+links = "moli_sdk_ffi"
+build = "build.rs"
+
+[dependencies]
+moli-sdk-types = { path = "../moli-sdk-types" }
+serde = "1"
+serde_json = "1"
+futures-channel = "0.3"
+
+[build-dependencies]
+serde_json = "1"
+sha2 = "0.10"
+flate2 = "1"
+tar = "0.4"
+ureq = "3"
+
+[lints]
+workspace = true

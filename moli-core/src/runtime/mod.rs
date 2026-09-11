@@ -139,8 +139,11 @@ impl std::fmt::Debug for Browser {
     }
 }
 
-impl Drop for BrowserLifetimeOwner {
-    fn drop(&mut self) {
+impl BrowserLifetimeOwner {
+    fn shutdown(&mut self) -> Result<()> {
+        if self.js_runtime.is_none() {
+            return Ok(());
+        }
         debug!("terminating browser renderer producers");
         if let Some(js_runtime) = self.js_runtime.take() {
             js_runtime.terminate_resource_producers_for_owner_shutdown();
@@ -150,13 +153,20 @@ impl Drop for BrowserLifetimeOwner {
             drop(js_runtime);
         }
         self.browser_context_owner.shutdown_and_join();
-        if let Err(error) = self.partition.flush() {
+        self.partition.flush()?;
+        debug!("browser renderer and resource owners joined");
+        Ok(())
+    }
+}
+
+impl Drop for BrowserLifetimeOwner {
+    fn drop(&mut self) {
+        if let Err(error) = self.shutdown() {
             warn!(
                 error = %error,
                 "failed to flush browser storage partition"
             );
         }
-        debug!("browser renderer and resource owners joined");
     }
 }
 
@@ -294,6 +304,39 @@ impl Browser {
             id: NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed),
             browser: self.clone(),
         }
+    }
+
+    /// 关闭最后一个浏览器所有者，等待渲染及网络回收，并返回存储刷新错误。
+    ///
+    /// 调用方必须先关闭页面，并释放所有 Browser 克隆和 Session。
+    /// 此方法在浏览器所有者线程上同步等待，不应直接运行在宿主异步执行线程。
+    /// 若仍有其他浏览器所有者，返回错误并只释放当前句柄，不关闭其他所有者。
+    pub fn close(self) -> Result<()> {
+        let Self {
+            config,
+            js_runtime,
+            resource_runtime,
+            page_network_policy,
+            partition,
+            _web_api_registry,
+            _selector_engine,
+            _automation,
+            _lifetime_owner,
+        } = self;
+        // 和隐式析构保持相同顺序：先释放请求侧句柄，再回收生产者和持久存储。
+        drop((
+            config,
+            js_runtime,
+            resource_runtime,
+            page_network_policy,
+            partition,
+            _web_api_registry,
+            _selector_engine,
+            _automation,
+        ));
+        let mut owner = Rc::try_unwrap(_lifetime_owner)
+            .map_err(|_| anyhow!("browser close requires the final Browser owner"))?;
+        owner.shutdown()
     }
 
     pub fn cookies(&self) -> Result<Vec<StoredCookie>> {

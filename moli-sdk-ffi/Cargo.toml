@@ -1,0 +1,25 @@
+[package]
+name = "moli-sdk-ffi"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+moli-sdk-types = { path = "../moli-sdk-types" }
+moli-core.workspace = true
+moli-page-types.workspace = true
+moli-stealth-net.workspace = true
+moli-cookie-jar.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+bytes.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time", "net", "macros"] }
+futures-util.workspace = true
+url.workspace = true
+http.workspace = true
+
+[lints]
+workspace = true

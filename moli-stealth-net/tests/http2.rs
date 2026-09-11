@@ -116,6 +116,46 @@ async fn stream_limit_is_scoped_to_each_physical_h2_connection() {
 }
 
 #[tokio::test]
+async fn dropping_last_transport_preserves_an_owned_h2_response() {
+    let (listener, url, address) = local_h2_origin().await;
+    let acceptor = h2_tls_acceptor();
+    let (release, waiting) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let stream = acceptor.accept(stream).await.unwrap();
+        let mut connection = h2::server::handshake(stream).await.unwrap();
+        let mut waiting = Some(waiting);
+        while let Some(Ok((_request, mut respond))) = connection.accept().await {
+            let response = http::Response::builder().status(200).body(()).unwrap();
+            let mut body = respond.send_response(response, false).unwrap();
+            let waiting = waiting.take().unwrap();
+            tokio::spawn(async move {
+                waiting.await.unwrap();
+                body.send_data("owned response".into(), true).unwrap();
+            });
+        }
+    });
+    let transport = transport(1, Some(1));
+    let mut response = transport
+        .execute(request(url, "/owned", address))
+        .await
+        .unwrap();
+    drop(transport);
+    release.send(()).unwrap();
+    let body = tokio::time::timeout(Duration::from_secs(3), async {
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.body.chunk().await.unwrap() {
+            bytes.extend_from_slice(&chunk);
+        }
+        bytes
+    })
+    .await
+    .unwrap();
+    assert_eq!(body, b"owned response");
+    server.abort();
+}
+
+#[tokio::test]
 async fn dropping_one_h2_body_does_not_abort_a_sibling_stream() {
     let (listener, url, address) = local_h2_origin().await;
     let acceptor = h2_tls_acceptor();

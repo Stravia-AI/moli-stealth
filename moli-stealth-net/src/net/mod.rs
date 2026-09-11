@@ -19,6 +19,7 @@ use std::{
 };
 
 use bytes::Bytes;
+use tokio::{sync::Mutex, task::JoinSet};
 
 use self::{
     h1_client::{BodyFraming, H1Body},
@@ -122,6 +123,14 @@ struct TransportInner {
     config: TransportConfig,
     pool: ConnectionPool,
     tls_session_cache: TlsSessionCache,
+    drivers: Mutex<JoinSet<()>>,
+}
+
+impl Drop for TransportInner {
+    fn drop(&mut self) {
+        // 普通 Drop 保留已交出的响应正文原有生命周期；确定性回收走 close。
+        self.drivers.get_mut().detach_all();
+    }
 }
 
 impl Transport {
@@ -138,8 +147,36 @@ impl Transport {
                 config,
                 pool,
                 tls_session_cache: TlsSessionCache::new(),
+                drivers: Mutex::new(JoinSet::new()),
             }),
         })
+    }
+
+    /// 关闭最后一个 Transport 句柄，等待所属 HTTP/2 驱动销毁，再释放连接池。
+    ///
+    /// 调用前须丢弃所有响应正文和未完成的请求 Future。存在其他 Transport
+    /// 克隆时返回 InvalidInput，不关闭它们正在使用的连接。普通 Drop 不等待。
+    pub async fn close(self) -> Result<(), TransportError> {
+        let mut inner = Arc::try_unwrap(self.inner).map_err(|_| {
+            TransportError::InvalidInput("cannot close Transport while clones remain".into())
+        })?;
+        let drivers = inner.drivers.get_mut();
+        drivers.abort_all();
+        let mut failure = None;
+        while let Some(result) = drivers.join_next().await {
+            if let Err(error) = result
+                && !error.is_cancelled()
+            {
+                failure.get_or_insert_with(|| {
+                    TransportError::Http2(format!("connection driver task failed: {error}"))
+                });
+            }
+        }
+        drop(inner);
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     /// Returns the context-scoped TLS state owned by this transport.
@@ -386,10 +423,18 @@ impl Transport {
         if connected.version == http::Version::HTTP_2 && !request.http1_only {
             let (sender, driver) =
                 h2_client::handshake(connected.stream, &self.inner.config.fingerprint).await?;
-            tokio::spawn(async move {
-                let _permits = permits;
-                let _ = driver.await;
-            });
+            {
+                let mut drivers = self.inner.drivers.lock().await;
+                while let Some(result) = drivers.try_join_next() {
+                    result.map_err(|error| {
+                        TransportError::Http2(format!("connection driver task failed: {error}"))
+                    })?;
+                }
+                drivers.spawn(async move {
+                    let _permits = permits;
+                    let _ = driver.await;
+                });
+            }
             let connection = self
                 .inner
                 .pool

@@ -1,0 +1,23 @@
+[package]
+name = "moli-sdk-consumer"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# 必须独立解析依赖与构建配置；发布验证把此目录复制到仓库外。
+[workspace]
+
+[dependencies]
+moli-sdk = { path = "../moli-sdk" }
+axum = "0.8.6"
+futures-util = "0.3.31"
+h2 = "0.4"
+png = "0.18"
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+serde_json = "1.0.145"
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "net", "sync", "time", "io-util"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+
+[profile.release]
+debug = 1
