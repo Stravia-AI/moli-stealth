@@ -119,10 +119,14 @@ impl BrowserIdentityProfile {
 
     /// Builds the coherent identity selected by CDP `setUserAgentOverride`.
     ///
-    /// Chromium does not infer Client Hint metadata from the replacement UA.
+    /// Chromium does not infer Client Hint metadata from a replacement UA.
     /// Without `userAgentMetadata`, `navigator.userAgentData` remains exposed
     /// with empty brands/platform and no `Sec-CH-UA-*` values are generated.
-    /// Omitted values fall back to the target's normal, non-overridden profile.
+    ///
+    /// An exact echo of the base UA is idempotent. Puppeteer sends that command
+    /// while attaching every target; treating it as a replacement would erase
+    /// Moli's process-wide identity before the caller requests an override.
+    /// Other omitted values fall back to the target's normal profile.
     pub fn from_devtools_override(
         base: &Self,
         user_agent: impl Into<String>,
@@ -187,7 +191,7 @@ impl BrowserIdentityProfile {
                         .unwrap_or_else(|| base.form_factors.clone()),
                 )
             }
-            (true, None) => (
+            (true, None) if user_agent != base.user_agent => (
                 Vec::new(),
                 Vec::new(),
                 String::new(),
@@ -200,11 +204,11 @@ impl BrowserIdentityProfile {
                 false,
                 Vec::new(),
             ),
-            // An empty CDP userAgent clears the override. Chromium then
-            // exposes the target's natural UA metadata again; the protocol
-            // rejects metadata supplied together with an empty UA before this
-            // constructor is reached.
-            (false, _) => (
+            // An empty CDP userAgent clears the override. An exact base-UA echo
+            // is likewise identity-preserving for automation-client startup.
+            // The protocol rejects metadata supplied with an empty UA before
+            // this constructor is reached.
+            (true, None) | (false, _) => (
                 base.brands.clone(),
                 base.full_version_list.clone(),
                 base.full_version.clone(),
@@ -468,6 +472,20 @@ mod tests {
         assert!(identity.brands().is_empty());
         assert_eq!(identity.platform(), "");
         assert_eq!(identity.sec_ch_ua_value(), None);
+    }
+
+    #[test]
+    fn devtools_echo_of_natural_user_agent_preserves_client_hints() {
+        let base = BrowserIdentityProfile::default();
+        let identity = BrowserIdentityProfile::from_devtools_override(
+            &base,
+            base.user_agent(),
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(identity, base);
     }
 
     #[test]
