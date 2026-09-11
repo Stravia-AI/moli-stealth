@@ -23,6 +23,8 @@ if ($Mode -eq 'build') {
     if ($Target.StartsWith('aarch64')) {
         # Visual Studio 生成器不生成 BoringSSL GNU 风格 ARM 汇编的构建步骤。
         $env:CMAKE_GENERATOR = 'Ninja'
+        # AWS-LC 自带 ARM 汇编的 VS 集成，不继承 BoringSSL 的生成器选择。
+        $env:AWS_LC_SYS_CMAKE_GENERATOR = 'Visual Studio 17 2022'
         $env:CC = 'clang-cl'
         $env:CXX = 'clang-cl'
     }

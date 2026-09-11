@@ -262,6 +262,9 @@ def build(args: argparse.Namespace) -> None:
     (symbols / "lib").mkdir(parents=True)
     env = os.environ.copy()
     env.update(CARGO_PROFILE_RELEASE_DEBUG="2", CARGO_PROFILE_RELEASE_STRIP="none", CARGO_PROFILE_RELEASE_PANIC="unwind", CARGO_PROFILE_DEV_DEBUG="2", CARGO_PROFILE_DEV_STRIP="none", CARGO_PROFILE_DEV_PANIC="unwind", PKG_CONFIG_ALL_STATIC="1")
+    if windows:
+        # 减少调试信息副本，避免默认并行代码生成将 COFF 归档推过 4 GiB 边界。
+        env["CARGO_PROFILE_DEV_CODEGEN_UNITS"] = "1"
     if "RUST_FONTCONFIG_DLOPEN" in env:
         raise RuntimeError("RUST_FONTCONFIG_DLOPEN is incompatible with complete static SDK packaging")
     flags = env.get("RUSTFLAGS", "")

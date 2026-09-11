@@ -82,7 +82,7 @@ cargo run --manifest-path /path/to/external-host/Cargo.toml
 
 Windows 同样使用 `--target x86_64-pc-windows-msvc` 或 `aarch64-pc-windows-msvc`，在原生 MSVC Developer Shell 中执行。`--local` 允许未提交的真实实现，记录实际 HEAD、`dirty` 和 `local`；**不跳过**完整性、ABI、target 和 CRT 校验。`sdk-bind.py bind` 拒绝把本地产物或脏源码产物混入 Release 绑定。
 
-深入源码调试使用 `--local --profile dev`；默认仍是 `--profile release`。输出路径应为新的目录，脚本拒绝覆盖上一次构建工作区。测试先于提交的联调应使用本地模式，不必为满足打包检查而提交用户未完成的其他修改。
+深入源码调试使用 `--local --profile dev`；默认仍是 `--profile release`。Windows 调试实现固定单个 codegen unit，减少重复调试信息并避开 COFF 归档的 4 GiB 边界，仍保留完整调试信息和未优化代码。输出路径应为新的目录，脚本拒绝覆盖上一次构建工作区。测试先于提交的联调应使用本地模式，不必为满足打包检查而提交用户未完成的其他修改。
 
 设置 `MOLI_SDK_ARTIFACT_DIR` 表示开发者明确信任该目录及其 manifest，允许它不是当前绑定 Release 的实现；manifest 自带摘要证明文件一致性，**不证明来源可信**。ABI 身份必须仍与 SDK 源码完全一致。ABI 改变时更新两侧并重新构建，不提供跳过 ABI 开关。manifest 至少记录 schema、target、CRT、ABI、实现 revision、构建 profile、逐文件 SHA-256、静态库顺序和系统库列表。
 
@@ -149,7 +149,7 @@ Windows 使用已安装的系统字体；Windows 消费任务不额外安装字�
 
 Alpine 构建阶段通过 `sdk-host-rustc.py` 仅让 host 构建工具动态链接 musl，使 bindgen 可以加载系统 `libclang`。显式 `--target` 的实现编译不受该设置影响，仍按静态产物契约打包；这不是引入 glibc 或放宽目标运行依赖。
 
-Windows 实现构建使用 Visual Studio 2022 工具链；x64 CI 固定 `windows-2022`，不继承已切换到 Visual Studio 2026 的滚动镜像。ARM64 使用 Ninja 和 `clang-cl` 编译 BoringSSL 汇编，仍链接静态 MSVC CRT。新工具链须重新完成符号隔离、链接和运行验收后再升级。
+Windows 实现构建使用 Visual Studio 2022 工具链；x64 CI 固定 `windows-2022`，不继承已切换到 Visual Studio 2026 的滚动镜像，并安装经固定 SHA-256 校验的 NASM 2.16.03。ARM64 使用 Ninja 和 `clang-cl` 编译 BoringSSL 汇编；AWS-LC 保留其自带 ARM 汇编集成的 Visual Studio 2022 生成器。两者均链接静态 MSVC CRT。新工具链须重新完成符号隔离、链接和运行验收后再升级。
 
 本地维护者采用前述本地覆盖流程，随后执行仓库要求的 `cargo fmt --all`、`cargo clippy --workspace --all-targets --all-features -- -D warnings` 和 `cargo nextest run --no-fail-fast`。独立 `sdk-consumer` 不属于源码工作区，须另外格式化并通过仓库外真实消费入口验证。
 
