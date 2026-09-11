@@ -35,6 +35,10 @@ cd /src
 if [ "$mode" = build ]; then
     go version
     pkg-config --static --libs fontconfig
+    if [ -f /etc/alpine-release ]; then
+        chmod +x scripts/sdk-host-rustc.py
+        export RUSTC_WRAPPER=/src/scripts/sdk-host-rustc.py
+    fi
     # Real v152.2.0 upstream release assets; never substitute GNU objects.
     # Digests are pinned from the published GitHub release metadata, not fetched at build time.
     case "$target" in

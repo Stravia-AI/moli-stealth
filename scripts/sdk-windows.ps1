@@ -11,7 +11,7 @@ $installation = & $vswhere -latest -products '*' -requires Microsoft.VisualStudi
 if (-not $installation) { throw 'Visual Studio native C++ toolchain is required' }
 $arch = if ($Target.StartsWith('aarch64')) { 'arm64' } else { 'amd64' }
 $devcmd = Join-Path $installation 'Common7/Tools/VsDevCmd.bat'
-$environment = & cmd.exe /d /s /c "`"`"$devcmd`" -no_logo -arch=$arch -host_arch=$arch && set`""
+$environment = & cmd.exe /d /c "call `"$devcmd`" -no_logo -arch=$arch -host_arch=$arch && set"
 foreach ($line in $environment) {
     if ($line -match '^([^=]+)=(.*)$') { [Environment]::SetEnvironmentVariable($Matches[1], $Matches[2], 'Process') }
 }

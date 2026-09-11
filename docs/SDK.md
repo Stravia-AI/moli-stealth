@@ -147,6 +147,8 @@ Windows 使用已安装的系统字体；Windows 消费任务不额外安装字�
 
 工作区包含 SDK 加载器，因此尚未发布的实现变更也需要有效静态产物，不能让 `cargo clippy --workspace` 或 `cargo nextest` 隐式绕过加载器。源码 CI 显式调用 `sdk-package.py --local --profile dev`，把生成目录设置为 `MOLI_SDK_ARTIFACT_DIR`，再运行完整工作区检查；同时固定 `CARGO_BUILD_TARGET` 以复用同一目标的编译结果。该步骤验证当前源码与当前内部 ABI，不是下游构建时自动回退源码。
 
+Alpine 构建阶段通过 `sdk-host-rustc.py` 仅让 host 构建工具动态链接 musl，使 bindgen 可以加载系统 `libclang`。显式 `--target` 的实现编译不受该设置影响，仍按静态产物契约打包；这不是引入 glibc 或放宽目标运行依赖。
+
 本地维护者采用前述本地覆盖流程，随后执行仓库要求的 `cargo fmt --all`、`cargo clippy --workspace --all-targets --all-features -- -D warnings` 和 `cargo nextest run --no-fail-fast`。独立 `sdk-consumer` 不属于源码工作区，须另外格式化并通过仓库外真实消费入口验证。
 
 `rejections.py` 同时调用 `download_fixture.py`：临时复制相同 SDK 和私有 `build_loader.rs`，只替换临时构建入口的网络 transport，将固定 GitHub URL 映射到 loopback HTTP。消费者仍链接真实静态实现，同一加载器实际处理下载流、摘要、解包和并发缓存。未发布本地包的 fixture 仅为测试构造明确标记的 synthetic manifest，并记录原始 manifest；不据此声称通过 Release 来源或生产 TLS 验收。生产入口没有网络覆盖变量、镜像或关闭 TLS 的选项。
