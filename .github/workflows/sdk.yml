@@ -29,7 +29,7 @@ jobs:
       matrix:
         include:
           - target: x86_64-pc-windows-msvc
-            runner: windows-2025
+            runner: windows-2022
             image: ''
           - target: aarch64-pc-windows-msvc
             runner: windows-11-arm
@@ -127,7 +127,7 @@ jobs:
       matrix:
         include:
           - target: x86_64-pc-windows-msvc
-            runner: windows-2025
+            runner: windows-2022
             image: ''
           - target: aarch64-pc-windows-msvc
             runner: windows-11-arm

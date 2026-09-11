@@ -7,8 +7,8 @@ $PSNativeCommandUseErrorActionPreference = $true
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
-$installation = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-if (-not $installation) { throw 'Visual Studio native C++ toolchain is required' }
+$installation = & $vswhere -latest -version '[17.0,18.0)' -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+if (-not $installation) { throw 'Visual Studio 2022 native C++ toolchain is required' }
 $arch = if ($Target.StartsWith('aarch64')) { 'arm64' } else { 'amd64' }
 $devcmd = Join-Path $installation 'Common7/Tools/VsDevCmd.bat'
 $environment = & cmd.exe /d /c "call `"$devcmd`" -no_logo -arch=$arch -host_arch=$arch && set"
@@ -20,6 +20,12 @@ $toolchain = (Get-Content rust-toolchain -Raw).Trim()
 $env:RUSTUP_TOOLCHAIN = "$toolchain-$Target"
 rustup toolchain install $env:RUSTUP_TOOLCHAIN --profile minimal --no-self-update
 if ($Mode -eq 'build') {
+    if ($Target.StartsWith('aarch64')) {
+        # Visual Studio 生成器不生成 BoringSSL GNU 风格 ARM 汇编的构建步骤。
+        $env:CMAKE_GENERATOR = 'Ninja'
+        $env:CC = 'clang-cl'
+        $env:CXX = 'clang-cl'
+    }
     python scripts/sdk-package.py --target $Target
 } else {
     git fetch bound/sdk-bound.bundle refs/heads/sdk-bound:refs/heads/sdk-bound

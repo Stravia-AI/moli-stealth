@@ -97,7 +97,7 @@ fn identifier(value: &str) -> Result<&str> {
     if value.is_empty()
         || !value
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+            .all(|b| b.is_ascii_alphanumeric() || b"_+.-".contains(&b))
     {
         return Err(format!("invalid artifact identifier {value:?}").into());
     }

@@ -149,11 +149,27 @@ Windows 使用已安装的系统字体；Windows 消费任务不额外安装字�
 
 Alpine 构建阶段通过 `sdk-host-rustc.py` 仅让 host 构建工具动态链接 musl，使 bindgen 可以加载系统 `libclang`。显式 `--target` 的实现编译不受该设置影响，仍按静态产物契约打包；这不是引入 glibc 或放宽目标运行依赖。
 
+Windows 实现构建使用 Visual Studio 2022 工具链；x64 CI 固定 `windows-2022`，不继承已切换到 Visual Studio 2026 的滚动镜像。ARM64 使用 Ninja 和 `clang-cl` 编译 BoringSSL 汇编，仍链接静态 MSVC CRT。新工具链须重新完成符号隔离、链接和运行验收后再升级。
+
 本地维护者采用前述本地覆盖流程，随后执行仓库要求的 `cargo fmt --all`、`cargo clippy --workspace --all-targets --all-features -- -D warnings` 和 `cargo nextest run --no-fail-fast`。独立 `sdk-consumer` 不属于源码工作区，须另外格式化并通过仓库外真实消费入口验证。
 
 `rejections.py` 同时调用 `download_fixture.py`：临时复制相同 SDK 和私有 `build_loader.rs`，只替换临时构建入口的网络 transport，将固定 GitHub URL 映射到 loopback HTTP。消费者仍链接真实静态实现，同一加载器实际处理下载流、摘要、解包和并发缓存。未发布本地包的 fixture 仅为测试构造明确标记的 synthetic manifest，并记录原始 manifest；不据此声称通过 Release 来源或生产 TLS 验收。生产入口没有网络覆盖变量、镜像或关闭 TLS 的选项。
 
 GNU/Alpine 消费任务还运行 `font-check.py`：在两个独立 Fontconfig 目录分别选择固定 Noto Sans CJK SC 2.004 和完整的 Noto Serif CJK SC 2.003。正例必须匹配从固定 Sans 字体离线提取的 SVG 字形；负例须通过原有宽度、缺字和回退检查，再由独立轮廓比较拒绝。判断依据包含实际退出状态和 `font-outline-comparison.json`，不是匹配 panic 文案。来源与许可见 `sdk-consumer/font-reference/`，测试字形不进入 SDK 实现包。
+
+### 已执行的 Windows x64 构建计量
+
+2026-09-11 在同一台 Ryzen 9 8940HX 主机、Rust 1.96.1、MSVC 14.44.35207 下运行 `benchmark.py`。源码和 SDK 均取 Git revision `9799762ac149c0cba1d2e912acc0fa4e912f8348`，各自使用空 target 目录，按源码、SDK 的顺序串行构建，共享已有依赖下载缓存。SDK 显式使用本地优化静态包；数字不包含真实 Release 首次下载，也不代表六平台验证完成。
+
+| 阶段 | 源码集成 | SDK 集成 |
+| --- | ---: | ---: |
+| 首次 debug 构建 | 401.018 s | 36.048 s |
+| 缓存 debug 构建 | 1.062 s | 0.312 s |
+| 仅宿主代码修改 | 24.362 s | 2.976 s |
+| 切换 release | 453.504 s | 27.298 s |
+| 首次构建 compiler-artifact 事件 | 639 | 147 |
+
+两种集成都实际运行了二进制 HTTP、重复 Cookie 写入与下一请求携带、真实布局导航、隔离世界 JavaScript、渲染 HTML 和关闭工作负载。仅宿主修改都只重建一个宿主编译单元。表中事件数不是 crate 数；原始证据由 `comparison.json`、两侧的 `measurement-environment.json`、`measurements.jsonl`、Cargo 日志及 timings HTML 记录。这是一组构建成本观测，不是固定加速承诺或运行性能基准。
 
 ## 从实现提交到最终绑定
 

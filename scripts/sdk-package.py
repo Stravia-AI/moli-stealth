@@ -198,6 +198,11 @@ def notices(destination: Path, cargo_metadata: dict, native_sources: list[Path])
     for name in ("LICENSE-APACHE", "LICENSE-MIT", "license-metadata.json"):
         shutil.copy2(ROOT / name, destination / name)
     shutil.copytree(ROOT / "licenses", destination / "repository")
+    rust_notices = Path(run(["rustc", "--print", "sysroot"]).strip()) / "share/doc/rust"
+    rust_destination = destination / "rust-runtime"
+    rust_destination.mkdir()
+    shutil.copy2(rust_notices / "COPYRIGHT-library.html", rust_destination)
+    shutil.copytree(rust_notices / "licenses", rust_destination / "licenses")
     inventory = []
     for package in cargo_metadata["packages"]:
         source = Path(package["manifest_path"]).parent
@@ -276,6 +281,9 @@ def build(args: argparse.Namespace) -> None:
     (work / "build.log").write_text(log, encoding="utf-8")
     rendered = log
     searches: list[Path] = []
+    if not windows:
+        rust_libraries = Path(run(["rustc", "--print", "target-libdir", "--target", target], env=env).strip())
+        searches.extend([rust_libraries, rust_libraries / "self-contained"])
     for line in log.splitlines():
         try:
             message = json.loads(line)
@@ -301,7 +309,7 @@ def build(args: argparse.Namespace) -> None:
             if not argument.startswith("-l"):
                 raise RuntimeError(f"unhandled rustc native linker argument {argument}; audit before publishing")
             name = argument[2:]
-        if not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
+        if not re.fullmatch(r"[A-Za-z0-9_+.-]+", name):
             raise RuntimeError(f"unsafe native library name {name}")
         if name in (WINDOWS_SYSTEM if windows else LINUX_SYSTEM):
             if name not in system:
