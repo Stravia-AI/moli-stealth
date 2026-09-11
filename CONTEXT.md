@@ -15,3 +15,7 @@ _Avoid_: 传输指纹、UA 字符串
 **Stealth**：
 Moli 可选的联动伪装能力，为传输指纹与浏览器身份提供协调一致的基线，允许用户显式覆盖。这里不包含屏幕、GPU、Canvas 或音频伪装，也不承诺对检测不可见。
 _Avoid_: 仅修改 UA、完整浏览器伪装
+
+**Moli 嵌入式 SDK**：
+供 Rust 宿主使用 Moli 浏览器、页面、JavaScript 求值、独立 HTTP 传输及 Cookie 能力的通用开发接口，以 StraviaPlatform 现有用法作为最低能力范围，不包含宿主的正文抽取、搜索就绪条件或公网地址策略。
+_Avoid_: Stravia 专用抓取 SDK、完整内部 API 镜像
