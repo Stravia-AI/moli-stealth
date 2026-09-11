@@ -425,7 +425,7 @@ dependencies = [
 [[package]]
 name = "btls"
 version = "0.5.6"
-source = "git+https://github.com/Stravia-AI/btls.git?rev=5ee7faa63188777eb0c1d4a28ef1f465d7bb02b9#5ee7faa63188777eb0c1d4a28ef1f465d7bb02b9"
+source = "git+https://github.com/Stravia-AI/btls.git?rev=5c97e6ccda22a66de82d4911421e19cef24d2548#5c97e6ccda22a66de82d4911421e19cef24d2548"
 dependencies = [
  "bitflags",
  "btls-sys",
@@ -437,7 +437,7 @@ dependencies = [
 [[package]]
 name = "btls-sys"
 version = "0.5.6"
-source = "git+https://github.com/Stravia-AI/btls.git?rev=5ee7faa63188777eb0c1d4a28ef1f465d7bb02b9#5ee7faa63188777eb0c1d4a28ef1f465d7bb02b9"
+source = "git+https://github.com/Stravia-AI/btls.git?rev=5c97e6ccda22a66de82d4911421e19cef24d2548#5c97e6ccda22a66de82d4911421e19cef24d2548"
 dependencies = [
  "bindgen 0.72.1",
  "cmake",
@@ -1286,7 +1286,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5385,7 +5385,7 @@ dependencies = [
 [[package]]
 name = "tokio-btls"
 version = "0.5.6"
-source = "git+https://github.com/Stravia-AI/btls.git?rev=5ee7faa63188777eb0c1d4a28ef1f465d7bb02b9#5ee7faa63188777eb0c1d4a28ef1f465d7bb02b9"
+source = "git+https://github.com/Stravia-AI/btls.git?rev=5c97e6ccda22a66de82d4911421e19cef24d2548#5c97e6ccda22a66de82d4911421e19cef24d2548"
 dependencies = [
  "btls",
  "tokio",
@@ -5985,7 +5985,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -96,8 +96,8 @@ aws-lc-rs = { version = "1.16.2", default-features = false }
 axum = "0.8.6"
 base64 = "0.23"
 bitflags = "2.11.0"
-boring-sys2 = { package = "btls-sys", git = "https://github.com/Stravia-AI/btls.git", rev = "5ee7faa63188777eb0c1d4a28ef1f465d7bb02b9" }
-boring2 = { package = "btls", git = "https://github.com/Stravia-AI/btls.git", rev = "5ee7faa63188777eb0c1d4a28ef1f465d7bb02b9" }
+boring-sys2 = { package = "btls-sys", git = "https://github.com/Stravia-AI/btls.git", rev = "5c97e6ccda22a66de82d4911421e19cef24d2548" }
+boring2 = { package = "btls", git = "https://github.com/Stravia-AI/btls.git", rev = "5c97e6ccda22a66de82d4911421e19cef24d2548" }
 brotli = "8"
 brotlic = "0.8.2"
 bytes = "1"
@@ -268,7 +268,7 @@ time = "0.3.47"
 # Tokio >=1.53 releases a dropped mpsc receiver's waker even while context-wide
 # senders remain (tokio-rs/tokio#8095), avoiding retired renderer I/O driver leaks.
 tokio = "1.53.1"
-tokio-boring2 = { package = "tokio-btls", git = "https://github.com/Stravia-AI/btls.git", rev = "5ee7faa63188777eb0c1d4a28ef1f465d7bb02b9" }
+tokio-boring2 = { package = "tokio-btls", git = "https://github.com/Stravia-AI/btls.git", rev = "5c97e6ccda22a66de82d4911421e19cef24d2548" }
 tokio-rustls = { version = "0.26", default-features = false }
 tokio-stream = "0.1.17"
 tokio-tungstenite = "0.28.0"
