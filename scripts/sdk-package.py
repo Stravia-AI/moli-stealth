@@ -474,7 +474,11 @@ def build(args: argparse.Namespace) -> None:
     target_dir = Path(env.get("CARGO_TARGET_DIR", str(ROOT / "target"))).resolve()
     profile_flags = ["--release"] if args.profile == "release" else []
     profile_dir = "release" if args.profile == "release" else "debug"
-    log = run(["cargo", "rustc", "--locked", *profile_flags, "--target", target, "--package", "moli-sdk-ffi", "--message-format=json-render-diagnostics", "--", "--print", "native-static-libs"], env=env)
+    # 只向最终 staticlib 加入运行库；全局 -l 会将它们重复封装进每个 rlib，
+    # 使归档成员数量膨胀并触发 rustc 归档器的 u16 成员索引溢出。
+    # ARM JIT 的 __clear_cache 由非 EH 的 libgcc 提供。
+    runtime_flags = [] if windows else ["-l", "static=stdc++", "-l", "static=gcc_eh", "-l", "static=gcc"]
+    log = run(["cargo", "rustc", "--locked", *profile_flags, "--target", target, "--package", "moli-sdk-ffi", "--message-format=json-render-diagnostics", "--", *runtime_flags, "--print", "native-static-libs"], env=env)
     (work / "build.log").write_text(log, encoding="utf-8")
     rendered = log
     searches: list[Path] = []

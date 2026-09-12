@@ -66,9 +66,7 @@ if [ "$mode" = build ]; then
         "$v8_release/moli-v8-native-notices-${target}.tar.gz" -o /tmp/moli-v8/notices.tar.gz
     printf '%s  %s\n' a102daeadeeb68526682be8061da193a7dae6145cdae95f42e524fda62bcf988 /tmp/moli-v8/notices.tar.gz | sha256sum -c
     tar -xzf /tmp/moli-v8/notices.tar.gz -C /tmp/moli-v8/notices
-    # Include GCC's non-EH helpers too: ARM JIT instruction-cache flushing
-    # requires __clear_cache, which Rust's compiler builtins do not provide.
-    export RUSTFLAGS="${RUSTFLAGS:-} -L native=$(dirname "$(g++ -print-file-name=libstdc++.a)") -L native=$(dirname "$(g++ -print-file-name=libgcc_eh.a)") -L native=$(dirname "$(g++ -print-file-name=libatomic.a)") -l static=stdc++ -l static=gcc_eh -l static=gcc"
+    export RUSTFLAGS="${RUSTFLAGS:-} -L native=$(dirname "$(g++ -print-file-name=libstdc++.a)") -L native=$(dirname "$(g++ -print-file-name=libgcc_eh.a)") -L native=$(dirname "$(g++ -print-file-name=libatomic.a)")"
     python3 scripts/sdk-package.py --target "$target" --native-notices /usr/share/doc --native-notices /tmp/moli-v8/notices
 elif [ "$mode" = verify ]; then
     # The bound commit contains only the final digest binding on top of implementation.
