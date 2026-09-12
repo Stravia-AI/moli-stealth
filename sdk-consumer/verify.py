@@ -20,7 +20,7 @@ HEAVY_PACKAGES = {
 
 def measure(project: Path, env: dict[str, str], command: list[str], label: str, *, cwd: Path | None = None) -> dict:
     start = time.perf_counter()
-    result = subprocess.run(command, cwd=cwd or project, env=env, text=True, capture_output=True)
+    result = subprocess.run(command, cwd=cwd or project, env=env, text=True, encoding="utf-8", capture_output=True)
     elapsed = time.perf_counter() - start
     (project / f"{label}.stdout.log").write_text(result.stdout, encoding="utf-8")
     (project / f"{label}.stderr.log").write_text(result.stderr, encoding="utf-8")
@@ -108,7 +108,7 @@ def main() -> None:
     (destination / "provenance.json").write_text(json.dumps(provenance, indent=2), encoding="utf-8")
     base = ["build", "--target", args.target, "--timings", "--message-format=json"]
     cargo(destination, env, base, "first-debug")
-    metadata = json.loads(subprocess.check_output(["cargo", "metadata", "--format-version", "1", "--filter-platform", args.target], cwd=destination, env=env, text=True))
+    metadata = json.loads(subprocess.check_output(["cargo", "metadata", "--format-version", "1", "--filter-platform", args.target], cwd=destination, env=env, text=True, encoding="utf-8"))
     forbidden = sorted({package["name"] for package in metadata["packages"]} & HEAVY_PACKAGES)
     if forbidden:
         raise RuntimeError(f"source implementation leaked into consumer graph: {forbidden}")

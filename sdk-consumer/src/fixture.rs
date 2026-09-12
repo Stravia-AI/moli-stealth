@@ -172,7 +172,7 @@ window.XMLSerializer = function() { throw new Error('page serializer poisoned');
 Object.defineProperty(window, 'document', { value: { documentElement: { outerHTML: 'fake DOM' } }, configurable: true });
 </script></body>"#;
 
-const FONT: &str = r#"<!doctype html><style>
+const FONT: &str = r#"<!doctype html><meta charset="utf-8"><style>
 html,body { margin:0; background:white; color:black; }
 span { display:inline-block; font-size:48px; line-height:64px; }
 i { display:inline-block; font-style:normal; }
