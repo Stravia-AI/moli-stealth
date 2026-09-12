@@ -111,6 +111,8 @@ V8、带符号前缀的 BoringSSL、Rust 实现以及 Fontconfig/字体处理链
 
 stdc++、gcc_eh 和 gcc 的静态链接参数只传给最终 `moli-sdk-ffi` 的 `cargo rustc --`，不能放入全局 `RUSTFLAGS`。后者会将运行库对象重复封装进每个依赖 rlib，使最终归档成员数量膨胀并触发 Rust 1.96.1 归档器的成员索引溢出；无需削减调试信息或符号。
 
+Linux 打包使用实现 Rust 工具链的 `llvm-tools` 组件处理归档和符号，避免 Debian 12 自带的 LLVM 14 读取 LLVM 22 bitcode 时失败。构建前检查所需工具是否存在；不通过忽略 bitcode 错误或跳过符号隔离来兼容旧工具。
+
 btls 锁定 `c0aeb7fe5c1281611bde29868becdb7d4393ee6f`，修复 BoringSSL AR 长名称解析，避免含目录的 COFF 成员覆盖导致 ARM 前缀清单缺项。Go 最低要求由 BoringSSL 的 `go.mod`（1.24）决定，工作流使用 Go 1.27.0。Alpine 不复用参考 StraviaPlatform 的 Zig sysroot，也不复制其 stdexcept 符号弱化补丁；不得忽略符号或添加 glibc 兼容包。
 
 `sdk-linux.sh` 将依赖 Release 地址固定到 `Stravia-AI/rusty_v8` 的 `v152.2.0-moli-sdk-libstdcxx.1`，不跟随 latest，也不把普通 libc++ 归档混入 SDK。每个目标使用 `librusty_v8_moli_libstdcxx_release_<target>.a.gz`、匹配的 `src_binding_moli_libstdcxx_release_<target>.rs` 和 `moli-v8-native-notices-<target>.tar.gz`。摘要作为脚本中的固定构建输入维护，不在构建时动态相信远程元数据。原生 notices 随 SDK 主包和符号包一同提供，包含 V8/第三方、Rust/编译器及 GCC 运行库许可文本。

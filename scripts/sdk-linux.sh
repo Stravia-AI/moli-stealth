@@ -33,6 +33,14 @@ sh /tmp/rustup-init.sh -y --profile minimal --default-host "$target" --default-t
 git config --global --add safe.directory /src
 cd /src
 if [ "$mode" = build ]; then
+    # 系统 LLVM 可能早于 Rust 内嵌 bitcode 版本；归档处理必须使用匹配工具。
+    rustup component add llvm-tools
+    llvm_tools="$(rustc --print sysroot)/lib/rustlib/$target/bin"
+    for name in llvm-ar llvm-nm llvm-objcopy llvm-readobj llvm-strip; do
+        test -x "$llvm_tools/$name"
+    done
+    export PATH="$llvm_tools:$PATH"
+    llvm-nm --version
     go version
     pkg-config --static --libs fontconfig
     if [ -f /etc/alpine-release ]; then
