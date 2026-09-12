@@ -26,5 +26,6 @@ pub use fingerprint::{
 };
 pub use net::error::{ProxyResponse, TransportError};
 pub use net::{
-    ResponseBody, TlsSessionCache, Transport, TransportConfig, TransportRequest, TransportResponse,
+    ConnectionBudget, ConnectionPermit, ResponseBody, TlsConfig, TlsSessionCache, Transport,
+    TransportConfig, TransportRequest, TransportResponse,
 };

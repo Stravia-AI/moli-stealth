@@ -126,7 +126,7 @@ struct WorkerPromiseRejectionEventInitDeclaration<'scope> {
 }
 
 #[derive(WebApiObject)]
-#[webapi(interface = "Object")]
+#[webapi(interface = "ErrorEvent", prototype = "Object")]
 struct WorkerErrorEventFallbackDeclaration<'scope> {
     #[webapi(data_property, enumerable)]
     message: v8::Local<'scope, v8::String>,
@@ -141,7 +141,7 @@ struct WorkerErrorEventFallbackDeclaration<'scope> {
 }
 
 #[derive(WebApiObject)]
-#[webapi(interface = "Object")]
+#[webapi(interface = "PromiseRejectionEvent", prototype = "Object")]
 struct WorkerPromiseRejectionEventFallbackDeclaration<'scope> {
     #[webapi(data_property, enumerable)]
     promise: v8::Local<'scope, v8::Promise>,
@@ -150,7 +150,7 @@ struct WorkerPromiseRejectionEventFallbackDeclaration<'scope> {
 }
 
 #[derive(WebApiObject)]
-#[webapi(interface = "Object")]
+#[webapi(interface = "Event", prototype = "Object")]
 struct WorkerBasicEventDeclaration<'scope> {
     #[webapi(data_property, enumerable)]
     r#type: v8::Local<'scope, v8::String>,
@@ -161,7 +161,7 @@ struct WorkerBasicEventDeclaration<'scope> {
 }
 
 #[derive(WebApiObject)]
-#[webapi(interface = "Object")]
+#[webapi(interface = "ExtendableEvent", prototype = "Object", parent = "Event")]
 struct ServiceWorkerLifecycleEventDeclaration<'scope> {
     #[webapi(data_property, enumerable)]
     r#type: v8::Local<'scope, v8::String>,
@@ -174,7 +174,11 @@ struct ServiceWorkerLifecycleEventDeclaration<'scope> {
 }
 
 #[derive(WebApiObject)]
-#[webapi(interface = "Object")]
+#[webapi(
+    interface = "FetchEvent",
+    prototype = "Object",
+    parent = "ExtendableEvent"
+)]
 struct ServiceWorkerFetchEventDeclaration<'scope> {
     #[webapi(data_property, enumerable)]
     r#type: v8::Local<'scope, v8::String>,
@@ -201,7 +205,11 @@ struct ServiceWorkerFetchEventDeclaration<'scope> {
 }
 
 #[derive(WebApiObject)]
-#[webapi(interface = "Object")]
+#[webapi(
+    interface = "ExtendableMessageEvent",
+    prototype = "Object",
+    parent = "ExtendableEvent"
+)]
 struct ServiceWorkerMessageEventDeclaration<'scope> {
     #[webapi(data_property, enumerable)]
     r#type: v8::Local<'scope, v8::String>,
@@ -254,7 +262,11 @@ struct ServiceWorkerMessageDispatchMethodsDeclaration {
 }
 
 #[derive(WebApiObject)]
-#[webapi(interface = "Object")]
+#[webapi(
+    interface = "NotificationEvent",
+    prototype = "Object",
+    parent = "ExtendableEvent"
+)]
 struct ServiceWorkerNotificationEventDeclaration<'scope> {
     #[webapi(data_property, enumerable)]
     r#type: v8::Local<'scope, v8::String>,
@@ -271,7 +283,11 @@ struct ServiceWorkerNotificationEventDeclaration<'scope> {
 }
 
 #[derive(WebApiObject)]
-#[webapi(interface = "Object")]
+#[webapi(
+    interface = "PushEvent",
+    prototype = "Object",
+    parent = "ExtendableEvent"
+)]
 struct ServiceWorkerPushEventDeclaration<'scope> {
     #[webapi(data_property, enumerable)]
     r#type: v8::Local<'scope, v8::String>,
@@ -299,7 +315,11 @@ struct ServiceWorkerPushMessageDataDeclaration {
 }
 
 #[derive(WebApiObject)]
-#[webapi(interface = "Object")]
+#[webapi(
+    interface = "SyncEvent",
+    prototype = "Object",
+    parent = "ExtendableEvent"
+)]
 struct ServiceWorkerSyncEventDeclaration<'scope> {
     #[webapi(data_property, enumerable)]
     r#type: v8::Local<'scope, v8::String>,
@@ -316,7 +336,11 @@ struct ServiceWorkerSyncEventDeclaration<'scope> {
 }
 
 #[derive(WebApiObject)]
-#[webapi(interface = "Object")]
+#[webapi(
+    interface = "PeriodicSyncEvent",
+    prototype = "Object",
+    parent = "ExtendableEvent"
+)]
 struct ServiceWorkerPeriodicSyncEventDeclaration<'scope> {
     #[webapi(data_property, enumerable)]
     r#type: v8::Local<'scope, v8::String>,
@@ -500,10 +524,6 @@ fn flush_pending_worker_promise_rejections(scope: &mut v8::PinScope<'_, '_>) {
             .reason
             .as_ref()
             .map(|reason| v8::Local::new(scope, reason));
-        remember_reported_worker_promise_rejection(
-            &reported_unhandled_rejections,
-            rejection.clone(),
-        );
         let allows_default = dispatch_worker_promise_rejection_event(
             scope,
             "unhandledrejection",
@@ -512,6 +532,14 @@ fn flush_pending_worker_promise_rejections(scope: &mut v8::PinScope<'_, '_>) {
             &parent_tx,
             &script_url,
         );
+        // Do not expose a `rejectionhandled` transition when the handler was
+        // attached by the `unhandledrejection` listener itself.
+        if !promise.has_handler() {
+            remember_reported_worker_promise_rejection(
+                &reported_unhandled_rejections,
+                rejection.clone(),
+            );
+        }
         if allows_default {
             log_unhandled_promise_rejection(scope, reason);
         }
@@ -582,14 +610,13 @@ unsafe extern "C" fn worker_promise_reject_callback(message: v8::PromiseRejectMe
                     })
                     .map(|index| reported.swap_remove(index))
             };
-            let reason = reported
+            let Some(rejection) = reported else {
+                return;
+            };
+            let reason = rejection
+                .reason
                 .as_ref()
-                .and_then(|rejection| {
-                    rejection
-                        .reason
-                        .as_ref()
-                        .map(|reason| v8::Local::new(scope, reason))
-                })
+                .map(|reason| v8::Local::new(scope, reason))
                 .or_else(|| message.get_value());
             let _ = dispatch_worker_promise_rejection_event(
                 scope,
@@ -726,6 +753,8 @@ fn new_worker_message_event<'s>(
         ports,
     )
     .initialize(scope, event);
+    moli_webapi_declare::initialize_web_api_object(scope, event, "MessageEvent")
+        .expect("worker fallback MessageEvent identity should initialize");
     event
 }
 

@@ -2365,17 +2365,24 @@ async fn child_navigation_retires_local_window_owned_xhr() {
         result: Err("stale retired XHR completion".to_owned()),
     })
     .expect("late completion for retired XHR should be harmless");
-    vm.eval(
-        r#"
-        __retiredChildXhrWrapper.open(
-          "GET",
-          "https://xhr-execution-context.test/after-navigation"
-        );
-        __retiredChildXhrWrapper.send();
-        "attempted"
+    let stale_open = vm
+        .eval(
+            r#"
+        (() => {
+          try {
+            __retiredChildXhrWrapper.open(
+              "GET",
+              "https://xhr-execution-context.test/after-navigation"
+            );
+            return "no-error";
+          } catch (error) {
+            return [error.name, error.code, error instanceof DOMException].join("|");
+          }
+        })()
         "#,
-    )
-    .expect("calling send on a retained old-child XHR wrapper should fail closed");
+        )
+        .expect("calling open on a retained old-child XHR wrapper should fail closed");
+    assert_eq!(stale_open, "InvalidStateError|11|true");
     assert!(
         vm._context_host
             .borrow()
@@ -5771,6 +5778,25 @@ fn embedded_frame_owners_create_child_contexts_only_for_document_content() {
         );
     }
     drop(host);
+
+    assert_eq!(
+        vm.eval(
+            r#"
+(() => {
+  const object = document.getElementById("accepted-object");
+  const contentDocument = object.contentDocument;
+  const contentWindow = object.contentWindow;
+  return [
+    contentDocument !== null,
+    contentWindow !== null,
+    contentDocument === contentWindow.document
+  ].join("|");
+})()
+"#,
+        )
+        .expect("object child browsing context accessors should evaluate"),
+        "true|true|true"
+    );
 
     assert_eq!(
         vm.eval(

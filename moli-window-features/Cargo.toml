@@ -1,0 +1,12 @@
+[package]
+license.workspace = true
+name = "moli-window-features"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+indexmap.workspace = true
+stylo.workspace = true
+
+[lints]
+workspace = true

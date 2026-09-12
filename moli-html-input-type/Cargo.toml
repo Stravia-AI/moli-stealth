@@ -1,0 +1,11 @@
+[package]
+license.workspace = true
+name = "moli-html-input-type"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+strum = { workspace = true, features = ["derive"] }
+
+[lints]
+workspace = true

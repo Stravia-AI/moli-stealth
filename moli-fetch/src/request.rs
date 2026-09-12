@@ -361,8 +361,9 @@ impl Request {
     }
 
     pub fn get(raw_url: &str) -> Result<Self> {
-        let url = Url::parse(raw_url)
+        let mut url = Url::parse(raw_url)
             .with_context(|| anyhow!("failed to parse request url `{raw_url}`"))?;
+        let auth = take_basic_auth_from_url(&mut url);
         Ok(Self {
             url,
             method: "GET".to_owned(),
@@ -382,14 +383,15 @@ impl Request {
             redirect_mode: RequestRedirectMode::Follow,
             credentials_mode: RequestCredentialsMode::Include,
             network_partition_key: None,
-            auth: None,
+            auth,
             cookie_context: NetworkCookieRequestContext::top_level_navigation("GET"),
             timeout_policy: RequestTimeoutPolicy::default(),
             network_observation_recorder: None,
         })
     }
 
-    pub fn get_with_url(url: Url) -> Self {
+    pub fn get_with_url(mut url: Url) -> Self {
+        let auth = take_basic_auth_from_url(&mut url);
         Self {
             url,
             method: "GET".to_owned(),
@@ -409,7 +411,7 @@ impl Request {
             redirect_mode: RequestRedirectMode::Follow,
             credentials_mode: RequestCredentialsMode::Include,
             network_partition_key: None,
-            auth: None,
+            auth,
             cookie_context: NetworkCookieRequestContext::top_level_navigation("GET"),
             timeout_policy: RequestTimeoutPolicy::default(),
             network_observation_recorder: None,
@@ -436,8 +438,9 @@ impl Request {
         body: Option<Vec<u8>>,
         request_headers: Vec<(String, String)>,
     ) -> Result<Self> {
-        let url = Url::parse(raw_url)
+        let mut url = Url::parse(raw_url)
             .with_context(|| anyhow!("failed to parse request url `{raw_url}`"))?;
+        let auth = take_basic_auth_from_url(&mut url);
         Ok(Self {
             url,
             method: method.to_owned(),
@@ -457,7 +460,7 @@ impl Request {
             redirect_mode: RequestRedirectMode::Follow,
             credentials_mode: RequestCredentialsMode::Include,
             network_partition_key: None,
-            auth: None,
+            auth,
             cookie_context: NetworkCookieRequestContext::subresource(method),
             timeout_policy: RequestTimeoutPolicy::default(),
             network_observation_recorder: None,
@@ -668,12 +671,23 @@ impl Request {
         let auth = self.auth.as_ref()?;
         (auth.target == RequestAuthTarget::Server
             && auth.scheme == RequestAuthScheme::Basic
+            && self.allows_credentials_for_url(request_url)
             && same_origin(&self.url, request_url))
         .then_some((auth.username.as_str(), auth.password.as_str()))
     }
 
     pub fn set_auth(&mut self, auth: Option<RequestAuth>) {
         self.auth = auth;
+    }
+
+    pub fn clear_server_auth(&mut self) {
+        if self
+            .auth
+            .as_ref()
+            .is_some_and(|auth| auth.target == RequestAuthTarget::Server)
+        {
+            self.auth = None;
+        }
     }
 
     pub fn with_auth(mut self, auth: RequestAuth) -> Self {
@@ -838,6 +852,34 @@ impl Request {
             .with_redirect_type(redirect_types.schemeful_context.redirect_type),
         ))
     }
+}
+
+fn basic_auth_from_url(url: &Url) -> Option<RequestAuth> {
+    if !matches!(url.scheme(), "http" | "https")
+        || (url.username().is_empty() && url.password().is_none())
+    {
+        return None;
+    }
+    let decode = |value: &str| {
+        percent_encoding::percent_decode_str(value)
+            .decode_utf8_lossy()
+            .into_owned()
+    };
+    Some(RequestAuth {
+        target: RequestAuthTarget::Server,
+        scheme: RequestAuthScheme::Basic,
+        username: decode(url.username()),
+        password: decode(url.password().unwrap_or_default()),
+    })
+}
+
+fn take_basic_auth_from_url(url: &mut Url) -> Option<RequestAuth> {
+    let auth = basic_auth_from_url(url)?;
+    url.set_username("")
+        .expect("HTTP(S) URLs support username removal");
+    url.set_password(None)
+        .expect("HTTP(S) URLs support password removal");
+    Some(auth)
 }
 
 fn redirect_status_rewrites_to_get(status: u16, method: &str) -> bool {

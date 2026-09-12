@@ -41,6 +41,12 @@ impl FetchClientHandle {
         self.runtime.tls_session_cache()
     }
 
+    /// Shares this client's physical HTTP connection limits with upgraded
+    /// protocols such as WebSocket.
+    pub fn connection_budget(&self) -> moli_stealth_net::ConnectionBudget {
+        self.runtime.connection_budget()
+    }
+
     /// Materialized text compatibility API.
     ///
     /// Requests enter the streaming raw transport first and only
@@ -167,6 +173,10 @@ impl FetchClientHandle {
 
     pub fn tls_verify_host(&self) -> bool {
         self.config.tls_verify_host()
+    }
+
+    pub fn tls_config(&self) -> &moli_stealth_net::TlsConfig {
+        self.config.tls_config()
     }
 
     pub fn request_timeout_ms(&self) -> u64 {

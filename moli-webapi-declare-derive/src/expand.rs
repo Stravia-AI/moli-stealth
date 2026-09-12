@@ -40,7 +40,9 @@ pub(crate) fn expand_webapi_interface(
         ConstructorAttr::Illegal => {
             quote!(::moli_webapi_declare::illegal_constructor_callback)
         }
-        ConstructorAttr::Callback(callback) => quote!(#callback),
+        ConstructorAttr::Callback(callback) => {
+            quote!(::moli_webapi_declare::web_api_constructor!(#interface_name, #callback))
+        }
     };
     let constructor_length = attrs.constructor_length.unwrap_or(0);
     let fields = named_fields(&input.data)?;
@@ -54,6 +56,10 @@ pub(crate) fn expand_webapi_interface(
     let body = quote! {
         const INTERFACE_NAME: &'static str = #interface_name;
         const PARENT_INTERFACE: ::std::option::Option<&'static str> = #parent;
+
+        ::moli_webapi_declare::register_web_api_interfaces(
+            scope, [(INTERFACE_NAME, PARENT_INTERFACE)],
+        )?;
 
         let prototype = ::moli_webapi_declare::v8::Object::new(scope);
         if let ::std::option::Option::Some(parent) = PARENT_INTERFACE {
@@ -152,7 +158,9 @@ pub(crate) fn expand_webapi_function_template(
         ConstructorAttr::Illegal => {
             quote!(::moli_webapi_declare::illegal_constructor_callback)
         }
-        ConstructorAttr::Callback(callback) => quote!(#callback),
+        ConstructorAttr::Callback(callback) => {
+            quote!(::moli_webapi_declare::web_api_constructor!(#template_name, #callback))
+        }
     };
     let constructor_length = attrs.constructor_length.unwrap_or(0);
     let initialize_intrinsic_prototype_parent =
@@ -355,8 +363,18 @@ pub(crate) fn expand_webapi_object(input: DeriveInput) -> Result<proc_macro2::To
         ));
     }
 
+    let initialize_brand = (!attrs.unbranded && interface.value() != "Object").then(|| {
+        quote! {
+            ::moli_webapi_declare::initialize_web_api_object(scope, object, #interface)?;
+        }
+    });
+    let register_parent = attrs.parent.as_ref().map(|parent| quote! {
+        ::moli_webapi_declare::register_web_api_interfaces(scope, [(#interface, Some(#parent))])?;
+    });
     let initialize_body = quote! {
+        #register_parent
         #(#fields)*
+        #initialize_brand
         ::std::result::Result::Ok(())
     };
     let trait_impl = match scope_lifetime {
@@ -1081,7 +1099,7 @@ fn expand_function_template_alias_field(
 fn expand_interface_field(
     field: &Field,
     rename_all: RenameRule,
-    receiver: Option<&syn::Path>,
+    receiver: Option<&crate::attrs::ReceiverAttr>,
 ) -> Option<Result<proc_macro2::TokenStream, Error>> {
     let mut attrs = match parse_field_attrs(field) {
         Ok(attrs) => attrs,
@@ -1752,8 +1770,16 @@ fn expand_callback(
         return quote!(#callback);
     }
     let receiver_check = attrs.receiver.as_ref().map(|receiver| {
+        let check = match receiver {
+            crate::attrs::ReceiverAttr::Predicate(predicate) => {
+                quote!(#predicate(scope, args.this()))
+            }
+            crate::attrs::ReceiverAttr::Interface(interface) => quote!(
+                ::moli_webapi_declare::implements_interface(scope, args.this(), #interface)
+            ),
+        };
         quote! {
-            if !#receiver(scope, args.this()) {
+            if !#check {
                 ::moli_webapi_declare::__private::throw_illegal_invocation(scope);
                 return;
             }

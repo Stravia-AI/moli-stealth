@@ -1,7 +1,8 @@
 use std::{
     collections::VecDeque,
-    fmt,
+    fmt, fs,
     io::Cursor,
+    path::{Path, PathBuf},
     pin::Pin,
     sync::{Arc, LazyLock, Weak},
     time::{SystemTime, UNIX_EPOCH},
@@ -9,6 +10,8 @@ use std::{
 
 use boring2::{
     ex_data::Index,
+    pkcs12::Pkcs12,
+    pkey::{PKey, Private},
     ssl::{
         CertificateCompressionAlgorithm, CertificateCompressor, ConnectConfiguration,
         ExtensionType, Ssl, SslConnector, SslMethod, SslSession, SslSessionCacheMode,
@@ -30,6 +33,58 @@ use crate::{
 const DEFAULT_ALPN: &[&str] = &["h2", "http/1.1"];
 const MAX_CACHED_CONNECTORS: usize = 64;
 const MAX_CACHED_SESSIONS: usize = 128;
+
+/// Owned TLS trust and client-identity settings shared by HTTP and WebSocket.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct TlsConfig {
+    /// Verify both the server certificate chain and hostname.
+    pub verify: bool,
+    pub ca_cert: Option<PathBuf>,
+    pub client_cert: Option<PathBuf>,
+    pub client_key: Option<PathBuf>,
+    pub client_cert_password: Option<String>,
+}
+
+impl Default for TlsConfig {
+    fn default() -> Self {
+        Self {
+            verify: true,
+            ca_cert: None,
+            client_cert: None,
+            client_key: None,
+            client_cert_password: None,
+        }
+    }
+}
+
+impl fmt::Debug for TlsConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TlsConfig")
+            .field("verify", &self.verify)
+            .field("ca_cert", &self.ca_cert)
+            .field("client_cert", &self.client_cert)
+            .field("client_key", &self.client_key)
+            .field(
+                "client_cert_password",
+                &self.client_cert_password.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
+}
+
+impl TlsConfig {
+    #[must_use]
+    pub fn without_client_identity(&self) -> Self {
+        Self {
+            verify: self.verify,
+            ca_cert: self.ca_cert.clone(),
+            client_cert: None,
+            client_key: None,
+            client_cert_password: None,
+        }
+    }
+}
 
 /// Context-scoped owner for reusable TLS contexts and server-issued sessions.
 ///
@@ -65,7 +120,7 @@ impl TlsSessionCache {
 
         let connector = build_connector(
             &key.fingerprint,
-            key.tls_verify,
+            &key.tls,
             key.http1_only,
             Some(Arc::downgrade(&self.inner)),
         )?;
@@ -125,7 +180,7 @@ struct TlsSessionCacheState {
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct ConnectorKey {
     fingerprint: TransportFingerprint,
-    tls_verify: bool,
+    tls: TlsConfig,
     http1_only: bool,
     purpose: TlsPurpose,
 }
@@ -137,7 +192,7 @@ struct SessionKey {
     host: String,
     port: u16,
     fingerprint: TransportFingerprint,
-    tls_verify: bool,
+    tls: TlsConfig,
     purpose: TlsPurpose,
     route: TlsRoute,
 }
@@ -246,12 +301,12 @@ impl CertificateCompressor for BrotliCertificateDecompressor {
 pub(crate) fn validate_fingerprint(
     fingerprint: &TransportFingerprint,
 ) -> Result<(), TransportError> {
-    build_connector(fingerprint, true, false, None).map(|_| ())
+    build_connector(fingerprint, &TlsConfig::default(), false, None).map(|_| ())
 }
 
 fn build_connector(
     fingerprint: &TransportFingerprint,
-    tls_verify: bool,
+    tls: &TlsConfig,
     http1_only: bool,
     cache: Option<Weak<Mutex<TlsSessionCacheState>>>,
 ) -> Result<SslConnector, TransportError> {
@@ -304,20 +359,40 @@ fn build_connector(
     builder
         .set_max_proto_version(Some(SslVersion::TLS1_3))
         .map_err(tls_error)?;
-    builder.set_verify(if tls_verify {
+    builder.set_verify(if tls.verify {
         SslVerifyMode::PEER
     } else {
         SslVerifyMode::NONE
     });
 
     let mut cert_store = X509StoreBuilder::new().map_err(tls_error)?;
-    for certificate in webpki_root_certs::TLS_SERVER_ROOT_CERTS {
-        let certificate = X509::from_der(certificate.as_ref()).map_err(|error| {
-            TransportError::Certificate(format!("failed to parse trusted root: {error}"))
+    if let Some(path) = &tls.ca_cert {
+        let pem = read_certificate_file(path, "CA certificate")?;
+        let certificates = X509::stack_from_pem(&pem).map_err(|error| {
+            TransportError::Certificate(format!(
+                "failed to parse CA certificate `{}`: {error}",
+                path.display()
+            ))
         })?;
-        let _ = cert_store.add_cert(certificate);
+        if certificates.is_empty() {
+            return Err(TransportError::Certificate(format!(
+                "CA certificate `{}` contains no certificates",
+                path.display()
+            )));
+        }
+        for certificate in certificates {
+            cert_store.add_cert(certificate).map_err(tls_error)?;
+        }
+    } else {
+        for certificate in webpki_root_certs::TLS_SERVER_ROOT_CERTS {
+            let certificate = X509::from_der(certificate.as_ref()).map_err(|error| {
+                TransportError::Certificate(format!("failed to parse trusted root: {error}"))
+            })?;
+            let _ = cert_store.add_cert(certificate);
+        }
     }
     builder.set_cert_store(cert_store.build());
+    configure_client_identity(&mut builder, tls)?;
 
     if fingerprint.preset == FingerprintPreset::Chrome152 {
         builder.set_grease_enabled(true);
@@ -339,6 +414,128 @@ fn build_connector(
     }
 
     Ok(builder.build())
+}
+
+fn read_certificate_file(path: &Path, description: &str) -> Result<Vec<u8>, TransportError> {
+    fs::read(path).map_err(|error| {
+        TransportError::Certificate(format!(
+            "failed to read {description} `{}`: {error}",
+            path.display()
+        ))
+    })
+}
+
+fn configure_client_identity(
+    builder: &mut boring2::ssl::SslConnectorBuilder,
+    tls: &TlsConfig,
+) -> Result<(), TransportError> {
+    let Some(certificate_path) = &tls.client_cert else {
+        if tls.client_key.is_some() {
+            return Err(TransportError::InvalidInput(
+                "TLS client key requires a client certificate".into(),
+            ));
+        }
+        return Ok(());
+    };
+    let certificate_bytes = read_certificate_file(certificate_path, "client certificate")?;
+    let extension = certificate_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase);
+    let (certificate, key, chain) = if matches!(extension.as_deref(), Some("p12" | "pfx")) {
+        let archive = Pkcs12::from_der(&certificate_bytes).map_err(|error| {
+            TransportError::Certificate(format!(
+                "failed to parse PKCS#12 client certificate `{}`: {error}",
+                certificate_path.display()
+            ))
+        })?;
+        let parsed = archive
+            .parse(tls.client_cert_password.as_deref().unwrap_or_default())
+            .map_err(|error| {
+                TransportError::Certificate(format!(
+                    "failed to decrypt PKCS#12 client certificate `{}`: {error}",
+                    certificate_path.display()
+                ))
+            })?;
+        let chain = parsed
+            .chain
+            .map(|chain| {
+                chain
+                    .into_iter()
+                    .map(|certificate| certificate.to_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        (parsed.cert, parsed.pkey, chain)
+    } else {
+        let mut certificates = if matches!(extension.as_deref(), Some("cer" | "der")) {
+            vec![X509::from_der(&certificate_bytes).map_err(|error| {
+                TransportError::Certificate(format!(
+                    "failed to parse DER client certificate `{}`: {error}",
+                    certificate_path.display()
+                ))
+            })?]
+        } else {
+            X509::stack_from_pem(&certificate_bytes).map_err(|error| {
+                TransportError::Certificate(format!(
+                    "failed to parse PEM client certificate `{}`: {error}",
+                    certificate_path.display()
+                ))
+            })?
+        };
+        if certificates.is_empty() {
+            return Err(TransportError::Certificate(format!(
+                "client certificate `{}` contains no certificates",
+                certificate_path.display()
+            )));
+        }
+        let certificate = certificates.remove(0);
+        let key_path = tls.client_key.as_deref().unwrap_or(certificate_path);
+        let key_bytes = if key_path == certificate_path {
+            certificate_bytes.clone()
+        } else {
+            read_certificate_file(key_path, "client private key")?
+        };
+        let key = parse_private_key(key_path, &key_bytes, tls.client_cert_password.as_deref())?;
+        (certificate, key, certificates)
+    };
+    builder.set_certificate(&certificate).map_err(tls_error)?;
+    builder.set_private_key(&key).map_err(tls_error)?;
+    for certificate in chain {
+        builder
+            .add_extra_chain_cert(certificate)
+            .map_err(tls_error)?;
+    }
+    builder.check_private_key().map_err(|error| {
+        TransportError::Certificate(format!(
+            "TLS client certificate and key do not match: {error}"
+        ))
+    })
+}
+
+fn parse_private_key(
+    path: &Path,
+    bytes: &[u8],
+    password: Option<&str>,
+) -> Result<PKey<Private>, TransportError> {
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase);
+    let result = if matches!(extension.as_deref(), Some("der")) {
+        PKey::private_key_from_der(bytes)
+    } else if let Some(password) = password {
+        PKey::private_key_from_pem_passphrase(bytes, password.as_bytes())
+            .or_else(|_| PKey::private_key_from_pem(bytes))
+    } else {
+        PKey::private_key_from_pem(bytes)
+    };
+    result.map_err(|error| {
+        TransportError::Certificate(format!(
+            "failed to parse client private key `{}`: {error}",
+            path.display()
+        ))
+    })
 }
 
 fn require_nonempty(name: &str, value: &str) -> Result<(), TransportError> {
@@ -479,7 +676,7 @@ pub async fn wrap_tls(
     domain: &str,
     port: u16,
     fingerprint: &TransportFingerprint,
-    tls_verify: bool,
+    tls: &TlsConfig,
     http1_only: bool,
     session_cache: Option<&TlsSessionCache>,
     purpose: TlsPurpose,
@@ -490,20 +687,20 @@ pub async fn wrap_tls(
         host: hostname.to_ascii_lowercase(),
         port,
         fingerprint: fingerprint.clone(),
-        tls_verify,
+        tls: tls.clone(),
         purpose,
         route,
     };
     let connector = match session_cache {
         Some(cache) => cache.connector(ConnectorKey {
             fingerprint: fingerprint.clone(),
-            tls_verify,
+            tls: tls.clone(),
             http1_only,
             purpose,
         })?,
-        None => build_connector(fingerprint, tls_verify, http1_only, None)?,
+        None => build_connector(fingerprint, tls, http1_only, None)?,
     };
-    let config = configure_connection(&connector, fingerprint, domain, tls_verify, http1_only)?;
+    let config = configure_connection(&connector, fingerprint, domain, tls.verify, http1_only)?;
     let mut ssl = config.into_ssl(hostname).map_err(tls_error)?;
     if session_cache.is_some() {
         ssl.set_ex_data(*TLS_SESSION_KEY_INDEX, session_key.clone());
@@ -516,7 +713,7 @@ pub async fn wrap_tls(
     }
     let mut stream = SslStream::new(ssl, stream).map_err(tls_error)?;
     Pin::new(&mut stream).connect().await.map_err(|error| {
-        if tls_verify
+        if tls.verify
             && error
                 .to_string()
                 .to_ascii_lowercase()

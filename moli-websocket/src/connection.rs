@@ -52,7 +52,7 @@ pub(crate) async fn run_websocket_connection(
     };
     let handshake = open_websocket_stream(request, &context);
     tokio::pin!(handshake);
-    let (stream, response) = loop {
+    let (stream, response, _connection_permit) = loop {
         tokio::select! {
             biased;
             command = command_rx.recv() => {
@@ -352,6 +352,8 @@ async fn run_open_websocket_connection(
     }
     reader.abort();
     writer.abort();
+    let _ = reader.await;
+    let _ = writer.await;
 }
 
 enum ReaderEvent {

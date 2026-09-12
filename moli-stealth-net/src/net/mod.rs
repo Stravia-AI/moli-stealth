@@ -14,6 +14,7 @@ pub(crate) mod tls;
 
 use std::{
     collections::hash_map::DefaultHasher,
+    fmt,
     hash::{Hash, Hasher},
     sync::Arc,
 };
@@ -30,7 +31,7 @@ use crate::{
     connection::{open_connection, proxy_url},
 };
 
-pub use tls::TlsSessionCache;
+pub use tls::{TlsConfig, TlsSessionCache};
 
 const MAX_AUTH_EXCHANGES: usize = 8;
 
@@ -103,6 +104,39 @@ enum BodyInner {
     H2(H2Body),
 }
 
+/// Cloneable access to one transport's physical connection limits.
+///
+/// Protocols that open dedicated sockets retain the returned permit for the
+/// socket lifetime so HTTP and upgraded connections compete for one budget.
+#[derive(Clone)]
+pub struct ConnectionBudget {
+    pool: ConnectionPool,
+}
+
+impl fmt::Debug for ConnectionBudget {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ConnectionBudget")
+            .finish_non_exhaustive()
+    }
+}
+
+pub struct ConnectionPermit {
+    _inner: pool::ConnectionPermits,
+}
+
+impl ConnectionBudget {
+    pub async fn acquire(&self, url: &url::Url) -> Result<ConnectionPermit, TransportError> {
+        let host = url
+            .host_str()
+            .ok_or_else(|| TransportError::InvalidInput("connection URL has no host".into()))?;
+        self.pool
+            .acquire(host)
+            .await
+            .map(|inner| ConnectionPermit { _inner: inner })
+    }
+}
+
 impl ResponseBody {
     pub async fn chunk(&mut self) -> Result<Option<Bytes>, TransportError> {
         match &mut self.inner {
@@ -146,6 +180,15 @@ impl Transport {
     #[must_use]
     pub fn tls_session_cache(&self) -> TlsSessionCache {
         self.inner.tls_session_cache.clone()
+    }
+
+    /// Shares this transport's host and total physical-connection limits with
+    /// protocols that own upgraded sockets outside the HTTP pool.
+    #[must_use]
+    pub fn connection_budget(&self) -> ConnectionBudget {
+        ConnectionBudget {
+            pool: self.inner.pool.clone(),
+        }
     }
 
     /// Executes one approved request and resolves as soon as final response
@@ -654,6 +697,7 @@ fn origin_key(request: &TransportRequest) -> Result<OriginKey, TransportError> {
         .map(|url| url.as_str().to_owned())
         .hash(&mut hasher);
     request.connection.resolved_addresses.hash(&mut hasher);
+    request.connection.tls.hash(&mut hasher);
     request
         .connection
         .tls_session_cache

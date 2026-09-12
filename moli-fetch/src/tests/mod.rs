@@ -2,6 +2,7 @@ mod cookie_context;
 mod cookie_store;
 mod lifecycle;
 mod support;
+mod tls_credentials;
 
 use anyhow::{Context, Result};
 use moli_browser_profile::DEFAULT_ACCEPT_LANGUAGE;

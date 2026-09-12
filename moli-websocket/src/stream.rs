@@ -11,7 +11,14 @@ type Response = http::Response<()>;
 pub(crate) async fn open_websocket_stream(
     request: http::Request<()>,
     context: &ConnectOptions,
-) -> Result<(BrowserWebSocket, Response), String> {
+) -> Result<
+    (
+        BrowserWebSocket,
+        Response,
+        Option<moli_stealth_net::ConnectionPermit>,
+    ),
+    String,
+> {
     let url = Url::parse(&request.uri().to_string())
         .map_err(|error| format!("invalid WebSocket URL: {error}"))?;
     let connection = ConnectionOptions {
@@ -22,16 +29,27 @@ pub(crate) async fn open_websocket_stream(
         proxy_auth: None,
         connect_timeout: None,
         tls_session_cache: context.tls_session_cache.clone(),
+        tls: Some(context.tls.clone()),
+    };
+    let connection_permit = match &context.connection_budget {
+        Some(budget) => Some(
+            budget
+                .acquire(&url)
+                .await
+                .map_err(|error| error.to_string())?,
+        ),
+        None => None,
     };
     let connected = open_connection(
         &url,
         &connection,
         process_fingerprint(),
-        context.tls_verify_host,
+        context.tls.verify,
         true,
         true,
     )
     .await
     .map_err(|error| error.to_string())?;
-    browser_client_handshake(request, connected.stream).await
+    let (stream, response) = browser_client_handshake(request, connected.stream).await?;
+    Ok((stream, response, connection_permit))
 }

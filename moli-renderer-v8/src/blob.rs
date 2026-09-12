@@ -6,7 +6,6 @@ use moli_webapi_declare::{WebApiFunctionTemplate, WebApiObject};
 use std::sync::{Arc, OnceLock};
 
 use super::{
-    native_bridge,
     resource_owner::{ResourceOwnerId, current_resource_owner_id},
     runtime::RendererStoragePartitionIdentity,
     util::{get_private_value, set_private_value, throw_type_error, v8_string},
@@ -28,7 +27,7 @@ fn native_blob_line_ending() -> &'static str {
 }
 
 #[derive(WebApiObject)]
-#[webapi(interface = "Object")]
+#[webapi(prototype = "Object", interface = "Blob")]
 struct BlobInstanceDeclaration<'scope> {
     #[webapi(slot = BLOB_ID_SLOT)]
     blob_id: v8::Local<'scope, v8::BigInt>,
@@ -315,7 +314,7 @@ pub(super) fn is_blob_object<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     object: v8::Local<'s, v8::Object>,
 ) -> bool {
-    blob_id_from_object(scope, object).is_some()
+    moli_webapi_declare::implements_interface(scope, object, "Blob")
 }
 
 pub(super) fn blob_mime_type_from_object<'s>(
@@ -740,22 +739,7 @@ fn blob_platform_indexed_object_kind<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     object: v8::Local<'s, v8::Object>,
 ) -> Option<BlobPlatformIndexedObjectKind> {
-    if native_bridge::blob_parts_platform_collection_kind(scope, object).is_some() {
-        return Some(BlobPlatformIndexedObjectKind::Collection);
-    }
-    if let Ok((runtime_ptr, handle)) =
-        native_bridge::node_runtime_and_handle_from_object(scope, object)
-        && unsafe { &*runtime_ptr }
-            .dom_host()
-            .is_html_element_named(handle, "select")
-    {
-        return Some(BlobPlatformIndexedObjectKind::HtmlSelectElement);
-    }
-    match object
-        .get_constructor_name()
-        .to_rust_string_lossy(scope)
-        .as_str()
-    {
+    match moli_webapi_declare::web_api_object_type(scope, object)?.name() {
         "NamedNodeMap" => Some(BlobPlatformIndexedObjectKind::NamedNodeMap),
         "FileList" => Some(BlobPlatformIndexedObjectKind::FileList),
         "DOMStringList" => Some(BlobPlatformIndexedObjectKind::DomStringList),

@@ -17,14 +17,14 @@ moli-url.workspace = true
 rand.workspace = true
 ratchet_rs = { workspace = true, features = ["deflate", "split"] }
 sha1.workspace = true
-rcgen = { workspace = true, features = ["aws_lc_rs"], optional = true }
+rcgen = { workspace = true, features = ["aws_lc_rs", "pem"], optional = true }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs", "logging", "tls12"], optional = true }
 tokio-tungstenite = { workspace = true, features = ["handshake"], optional = true }
 url.workspace = true
 
 [dev-dependencies]
-rcgen = { workspace = true, features = ["aws_lc_rs"] }
+rcgen = { workspace = true, features = ["aws_lc_rs", "pem"] }
 tokio-tungstenite = { workspace = true, features = ["handshake"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs", "logging", "tls12"] }
 

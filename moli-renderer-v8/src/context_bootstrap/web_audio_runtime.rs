@@ -253,7 +253,11 @@ struct OfflineAudioCompletePayloadDeclaration<'scope> {
 }
 
 #[derive(WebApiObject)]
-#[webapi(interface = "Object")]
+#[webapi(
+    interface = "OfflineAudioCompletionEvent",
+    prototype = "Object",
+    parent = "Event"
+)]
 struct OfflineAudioCompletionEventDeclaration<'scope> {
     #[webapi(data_property = "type")]
     event_type: &'static str,
@@ -548,7 +552,7 @@ pub(in crate::context_bootstrap) fn is_audio_context_object<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     object: v8::Local<'s, v8::Object>,
 ) -> bool {
-    get_private_value(scope, object, AUDIO_CONTEXT_MODULES_SLOT).is_some()
+    moli_webapi_declare::implements_interface(scope, object, "AudioContext")
 }
 
 fn audio_context_close_callback<'s>(
@@ -1309,9 +1313,7 @@ fn require_base_audio_context<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     object: v8::Local<'s, v8::Object>,
 ) -> bool {
-    if is_audio_context_object(scope, object)
-        || get_private_value(scope, object, OFFLINE_AUDIO_LENGTH_SLOT).is_some()
-    {
+    if moli_webapi_declare::implements_interface(scope, object, "BaseAudioContext") {
         return true;
     }
     throw_type_error(scope, "Illegal invocation: expected a BaseAudioContext.");

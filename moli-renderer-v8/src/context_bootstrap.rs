@@ -125,7 +125,6 @@ pub(crate) use self::events::{
 pub(crate) use crypto::{
     CryptoKeyAlgorithmClonePayload, CryptoKeyClonePayload, WebCryptoRejection, WebCryptoTaskResult,
     crypto_key_clone_payload_from_object, crypto_key_object_from_clone_payload,
-    is_crypto_key_object,
 };
 pub(crate) use css_fontface_runtime::rebuild_font_face_set_faces;
 pub(crate) use location_navigation::{
@@ -260,7 +259,7 @@ pub(crate) use self::history_runtime::{
 };
 pub(crate) use self::image_data::{
     ImageDataClonePayload, build_image_data_object_from_clone_payload,
-    image_data_clone_payload_from_object, is_image_data_object,
+    image_data_clone_payload_from_object,
 };
 pub(crate) use self::indexed_db::{
     IndexedDbTaskId, discard_indexed_db_task_by_id, flush_blocked_indexed_db_requests,
@@ -335,6 +334,7 @@ pub(crate) use self::navigation_restore::{
 };
 pub(crate) use self::navigation_traversal::queue_top_level_history_traversal_by_delta;
 pub(crate) use self::navigator_runtime::install_worker_navigator_runtime_state;
+pub(crate) use self::navigator_runtime::notify_geolocation_override_changed;
 pub(crate) use self::navigator_runtime::{
     bind_window_navigator_identity_seed, set_window_navigator_identity,
     update_cached_window_visual_viewport_dimensions,
@@ -421,7 +421,6 @@ pub(crate) use self::streams::{
     build_readable_stream_clone_shell, build_transform_stream_clone_shell,
     build_writable_stream_clone_shell, initialize_readable_stream_clone_shell,
     initialize_transform_stream_clone_shell, initialize_writable_stream_clone_shell,
-    is_readable_stream_object, is_transform_stream_object, is_writable_stream_object,
     new_readable_stream_from_array_buffer, new_readable_stream_from_source,
     prepare_readable_stream_transfer, prepare_transform_stream_transfer,
     prepare_writable_stream_transfer,
@@ -436,7 +435,6 @@ pub(crate) use self::trusted_types::{
     trusted_script_url_string_or_throw, trusted_types_code_generation_check,
     trusted_types_code_generation_check_callback,
 };
-pub(crate) use self::url_form::object_prototype_matches;
 pub(crate) use self::url_search_params_runtime::url_search_params_request_body;
 pub(crate) use self::web_storage::install_storage_aliases_for_window;
 pub use self::web_storage::{
@@ -777,7 +775,7 @@ struct WorkerAbortControllerTemplateDeclaration {
 }
 
 #[derive(Default, WebApiObject)]
-#[webapi(interface = "WorkerGlobalScope", enumerable)]
+#[webapi(unbranded, interface = "WorkerGlobalScope", enumerable)]
 struct WorkerGlobalScopeCryptoPrototypeDeclaration {
     #[webapi(accessor_property, getter = worker_crypto_getter_callback)]
     crypto: (),

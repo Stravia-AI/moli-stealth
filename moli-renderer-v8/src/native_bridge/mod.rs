@@ -21,7 +21,6 @@ pub(super) mod identity;
 pub(crate) mod named_access;
 mod node;
 pub(crate) mod pointer_lock;
-pub(crate) mod receivers;
 mod traversal;
 mod window;
 
@@ -50,9 +49,7 @@ pub(crate) use active_child_window::{
     restore_deferred_active_child_window_scope_if_present,
 };
 pub(crate) use child_window_surface::CALLBACK_ERROR_WINDOW_HANDLE_SLOT;
-pub(crate) use collections::{
-    blob_parts_platform_collection_kind, install_collection_template_bindings,
-};
+pub(crate) use collections::install_collection_template_bindings;
 pub(crate) use context_host::{
     DetachedChildBrowsingContextDocumentSnapshot, ImageDecodeRequestId,
     RuntimeObservableContextToken, cross_origin_lightweight_popup_id,
@@ -84,14 +81,4 @@ pub(crate) use node::{
 };
 pub(crate) use node::{install_character_data_template_bindings, install_node_template_bindings};
 
-pub(crate) fn object_is_native_event_target_wrapper_or_detached<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    object: v8::Local<'s, v8::Object>,
-) -> bool {
-    if node::receiver_has_detached_state(scope, object) {
-        return true;
-    }
-    bridge_handle_from_object(scope, object)
-        .is_ok_and(|(_, handle)| matches!(handle, BridgeHandle::Node(_) | BridgeHandle::Window))
-}
 pub(crate) use traversal::install_traversal_template_bindings;

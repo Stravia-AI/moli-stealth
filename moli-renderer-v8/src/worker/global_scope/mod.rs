@@ -703,7 +703,7 @@ struct ServiceWorkerGlobalRegistrationDeclaration<'scope> {
 }
 
 #[derive(WebApiObject)]
-#[webapi(interface = "ServiceWorker")]
+#[webapi(interface = "ServiceWorker", parent = "EventTarget")]
 struct ServiceWorkerGlobalServiceWorkerDeclaration {
     #[webapi(data_property = "scriptURL", readonly)]
     script_url: String,

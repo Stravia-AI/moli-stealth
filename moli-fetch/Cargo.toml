@@ -25,6 +25,7 @@ moli-url-policy.workspace = true
 moli-web-bot-auth.workspace = true
 moli-web-mime.workspace = true
 parking_lot.workspace = true
+percent-encoding.workspace = true
 strum = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["io-util", "rt", "sync", "time"] }
 tracing.workspace = true
@@ -34,7 +35,8 @@ wildcard.workspace = true
 [dev-dependencies]
 h2.workspace = true
 moli-cookie-jar = { workspace = true, features = ["test-support"] }
-rcgen = { workspace = true, features = ["aws_lc_rs"] }
+boring2.workspace = true
+rcgen = { workspace = true, features = ["aws_lc_rs", "pem"] }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "sync", "time"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs", "logging", "tls12"] }
 

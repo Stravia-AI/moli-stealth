@@ -1,7 +1,8 @@
-use std::num::NonZeroU32;
+use std::{num::NonZeroU32, path::PathBuf};
 
 use cidr::AnyIpCidr;
 use moli_browser_profile::{BrowserIdentityProfile, DEFAULT_ACCEPT_LANGUAGE};
+use moli_stealth_net::TlsConfig;
 
 use crate::WebBotAuthSigner;
 
@@ -28,14 +29,14 @@ pub struct FetchConfig {
     // Moli uses Chromium's HTTP/1-style default of six connections per
     // host/group.
     http_max_host_connections: Option<u8>,
-    // Transport cap for total cached/open connections across hosts.
+    // Shared HTTP/WS transport cap for cached/open connections across hosts.
     http_max_total_connections: Option<u16>,
     // HTTP/2 stream cap; this is separate from HTTP/1 connection count.
     http2_max_concurrent_streams: Option<u16>,
     http_max_response_size: Option<usize>,
     block_private_networks: bool,
     block_cidrs: Vec<AnyIpCidr>,
-    tls_verify_host: bool,
+    tls: TlsConfig,
     web_bot_auth: Option<WebBotAuthSigner>,
 }
 
@@ -140,11 +141,48 @@ impl FetchConfig {
     }
 
     pub fn tls_verify_host(&self) -> bool {
-        self.tls_verify_host
+        self.tls.verify
     }
 
     pub fn set_tls_verify_host(&mut self, tls_verify_host: bool) {
-        self.tls_verify_host = tls_verify_host;
+        self.tls.verify = tls_verify_host;
+    }
+
+    pub fn tls_config(&self) -> &TlsConfig {
+        &self.tls
+    }
+
+    /// Configure TLS trust and mutual-TLS credentials for this fetch runtime,
+    /// including navigations and subresources. Client identities are used only
+    /// when the request's credentials mode allows them for the current URL;
+    /// CA trust applies regardless of credentials mode.
+    pub fn set_tls_credentials(
+        &mut self,
+        ca_cert: Option<PathBuf>,
+        client_cert: Option<PathBuf>,
+        client_key: Option<PathBuf>,
+        client_cert_password: Option<String>,
+    ) {
+        self.tls.ca_cert = ca_cert;
+        self.tls.client_cert = client_cert;
+        self.tls.client_key = client_key;
+        self.tls.client_cert_password = client_cert_password;
+    }
+
+    pub fn ca_cert(&self) -> Option<&std::path::Path> {
+        self.tls.ca_cert.as_deref()
+    }
+
+    pub fn client_cert(&self) -> Option<&std::path::Path> {
+        self.tls.client_cert.as_deref()
+    }
+
+    pub fn client_key(&self) -> Option<&std::path::Path> {
+        self.tls.client_key.as_deref()
+    }
+
+    pub fn client_cert_password(&self) -> Option<&str> {
+        self.tls.client_cert_password.as_deref()
     }
 
     pub fn web_bot_auth(&self) -> Option<&WebBotAuthSigner> {
@@ -284,7 +322,7 @@ impl Default for FetchConfig {
             http_max_response_size: None,
             block_private_networks: false,
             block_cidrs: Vec::new(),
-            tls_verify_host: true,
+            tls: TlsConfig::default(),
             web_bot_auth: None,
         }
     }

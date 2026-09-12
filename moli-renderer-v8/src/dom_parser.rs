@@ -57,10 +57,37 @@ impl DomParserSupportedType {
 #[derive(webidl::WebIdlArgs)]
 #[webidl(prefix = "DOMParser.parseFromString")]
 struct DomParserParseFromStringArgs {
-    #[webidl(required)]
-    source: String,
+    #[webidl(required, with = dom_parser_source_arg)]
+    source: DomParserSource,
     #[webidl(required, converter = "enum")]
     mime: DomParserSupportedType,
+}
+
+enum DomParserSource {
+    TrustedHtml(String),
+    String(String),
+}
+
+fn dom_parser_source_arg<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: &v8::FunctionCallbackArguments<'s>,
+    index: i32,
+) -> Result<DomParserSource, webidl::WebIdlError> {
+    if args.length() <= index {
+        return Err(webidl::WebIdlError::custom_message(
+            "Failed to execute 'parseFromString' on 'DOMParser': 2 arguments required, but only 0 present.",
+        ));
+    }
+    let value = args.get(index);
+    if let Some(value) = crate::context_bootstrap::trusted_html_value_string(scope, value) {
+        return Ok(DomParserSource::TrustedHtml(value));
+    }
+    webidl::convert::<webidl::DomString>(
+        scope,
+        value,
+        webidl::Context::argument("DOMParser.parseFromString", (index + 1) as usize),
+    )
+    .map(|value| DomParserSource::String(value.0))
 }
 
 #[derive(WebApiFunctionTemplate)]
@@ -90,8 +117,28 @@ pub(super) fn dom_parser_parse_from_string_callback<'s>(
     let Some(parsed) = webidl::parse_args::<DomParserParseFromStringArgs>(scope, &args) else {
         return;
     };
-    let Some(obj) =
-        parse_detached_document_from_string(scope, &parsed.source, parsed.mime.as_mime())
+    let source = match parsed.source {
+        DomParserSource::TrustedHtml(source) => source,
+        DomParserSource::String(source) => {
+            let requirements = context_host_ptr_from_global_bridge(scope)
+                .map(|host_ptr| unsafe { &*host_ptr }.trusted_types_for_script_requirements(scope))
+                .unwrap_or_default();
+            let Some(value) = crate::util::v8_string(scope, &source) else {
+                return;
+            };
+            let Some(source) = crate::context_bootstrap::trusted_html_string_or_throw(
+                scope,
+                value.into(),
+                requirements,
+                "DOMParser parseFromString",
+                "parseFromString",
+            ) else {
+                return;
+            };
+            source
+        }
+    };
+    let Some(obj) = parse_detached_document_from_string(scope, &source, parsed.mime.as_mime())
     else {
         rv.set(v8::null(scope).into());
         return;
@@ -141,7 +188,13 @@ pub(super) fn parse_detached_document_from_string<'s>(
     } else {
         materialize_xml_parser_error_document(parsed)
     };
-    build_detached_document(scope, parsed, DetachedDocumentKind::Xml, false)
+    build_detached_document_with_content_type(
+        scope,
+        parsed,
+        DetachedDocumentKind::Xml,
+        false,
+        Some(mime),
+    )
 }
 
 fn materialize_xml_parser_error_document(parsed: NativeDom) -> NativeDom {
@@ -351,11 +404,33 @@ fn build_detached_document<'s>(
     kind: DetachedDocumentKind,
     expose_declarative_shadow_roots: bool,
 ) -> Option<v8::Local<'s, v8::Object>> {
-    build_detached_document_from_dom_host(
+    build_detached_document_with_content_type(
         scope,
-        DomHost::from_dom(parsed),
+        parsed,
         kind,
         expose_declarative_shadow_roots,
+        None,
+    )
+}
+
+fn build_detached_document_with_content_type<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    parsed: NativeDom,
+    kind: DetachedDocumentKind,
+    expose_declarative_shadow_roots: bool,
+    content_type: Option<&str>,
+) -> Option<v8::Local<'s, v8::Object>> {
+    let _ = expose_declarative_shadow_roots;
+    let kind = match kind {
+        DetachedDocumentKind::Html => "html",
+        DetachedDocumentKind::Xml => "xml",
+    };
+    build_detached_document_object_from_dom_host_with_content_type(
+        scope,
+        kind,
+        DomHost::from_dom(parsed),
+        content_type,
+        None,
     )
 }
 

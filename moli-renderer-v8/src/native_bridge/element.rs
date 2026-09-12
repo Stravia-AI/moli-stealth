@@ -444,7 +444,8 @@ pub(super) use global_attributes::{
     node_enter_key_hint_setter_function, node_focus_group_getter_function,
     node_focus_group_setter_function, node_focus_group_start_getter_function,
     node_focus_group_start_setter_function, node_hidden_getter_function,
-    node_hidden_setter_function, node_input_mode_getter_function, node_input_mode_setter_function,
+    node_hidden_setter_function, node_inert_getter_function, node_inert_setter_function,
+    node_input_mode_getter_function, node_input_mode_setter_function,
     node_is_content_editable_getter_function, node_lang_getter_function, node_lang_setter_function,
     node_sandbox_getter_function, node_sandbox_setter_function, node_spellcheck_getter_function,
     node_spellcheck_setter_function, node_tab_index_getter_function,
@@ -1001,14 +1002,14 @@ struct HtmlElementGeometryPrototypeDeclaration {
     #[webapi(
         accessor_property = "offsetWidth",
         enumerable,
-        receiver = super::receivers::html_element,
+        receiver = "HTMLElement",
         getter = node_offset_width_getter_function
     )]
     offset_width: (),
     #[webapi(
         accessor_property = "offsetHeight",
         enumerable,
-        receiver = super::receivers::html_element,
+        receiver = "HTMLElement",
         getter = node_offset_height_getter_function
     )]
     offset_height: (),
@@ -1409,7 +1410,7 @@ struct ElementStylePrototypeDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(name = "HTMLElement")]
+#[webapi(name = "HTMLElement", receiver = "HTMLElement")]
 struct HtmlElementStandardPrototypeDeclaration {
     #[webapi(
         accessor_property,
@@ -1460,6 +1461,13 @@ struct HtmlElementStandardPrototypeDeclaration {
         setter = node_hidden_setter_function
     )]
     hidden: (),
+    #[webapi(
+        accessor_property,
+        enumerable,
+        getter = node_inert_getter_function,
+        setter = node_inert_setter_function
+    )]
+    inert: (),
     #[webapi(
         accessor_property = "accessKey",
         enumerable,
@@ -3240,7 +3248,7 @@ fn iframe_srcdoc_setter_function<'s>(
     rv.set_undefined();
 }
 
-fn iframe_content_document_getter_function<'s>(
+fn frame_owner_content_document_getter_function<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
@@ -3306,7 +3314,7 @@ fn iframe_content_document_getter_function<'s>(
     }
 }
 
-fn iframe_content_window_getter_function<'s>(
+fn frame_owner_content_window_getter_function<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
@@ -3365,6 +3373,44 @@ fn iframe_content_window_getter_function<'s>(
         }
         None => rv.set_null(),
     }
+}
+
+fn object_content_document_getter_function<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    rv: v8::ReturnValue<'_, v8::Value>,
+) {
+    if html_element_getter_receiver(
+        scope,
+        args.this(),
+        "HTMLObjectElement",
+        "contentDocument",
+        "object",
+    )
+    .is_none()
+    {
+        return;
+    }
+    frame_owner_content_document_getter_function(scope, args, rv);
+}
+
+fn object_content_window_getter_function<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    rv: v8::ReturnValue<'_, v8::Value>,
+) {
+    if html_element_getter_receiver(
+        scope,
+        args.this(),
+        "HTMLObjectElement",
+        "contentWindow",
+        "object",
+    )
+    .is_none()
+    {
+        return;
+    }
+    frame_owner_content_window_getter_function(scope, args, rv);
 }
 
 #[derive(WebApiFunctionTemplate)]
@@ -3991,9 +4037,17 @@ struct HtmlIFrameElementPrototypeDeclaration {
         setter_data = NullToEmptyDomStringReflection::IframeMarginWidth
     )]
     margin_width: (),
-    #[webapi(accessor_property, getter = iframe_content_document_getter_function, receiver = super::receivers::html_iframe_element)]
+    #[webapi(
+        accessor_property,
+        getter = frame_owner_content_document_getter_function,
+        receiver = "HTMLIFrameElement"
+    )]
     content_document: (),
-    #[webapi(accessor_property, getter = iframe_content_window_getter_function, receiver = super::receivers::html_iframe_element)]
+    #[webapi(
+        accessor_property,
+        getter = frame_owner_content_window_getter_function,
+        receiver = "HTMLIFrameElement"
+    )]
     content_window: (),
 }
 
@@ -5234,6 +5288,16 @@ struct HtmlObjectElementPrototypeDeclaration {
         setter_data = DomStringReflection::ObjectHeight
     )]
     height: (),
+    #[webapi(
+        accessor_property,
+        getter = object_content_document_getter_function
+    )]
+    content_document: (),
+    #[webapi(
+        accessor_property,
+        getter = object_content_window_getter_function
+    )]
+    content_window: (),
     #[webapi(
         accessor_property,
         getter = html_border_getter_function,

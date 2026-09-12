@@ -498,6 +498,27 @@ async fn websocket_synthetic_connection_opens_accounts_send_and_closes_cleanly()
 }
 
 #[tokio::test]
+async fn websocket_synthetic_connection_owner_drop_is_silent() {
+    let (event_tx, mut event_rx) = mpsc::channel(32);
+    let command_tx = spawn_synthetic_connection(94, Vec::new(), 101, Vec::new(), event_tx);
+
+    assert!(matches!(
+        timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("synthetic websocket open should arrive"),
+        Some(Event::Open { socket_id: 94, .. })
+    ));
+    drop(command_tx);
+    assert!(
+        timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("synthetic websocket task should retire")
+            .is_none(),
+        "owner retirement must not publish an unsolicited close"
+    );
+}
+
+#[tokio::test]
 async fn websocket_synthetic_connection_can_receive_frames_and_server_close() {
     let (event_tx, mut event_rx) = mpsc::channel(32);
     let command_tx = spawn_synthetic_connection(
@@ -589,6 +610,45 @@ async fn websocket_transport_close_while_connecting_fails_before_open() {
     assert_eq!(error, "WebSocket connection closed before opening");
     server.abort();
     let _ = server.await;
+}
+
+#[tokio::test]
+async fn websocket_transport_waits_for_shared_connection_budget() {
+    let (url, server) = spawn_text_echo_websocket_server().await;
+    let transport = moli_stealth_net::Transport::new(moli_stealth_net::TransportConfig {
+        max_connections: Some(1),
+        max_host_connections: Some(1),
+        ..moli_stealth_net::TransportConfig::default()
+    })
+    .expect("create limited transport");
+    let budget = transport.connection_budget();
+    let held = budget
+        .acquire(&Url::parse(&url).expect("parse WebSocket URL"))
+        .await
+        .expect("reserve the only connection slot");
+    let (event_tx, mut event_rx) = mpsc::channel(32);
+    let mut context = test_websocket_context();
+    context.connection_budget = Some(budget);
+    let command_tx = spawn_connection(95, url, Vec::new(), context, event_tx);
+
+    assert!(
+        timeout(Duration::from_millis(100), event_rx.recv())
+            .await
+            .is_err(),
+        "WebSocket must wait while the shared transport budget is full"
+    );
+    drop(held);
+    assert_eq!(recv_open_event(&mut event_rx).await.socket_id, 95);
+
+    command_tx
+        .send(Command::Close {
+            code: Some(1000),
+            reason: "done".to_owned(),
+        })
+        .expect("close WebSocket");
+    assert_closing(&mut event_rx, 95).await;
+    assert_close(&mut event_rx, 95, 1000, "done", true).await;
+    server.await.expect("WebSocket server should finish");
 }
 
 #[tokio::test]
@@ -750,7 +810,7 @@ async fn websocket_transport_wss_over_connect_uses_shared_tls_without_leaking_pr
     context.http_proxy = Some(proxy_url);
     context.http_no_proxy = Some(String::new());
     context.proxy_bearer_token = Some("wss-proxy-token".to_owned());
-    context.tls_verify_host = false;
+    context.tls.verify = false;
 
     let command_tx = spawn_connection(3, url.clone(), Vec::new(), context, event_tx);
     let proxy_request = timeout(Duration::from_secs(3), proxy_request_rx)
@@ -821,7 +881,7 @@ async fn websocket_transport_respects_disabled_tls_verify_for_self_signed_wss() 
     let (url, headers_rx, server) = spawn_tls_header_capture_websocket_server().await;
     let (event_tx, mut event_rx) = mpsc::channel(32);
     let mut context = test_websocket_context();
-    context.tls_verify_host = false;
+    context.tls.verify = false;
 
     let command_tx = spawn_connection(3, url, Vec::new(), context, event_tx);
     let headers = timeout(Duration::from_secs(3), headers_rx)
@@ -849,7 +909,7 @@ async fn websocket_transport_wss_allows_server_to_omit_response_subprotocol() {
     let (url, headers_rx, server) = spawn_tls_header_capture_websocket_server().await;
     let (event_tx, mut event_rx) = mpsc::channel(32);
     let mut context = test_websocket_context();
-    context.tls_verify_host = false;
+    context.tls.verify = false;
 
     let _command_tx = spawn_connection(
         4,

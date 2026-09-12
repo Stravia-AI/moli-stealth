@@ -84,12 +84,71 @@
 //! `data = self.some_field`, which lets a declaration carry callback data
 //! without expanding the object reflection surface.
 //!
+//! Named interface instances automatically receive a private Web API type after
+//! their fields initialize successfully. `bind`, `bind_into`, and `initialize`
+//! all use this path. `interface = "Object"` describes an unbranded record;
+//! `#[webapi(unbranded)]` explicitly opts named prototype/constructor installers,
+//! dictionaries, and shared initialization fragments out of instance branding.
+//! These fragments never erase an identity already present on their target.
+//! Use payload slots for data, handles, ownership, and lifecycle state instead
+//! of maintaining separate boolean brands. A named native declaration can use
+//! `prototype = "Object"` to preserve an existing plain public prototype while
+//! still assigning native identity.
+//!
+//! Implementation sharing does not imply interface inheritance. For example,
+//! encoding streams share TransformStream internals but have distinct native
+//! interfaces. Their factory assigns the concrete type while the shared state
+//! fragment stays unbranded. Do not opt actual instances out of branding to
+//! make them pass structured clone.
+//!
+//! Register inheritance with `register_web_api_interfaces` using the same
+//! interface metadata that drives constructor installation. `WebApiInterface`
+//! registers its own name and parent automatically. Identity is independent of
+//! realm exposure and mutable JavaScript prototypes. Use `web_api_object_type`
+//! for the primary interface and `implements_interface` for inherited receiver
+//! checks. Native factories can call `initialize_web_api_object` directly.
+//! An object declaration outside the exposed-interface registry can declare
+//! `parent = "BaseInterface"`; this registers inheritance before initialization.
+//! JavaScript subclasses retain the native interface implemented by their
+//! constructor. Base initialization never downgrades an existing derived type.
+//! Inconsistent parents, cycles, and unrelated rebranding fail. The renderer
+//! registers inheritance from `ConstructorSpec.name` and `.parent` before lazy
+//! constructor exposure, without maintaining another type list.
+//! Factories using that registry should not repeat `parent`: deleting a public
+//! constructor or taking a fallback path does not remove registered inheritance.
+//!
+//! `WebApiInterface` and `WebApiFunctionTemplate` adapt native constructor
+//! callbacks automatically. Hand-written templates can use
+//! `web_api_constructor!("Interface", callback)` when construction does not
+//! already go through a named object declaration. Only successful construction
+//! brands the resulting native object; constructors and prototypes are not
+//! instances. A factory implemented with a native Proxy must brand its target
+//! and call `register_web_api_proxy` with its private handler before publication.
+//! The handler belongs to that exact Proxy; author wrappers and revoked Proxies
+//! fail identity checks without invoking traps. Registration grants no clone
+//! capability. Native factories select names from their own descriptors, never
+//! from JavaScript properties such as `new.target.name`. Include detached nodes,
+//! workers, iterators, fallback events, and deserialization paths when adding a
+//! factory. Receiver identity does not replace resource or realm authorization.
+//!
+//! Identity alone grants neither serialization nor transfer capability.
+//! Structured-clone serializers route every identified object through their
+//! explicit codecs and reject unsupported types, including nested instances.
+//! Both message serialization and IndexedDB dispatch on the primary interface,
+//! as required by the [HTML serialization and transfer rules]. A native derived
+//! interface does not implicitly inherit a base interface's codec. The numeric
+//! type IDs are isolate-local and must never be persisted or used as wire tags;
+//! deserializers use their existing wire tags and native construction paths to
+//! assign identity in the receiving isolate.
+//!
+//! [HTML serialization and transfer rules]: https://html.spec.whatwg.org/multipage/structured-data.html#serializable-objects
+//!
 //! The derive generates a Rust-side `new(...)` constructor by default. The
 //! generated constructor takes every non-`()` declaration field as a named
 //! argument and fills `()` declaration fields with `()`. If every field is
 //! `()`, the generated constructor is `new()`. This keeps dynamic state
-//! explicit while removing boilerplate such as `brand: ()` for fixed
-//! initialized slots or accessor/method declaration fields. A field can declare
+//! explicit while removing boilerplate for fixed initialized slots or
+//! accessor/method declaration fields. A field can declare
 //! `#[webapi(constructor_default = expr)]`, or bare
 //! `#[webapi(constructor_default)]` for `Default::default()`, to keep a
 //! Rust-side default out of the generated constructor while still installing
@@ -100,18 +159,21 @@
 //!
 //! # Receiver checks and Promise-returning members
 //!
-//! `receiver = path` on a method or `accessor_property` declares a native brand
-//! predicate with signature `fn(&mut v8::PinScope, v8::Local<v8::Object>) -> bool`.
-//! The generated callback checks it before running the implementation, throwing
-//! `TypeError("Illegal invocation")` on failure. The predicate must inspect native
-//! identity or private slots, not public constructors, prototypes, or properties;
-//! it must not execute JavaScript or throw. This preserves cross-realm receivers
-//! without accepting forged prototypes or Proxy wrappers.
+//! `receiver = "Interface"` on a method or `accessor_property` generates an
+//! `implements_interface` check before argument conversion and implementation.
+//! Invalid receivers throw `TypeError("Illegal invocation")`. Native subtypes
+//! and cross-realm objects are accepted even after their JavaScript prototypes
+//! change. Forged prototypes, public properties, and author Proxies cannot pass.
 //!
-//! Struct-level `receiver = path` supplies the default for instance methods and
+//! Struct-level `receiver` supplies the default for instance methods and
 //! accessor properties in all three derives; a field can override it. Static
 //! methods, data properties, and holder-based native data properties do not
 //! inherit this policy. Already-built `getter_value` functions cannot use it.
+//!
+//! `receiver = path` remains available for a custom native predicate with
+//! signature `fn(&mut v8::PinScope, v8::Local<v8::Object>) -> bool`. It must not
+//! execute JavaScript or throw. Use it for checks that additionally require
+//! native resource state; ordinary interface checks should use the string form.
 //!
 //! `returns_promise` on a method (including a static method) or accessor getter
 //! converts synchronous exceptions from both the receiver check and the callback
@@ -163,6 +225,7 @@
 
 extern crate self as moli_webapi_declare;
 
+mod brand;
 mod callback;
 mod declaration;
 mod error;
@@ -174,6 +237,28 @@ pub mod __private;
 
 pub use moli_webapi_declare_derive::{WebApiFunctionTemplate, WebApiInterface, WebApiObject};
 pub use v8;
+
+/// Adapts a manual native constructor to the same identity initialization used
+/// by interface derives. The interface must be a native declaration literal,
+/// never a name obtained from `new.target` or another JavaScript property.
+#[macro_export]
+macro_rules! web_api_constructor {
+    ($interface:literal, $callback:path) => {{
+        fn __moli_native_constructor_adapter<'s>(
+            scope: &mut $crate::v8::PinScope<'s, '_>,
+            args: $crate::v8::FunctionCallbackArguments<'s>,
+            rv: $crate::v8::ReturnValue<'s>,
+        ) {
+            $crate::__private::invoke_web_api_constructor(scope, args, rv, $interface, $callback);
+        }
+        __moli_native_constructor_adapter
+    }};
+}
+
+pub use brand::{
+    WebApiType, implements_interface, initialize_web_api_object, register_web_api_interfaces,
+    register_web_api_proxy, web_api_object_type,
+};
 
 pub use declaration::{
     DataPropertyDescriptorDeclaration, ObjectLiteralDeclaration, WebApiFunctionTemplateDeclaration,
@@ -191,10 +276,9 @@ pub use property::{
     illegal_constructor_callback, webidl_constant_property_attributes,
 };
 pub use prototype::{
-    EVENT_TARGET_INTERFACE_BRAND_SLOT, define_declared_to_string_tag,
-    define_declared_to_string_tag_with_attributes, define_interface_constructor_property,
-    define_interface_prototype_property, define_to_string_tag,
-    define_to_string_tag_with_attributes, set_declared_prototype, set_interface_prototype,
-    set_required_interface_prototype,
+    define_declared_to_string_tag, define_declared_to_string_tag_with_attributes,
+    define_interface_constructor_property, define_interface_prototype_property,
+    define_to_string_tag, define_to_string_tag_with_attributes, set_declared_prototype,
+    set_interface_prototype, set_required_interface_prototype,
 };
 pub use value::{WebApiTemplateValue, WebApiValue, define_array_data_property};

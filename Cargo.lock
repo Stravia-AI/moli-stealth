@@ -2414,7 +2414,7 @@ dependencies = [
 
 [[package]]
 name = "moli"
-version = "1.1.4"
+version = "1.1.5"
 dependencies = [
  "anyhow",
  "axum",
@@ -2607,6 +2607,7 @@ dependencies = [
  "indexmap",
  "moli-css-parse",
  "moli-html-input-temporal",
+ "moli-html-input-type",
  "percent-encoding",
  "selectors",
  "serde_json",
@@ -2638,6 +2639,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-compression",
+ "btls",
  "bytes",
  "cidr",
  "h2",
@@ -2653,6 +2655,7 @@ dependencies = [
  "moli-web-bot-auth",
  "moli-web-mime",
  "parking_lot",
+ "percent-encoding",
  "rcgen",
  "strum",
  "tokio",
@@ -2678,6 +2681,7 @@ dependencies = [
 name = "moli-geometry"
 version = "0.1.0"
 dependencies = [
+ "dragonbox_ecma",
  "moli-css-parse",
 ]
 
@@ -2690,6 +2694,13 @@ name = "moli-html-input-temporal"
 version = "0.1.0"
 dependencies = [
  "time",
+]
+
+[[package]]
+name = "moli-html-input-type"
+version = "0.1.0"
+dependencies = [
+ "strum",
 ]
 
 [[package]]
@@ -2875,6 +2886,7 @@ dependencies = [
  "base64 0.23.1",
  "chromiumoxide_cdp",
  "data-url",
+ "futures-util",
  "http",
  "indexmap",
  "moli-bounded-buffer",
@@ -2908,6 +2920,7 @@ dependencies = [
  "strum",
  "time",
  "tokio",
+ "tokio-tungstenite",
  "tracing",
  "url",
  "v8",
@@ -2939,6 +2952,7 @@ dependencies = [
  "moli-cookie-jar",
  "moli-core",
  "moli-fetch",
+ "moli-html-input-type",
  "moli-protocol",
  "moli-protocol-cdp",
  "moli-protocol-webdriver-bidi",
@@ -3052,6 +3066,7 @@ dependencies = [
  "moli-webidl",
  "moli-webidl-callback",
  "moli-websocket",
+ "moli-window-features",
  "moli-xpath",
  "parking_lot",
  "percent-encoding",
@@ -3400,11 +3415,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "moli-window-features"
+version = "0.1.0"
+dependencies = [
+ "indexmap",
+ "stylo",
+]
+
+[[package]]
 name = "moli-wpt-compat"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "futures-util",
  "html5ever",
  "parking_lot",
  "rcgen",
@@ -3914,6 +3938,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
+name = "pem"
+version = "3.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d30c53c26bc5b31a98cd02d20f25a7c8567146caf63ed593a9d87b2775291be"
+dependencies = [
+ "base64 0.22.1",
+ "serde_core",
+]
+
+[[package]]
 name = "peniko"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4299,6 +4333,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75e669e5202259b5314d1ea5397316ad400819437857b90861765f24c4cf80a2"
 dependencies = [
  "aws-lc-rs",
+ "pem",
  "rustls-pki-types",
  "time",
  "yasna",

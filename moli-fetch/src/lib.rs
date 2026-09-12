@@ -43,6 +43,7 @@ pub use headers::{
     is_forbidden_response_header_name, is_no_cors_safelisted_request_header,
 };
 pub use moli_cookie_jar::SharedBrowserCookieStore as SharedCookieStore;
+pub use moli_stealth_net::TlsConfig;
 pub use moli_web_bot_auth::{WebBotAuthProfile, WebBotAuthSigner};
 pub use network_fetch_result::{
     NetworkExchangeObservation, NetworkFetchFailureContext, NetworkFetchFailureRequestContext,

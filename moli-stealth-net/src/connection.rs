@@ -5,7 +5,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use url::Url;
 
 use crate::net::{proxy, tcp, tls};
-use crate::{TransportAuth, TransportError, TransportFingerprint};
+use crate::{TlsConfig, TransportAuth, TransportError, TransportFingerprint};
 
 pub trait IoStream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T> IoStream for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -35,6 +35,9 @@ pub struct ConnectionOptions {
     /// Context-scoped TLS state. Supplying the same handle allows eligible
     /// HTTPS and WSS connections to reuse server-issued sessions.
     pub tls_session_cache: Option<tls::TlsSessionCache>,
+    /// Per-request trust and optional client identity. `None` uses the caller's
+    /// verification default without custom trust or credentials.
+    pub tls: Option<TlsConfig>,
 }
 
 impl fmt::Debug for ConnectionOptions {
@@ -54,6 +57,7 @@ impl fmt::Debug for ConnectionOptions {
                 "tls_session_cache",
                 &self.tls_session_cache.as_ref().map(|_| "[CONFIGURED]"),
             )
+            .field("tls", &self.tls)
             .finish()
     }
 }
@@ -104,6 +108,11 @@ async fn open_connection_inner(
         .port_or_known_default()
         .ok_or_else(|| TransportError::InvalidInput("connection URL is missing a port".into()))?;
     let target_uses_tls = matches!(scheme, "https" | "wss");
+    let default_tls = TlsConfig {
+        verify: tls_verify,
+        ..TlsConfig::default()
+    };
+    let origin_tls = options.tls.as_ref().unwrap_or(&default_tls);
 
     let selected_proxy = proxy_url(url, options)?;
     let tls_route = match selected_proxy.as_ref() {
@@ -137,7 +146,7 @@ async fn open_connection_inner(
                     config.host(),
                     config.port(),
                     fingerprint,
-                    tls_verify,
+                    &default_tls,
                     true,
                     options.tls_session_cache.as_ref(),
                     tls::TlsPurpose::Proxy,
@@ -237,7 +246,7 @@ async fn open_connection_inner(
             target_host,
             target_port,
             fingerprint,
-            tls_verify,
+            origin_tls,
             http1_only,
             options.tls_session_cache.as_ref(),
             tls::TlsPurpose::Origin,

@@ -8,6 +8,7 @@ edition = "2024"
 html5ever.workspace = true
 indexmap.workspace = true
 moli-css-parse.workspace = true
+moli-html-input-type.workspace = true
 moli-html-input-temporal.workspace = true
 percent-encoding.workspace = true
 selectors.workspace = true

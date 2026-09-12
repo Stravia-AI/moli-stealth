@@ -127,6 +127,7 @@ struct FetchRuntimeInner {
     request_tx: mpsc::UnboundedSender<RuntimeCommand>,
     config: FetchConfig,
     tls_session_cache: moli_stealth_net::TlsSessionCache,
+    connection_budget: moli_stealth_net::ConnectionBudget,
     shutdown_requested: Arc<AtomicBool>,
     #[cfg(test)]
     owner_started: Arc<AtomicBool>,
@@ -487,6 +488,7 @@ impl FetchRuntimeOwner {
         })
         .expect("failed to initialize fetch transport");
         let tls_session_cache = transport.tls_session_cache();
+        let connection_budget = transport.connection_budget();
         let shared = RuntimeShared {
             config: config.clone(),
             cookie_store,
@@ -524,12 +526,14 @@ impl FetchRuntimeOwner {
                 .to_owned(),
             thread_id: format!("{:?}", owner_handle.thread().id()),
         };
+
         Self {
             handle: FetchRuntimeHandle {
                 inner: Arc::new(FetchRuntimeInner {
                     request_tx,
                     config: config.clone(),
                     tls_session_cache,
+                    connection_budget,
                     shutdown_requested,
                     #[cfg(test)]
                     owner_started,
@@ -636,6 +640,10 @@ fn panic_report(
 impl FetchRuntimeHandle {
     pub(crate) fn tls_session_cache(&self) -> moli_stealth_net::TlsSessionCache {
         self.inner.tls_session_cache.clone()
+    }
+
+    pub(crate) fn connection_budget(&self) -> moli_stealth_net::ConnectionBudget {
+        self.inner.connection_budget.clone()
     }
 
     #[cfg(test)]
@@ -1031,6 +1039,8 @@ async fn execute_request(shared: &RuntimeShared, job: &mut QueuedJob) -> Result<
         let auth = request
             .auth()
             .filter(|auth| matches!(auth.target, crate::RequestAuthTarget::Server))
+            .filter(|_| request.allows_credentials_for_url(&current_url))
+            .filter(|_| moli_url::same_origin(&request.url, &current_url))
             .map(transport_auth);
         let mut transport_request =
             TransportRequest::new(current_url.clone(), prepared.request.method().to_owned());
@@ -1320,6 +1330,11 @@ async fn connection_options(
     let mut options = ConnectionOptions {
         resolved_addresses: None,
         tls_session_cache: None,
+        tls: Some(if request.allows_credentials_for_url(url) {
+            config.tls_config().clone()
+        } else {
+            config.tls_config().without_client_identity()
+        }),
         proxy: config.http_proxy().map(str::to_owned),
         no_proxy: config.http_no_proxy().map(str::to_owned),
         proxy_bearer_token: config.proxy_bearer_token().map(str::to_owned),

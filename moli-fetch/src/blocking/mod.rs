@@ -28,7 +28,7 @@ pub use self::cache::{
 };
 use crate::{
     BrowserRequestMetadata, FetchConfig, NegotiatedHttpVersion, NetworkRequestExtraInfo,
-    RedirectInfo, Request, RequestAuthScheme, RequestAuthTarget, ResponseHead,
+    RedirectInfo, Request, ResponseHead,
 };
 
 const MAX_REDIRECTS: usize = 10;
@@ -177,20 +177,6 @@ pub(crate) fn outgoing_request_headers_for_url(
         outgoing.push((
             "Authorization".to_owned(),
             format!("Basic {}", encode_basic_auth(username, password)),
-        ));
-    }
-
-    if let Some(auth) = request.auth()
-        && auth.target == RequestAuthTarget::Server
-        && auth.scheme == RequestAuthScheme::Basic
-        && !header_present(&outgoing, "authorization")
-    {
-        outgoing.push((
-            "Authorization".to_owned(),
-            format!(
-                "Basic {}",
-                encode_basic_auth(&auth.username, &auth.password)
-            ),
         ));
     }
 

@@ -23330,6 +23330,61 @@ fn location_conversion_hooks_and_prevent_extensions_match_location_exotic_semant
 }
 
 #[test]
+fn location_prototype_is_immutable_while_same_prototype_assignments_succeed() {
+    let mut vm = new_storage_test_vm("https://example.com/path");
+
+    let result = vm
+        .eval(
+            r#"
+            (() => {
+              "use strict";
+              const original = Object.getPrototypeOf(location);
+              const replacement = {};
+              const throwsName = callback => {
+                try {
+                  callback();
+                  return "returned";
+                } catch (error) {
+                  return error && error.name;
+                }
+              };
+
+              const objectDifferent = throwsName(() => {
+                Object.setPrototypeOf(location, replacement);
+              });
+              const dunderDifferent = throwsName(() => {
+                location.__proto__ = replacement;
+              });
+              const reflectDifferent = Reflect.setPrototypeOf(location, replacement);
+              const unchanged = Object.getPrototypeOf(location) === original;
+              const objectSame = Object.setPrototypeOf(location, original) === location;
+              const dunderSame = throwsName(() => {
+                location.__proto__ = original;
+              });
+              const reflectSame = Reflect.setPrototypeOf(location, original);
+
+              return JSON.stringify({
+                objectDifferent,
+                dunderDifferent,
+                reflectDifferent,
+                unchanged,
+                objectSame,
+                dunderSame,
+                reflectSame,
+                instanceofLocation: location instanceof Location,
+              });
+            })()
+            "#,
+        )
+        .expect("Location immutable prototype probe should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"objectDifferent":"TypeError","dunderDifferent":"TypeError","reflectDifferent":false,"unchanged":true,"objectSame":true,"dunderSame":"returned","reflectSame":true,"instanceofLocation":true}"#
+    );
+}
+
+#[test]
 fn location_href_backing_slot_ignores_reflection_and_spoofing() {
     let mut vm = new_storage_test_vm("https://example.com/path?x=1#frag");
 
@@ -28055,4 +28110,30 @@ fn quota_exceeded_error_is_dom_exception_subclass_with_readonly_slots() {
         result,
         "QuotaExceededError|full|22|7|11|true|true|true|true|false|function|get requested|0|true|true|true|function|get quota|0|true|true|true|true|true|true|true|true|false|QuotaExceededError|22"
     );
+}
+
+#[test]
+fn dom_matrix_exposes_webkit_css_matrix_alias() {
+    let mut vm = new_storage_test_vm("https://dommatrix-webkit-alias.test/");
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const webkitDescriptor = Object.getOwnPropertyDescriptor(globalThis, "WebKitCSSMatrix");
+  const matrix = new WebKitCSSMatrix();
+  return [
+    WebKitCSSMatrix === DOMMatrix,
+    WebKitCSSMatrix.prototype === DOMMatrix.prototype,
+    WebKitCSSMatrix.name,
+    matrix instanceof DOMMatrix,
+    matrix instanceof DOMMatrixReadOnly,
+    [webkitDescriptor.writable, webkitDescriptor.enumerable, webkitDescriptor.configurable].join(",")
+  ].join("|");
+})()
+"#,
+        )
+        .expect("DOMMatrix legacy Window aliases should evaluate");
+
+    assert_eq!(result, "true|true|DOMMatrix|true|true|true,false,true");
 }

@@ -218,6 +218,12 @@ impl ManualCorsRedirectState {
             negotiated_http_version: head.negotiated_http_version,
         });
         self.request.apply_redirect_status(redirect_status);
+        if !moli_url::same_origin(&self.request.url, &next_url) {
+            self.request.clear_server_auth();
+            self.request
+                .request_headers
+                .retain(|(name, _)| !name.eq_ignore_ascii_case("authorization"));
+        }
         self.request.url = next_url;
         self.preflight_request_headers = self.request.request_headers.clone();
         Ok(ManualCorsRedirectTransition::FollowedRedirect)
@@ -844,10 +850,14 @@ mod tests {
         let request_headers = vec![
             ("Content-Type".to_owned(), "application/json".to_owned()),
             ("X-Challenge".to_owned(), "yes".to_owned()),
+            (
+                "Authorization".to_owned(),
+                "Bearer origin-secret".to_owned(),
+            ),
         ];
         let request = Request::new(
             "POST",
-            "https://origin.test/start",
+            "https://alice:secret@origin.test/start",
             Some("payload".to_owned()),
             request_headers.clone(),
         )?
@@ -882,6 +892,14 @@ mod tests {
         );
         assert_eq!(redirects.request().method, "GET");
         assert!(redirects.request().body.is_none());
+        assert!(redirects.request().auth().is_none());
+        assert!(
+            redirects
+                .request()
+                .request_headers
+                .iter()
+                .all(|(name, _)| { !name.eq_ignore_ascii_case("authorization") })
+        );
         assert_eq!(
             redirects.preflight_request_headers(),
             &[("X-Challenge".to_owned(), "yes".to_owned())]

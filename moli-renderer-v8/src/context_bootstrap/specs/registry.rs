@@ -696,7 +696,7 @@ const CONSTRUCTOR_SPECS_BEFORE_STREAMS: &[ConstructorSpec] = &[
     ConstructorSpec {
         name: "Location",
         parent: None,
-        kind: ConstructorKind::Illegal,
+        kind: ConstructorKind::Location,
     },
     ConstructorSpec {
         name: "Navigation",
@@ -1037,6 +1037,11 @@ const CONSTRUCTOR_SPECS_AFTER_STREAMS: &[ConstructorSpec] = &[
         kind: ConstructorKind::RtcIceCandidate,
     },
     ConstructorSpec {
+        name: "RTCSessionDescription",
+        parent: None,
+        kind: ConstructorKind::RtcSessionDescription,
+    },
+    ConstructorSpec {
         name: "RTCRtpReceiver",
         parent: None,
         kind: ConstructorKind::Illegal,
@@ -1199,7 +1204,7 @@ const CONSTRUCTOR_SPECS_AFTER_STREAMS: &[ConstructorSpec] = &[
     ConstructorSpec {
         name: "DOMRectReadOnly",
         parent: None,
-        kind: ConstructorKind::Illegal,
+        kind: ConstructorKind::DomRectReadOnly,
     },
     ConstructorSpec {
         name: "DOMRect",

@@ -706,6 +706,14 @@ fn htmlelement_standard_accessors_live_on_owner_prototypes() {
               };
               const own = (object, name) =>
                 Object.prototype.hasOwnProperty.call(object, name);
+              const throwsTypeError = callback => {
+                try {
+                  callback();
+                } catch (error) {
+                  return error instanceof TypeError;
+                }
+                return false;
+              };
 
               const htmlNames = [
                 "title",
@@ -715,6 +723,7 @@ fn htmlelement_standard_accessors_live_on_owner_prototypes() {
                 "translate",
                 "dir",
                 "hidden",
+                "inert",
                 "accessKey",
                 "draggable",
                 "spellcheck",
@@ -758,6 +767,7 @@ fn htmlelement_standard_accessors_live_on_owner_prototypes() {
               div.translate = false;
               div.dir = "RTL";
               div.hidden = true;
+              div.inert = true;
               div.accessKey = "x";
               div.draggable = true;
               div.spellcheck = false;
@@ -779,6 +789,10 @@ fn htmlelement_standard_accessors_live_on_owner_prototypes() {
               assert(div.translate === false && div.getAttribute("translate") === "no", "translate behavior");
               assert(div.dir === "rtl", "dir behavior");
               assert(div.hidden === true && div.hasAttribute("hidden"), "hidden behavior");
+              assert(div.inert === true && div.hasAttribute("inert"), "inert behavior");
+              const inertDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "inert");
+              assert(throwsTypeError(() => inertDescriptor.get.call(HTMLElement.prototype)), "inert getter brand");
+              assert(throwsTypeError(() => inertDescriptor.set.call(HTMLElement.prototype, true)), "inert setter brand");
               assert(div.accessKey === "x", "accessKey behavior");
               assert(div.draggable === true && div.getAttribute("draggable") === "true", "draggable behavior");
               assert(div.spellcheck === false && div.getAttribute("spellcheck") === "false", "spellcheck behavior");
@@ -894,8 +908,8 @@ fn document_state_and_collection_accessors_live_on_document_prototype() {
               const xml = document.implementation.createDocument("urn:test", "root", null);
               assert(!own(xml, "images"), "xml images should not be own");
               assert(xml.images === undefined, "xml images value");
-              assert(xml.hidden === false, "xml hidden value");
-              assert(xml.visibilityState === "visible", "xml visibility value");
+              assert(xml.hidden === true, "xml hidden value");
+              assert(xml.visibilityState === "hidden", "xml visibility value");
 
               return [
                 Object.prototype.toString.call(fonts),
@@ -1720,7 +1734,7 @@ fn detached_specialized_element_surfaces_are_inherited() {
     [id("menu"), ["compact"], "menu"],
     [id("meta"), ["content", "httpEquiv", "media", "name"], "meta"],
     [id("meter"), ["high", "labels", "low", "max", "min", "optimum", "value"], "meter"],
-    [id("object"), ["archive", "border", "code", "codeBase", "codeType", "data", "declare", "form", "hspace", "name", "standby", "type", "useMap", "validity", "validationMessage", "vspace", "willValidate", "checkValidity", "reportValidity", "setCustomValidity"], "object"],
+    [id("object"), ["archive", "border", "code", "codeBase", "codeType", "contentDocument", "contentWindow", "data", "declare", "form", "hspace", "name", "standby", "type", "useMap", "validity", "validationMessage", "vspace", "willValidate", "checkValidity", "reportValidity", "setCustomValidity"], "object"],
     [id("ol"), ["compact", "reversed", "start", "type"], "ol"],
     [id("optgroup"), ["disabled", "label"], "optgroup"],
     [id("option"), ["defaultSelected", "disabled", "form", "index", "label", "selected", "text", "value"], "option"],
@@ -3442,6 +3456,14 @@ fn object_param_and_data_accessors_live_on_owner_prototypes() {
                 assert(descriptor.enumerable === true, `${name} enumerable`);
                 assert(descriptor.configurable === true, `${name} configurable`);
               };
+              const readonlyAccessor = (prototype, name) => {
+                const descriptor = Object.getOwnPropertyDescriptor(prototype, name);
+                assert(!!descriptor, `${prototype.constructor.name}.${name} descriptor missing`);
+                assert(typeof descriptor.get === "function", `${name} getter`);
+                assert(descriptor.set === undefined, `${name} setter absent`);
+                assert(descriptor.enumerable === true, `${name} enumerable`);
+                assert(descriptor.configurable === true, `${name} configurable`);
+              };
               const absent = (prototype, name) => {
                 assert(
                   Object.getOwnPropertyDescriptor(prototype, name) === undefined,
@@ -3466,6 +3488,12 @@ fn object_param_and_data_accessors_live_on_owner_prototypes() {
                 "standby"
               ]) {
                 accessor(HTMLObjectElement.prototype, name);
+                absent(HTMLElement.prototype, name);
+                assert(!own(object, name), `object.${name} should not be own`);
+                assert(!(name in div), `div.${name} should be absent`);
+              }
+              for (const name of ["contentDocument", "contentWindow"]) {
+                readonlyAccessor(HTMLObjectElement.prototype, name);
                 absent(HTMLElement.prototype, name);
                 assert(!own(object, name), `object.${name} should not be own`);
                 assert(!(name in div), `div.${name} should be absent`);

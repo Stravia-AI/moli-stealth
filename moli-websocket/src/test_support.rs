@@ -18,6 +18,9 @@ use tokio::{
     sync::{mpsc, oneshot},
     time::{Duration, timeout},
 };
+
+mod tls;
+pub use tls::TlsWebSocketFixture;
 use tokio_tungstenite::tungstenite::{
     handshake::server::{Callback, ErrorResponse, Request, Response},
     protocol::{CloseFrame, Message},
@@ -45,8 +48,9 @@ pub fn test_websocket_context() -> ConnectOptions {
         http_proxy: None,
         http_no_proxy: None,
         proxy_bearer_token: None,
-        tls_verify_host: true,
+        tls: moli_stealth_net::TlsConfig::default(),
         tls_session_cache: None,
+        connection_budget: None,
         cookie_header: None,
         pause_after_handshake: false,
     }
@@ -742,6 +746,33 @@ pub async fn spawn_triggered_text_websocket_server() -> (
         message_tx,
         handle,
     )
+}
+
+/// Observes physical transport retirement without completing a Close handshake.
+pub async fn spawn_transport_retirement_websocket_server() -> (String, tokio::task::JoinHandle<()>)
+{
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind retirement server");
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let first = timeout(Duration::from_secs(3), socket.next())
+            .await
+            .expect("retirement must physically release TCP");
+        let terminal = match first {
+            Some(Ok(Message::Close(_))) => timeout(Duration::from_secs(3), socket.next())
+                .await
+                .expect("retirement must release TCP after a graceful Close"),
+            terminal => terminal,
+        };
+        assert!(
+            terminal.is_none() || terminal.is_some_and(|event| event.is_err()),
+            "retirement must end the transport rather than leave it open"
+        );
+    });
+    (format!("ws://{addr}/retirement"), server)
 }
 
 pub async fn spawn_subprotocol_websocket_server() -> (String, tokio::task::JoinHandle<()>) {

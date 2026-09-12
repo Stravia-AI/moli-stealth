@@ -913,6 +913,10 @@ impl ResourceRequestClient {
         self.resource_runtime.client().tls_session_cache()
     }
 
+    pub(crate) fn connection_budget(&self) -> moli_stealth_net::ConnectionBudget {
+        self.resource_runtime.client().connection_budget()
+    }
+
     pub fn browser_identity(&self) -> &moli_browser_profile::BrowserIdentityProfile {
         self.resource_runtime.client().browser_identity()
     }
@@ -931,6 +935,10 @@ impl ResourceRequestClient {
 
     pub fn tls_verify_host(&self) -> bool {
         self.resource_runtime.client().tls_verify_host()
+    }
+
+    pub fn tls_config(&self) -> &moli_fetch::TlsConfig {
+        self.resource_runtime.client().tls_config()
     }
 
     pub fn request_timeout_ms(&self) -> u64 {

@@ -75,7 +75,9 @@ members = [
     "moli-file-api",
     "moli-geometry",
     "moli-header-field",
+    "moli-html-input-type",
     "moli-html-input-temporal",
+    "moli-window-features",
     "moli-time",
     "moli-trace",
     "moli-http-cache",
@@ -114,6 +116,7 @@ cssparser = "0.37"
 data-url = "0.3.2"
 document-features = "0.2.10"
 dom = { package = "stylo_dom", git = "https://github.com/Stravia-AI/stylo.git", rev = "953bc7f148614e2b0c1657e844a57fdde2269302" }
+dragonbox_ecma = "0.1.12"
 ed448-goldilocks = { version = "=0.14.0-pre.15", default-features = false }
 encoding_rs = "0.8"
 euclid = "=0.22.14"
@@ -163,6 +166,7 @@ moli-fetch = { path = "moli-fetch" }
 moli-file-api = { path = "moli-file-api" }
 moli-geometry = { path = "moli-geometry" }
 moli-header-field = { path = "moli-header-field" }
+moli-html-input-type = { path = "moli-html-input-type" }
 moli-html-input-temporal = { path = "moli-html-input-temporal" }
 moli-http-cache = { path = "moli-http-cache" }
 moli-image = { path = "moli-image" }
@@ -217,6 +221,7 @@ moli-webidl = { path = "moli-webidl" }
 moli-webidl-callback = { path = "moli-webidl-callback" }
 moli-webidl-derive = { path = "moli-webidl-derive" }
 moli-websocket = { path = "moli-websocket" }
+moli-window-features = { path = "moli-window-features" }
 moli-wpt-compat = { path = "moli-wpt-compat" }
 moli-xpath = { path = "moli-xpath" }
 netscape-cookie-file-parser = "0.3"

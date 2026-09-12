@@ -9,10 +9,7 @@ use super::{
     css_runtime::install_css_runtime_state,
     exposed_interfaces::is_lazy_exposed_interface,
     indexed_db::ensure_indexed_db_runtime_state,
-    location_runtime::{
-        ensure_location_constructor_runtime_state, location_href_slot,
-        sync_document_location_runtime_state_from_window,
-    },
+    location_runtime::{location_href_slot, sync_document_location_runtime_state_from_window},
     navigation_bootstrap::install_window_location_history_navigation_runtime_state,
     navigator_runtime::{bind_window_navigator_identity_seed, install_navigator_runtime_state},
     performance_runtime::install_default_window_performance_seed,
@@ -72,14 +69,14 @@ struct HtmlScriptElementSupportsArgs {
 }
 
 #[derive(Default, WebApiObject)]
-#[webapi(interface = "HTMLScriptElement", enumerable)]
+#[webapi(unbranded, interface = "HTMLScriptElement", enumerable)]
 struct HtmlScriptElementStaticMethodsDeclaration {
     #[webapi(method, length = 1, callback = html_script_element_supports_callback)]
     supports: (),
 }
 
 #[derive(Default, WebApiObject)]
-#[webapi(interface = "Document", enumerable)]
+#[webapi(unbranded, interface = "Document", enumerable)]
 struct DocumentStaticMethodsDeclaration {
     #[webapi(
         method = "parseHTMLUnsafe",
@@ -90,7 +87,7 @@ struct DocumentStaticMethodsDeclaration {
 }
 
 #[derive(Default, WebApiObject)]
-#[webapi(interface = "Document", enumerable)]
+#[webapi(unbranded, interface = "Document", enumerable)]
 struct DocumentPrototypeRuntimeDeclaration {
     #[webapi(
         accessor_property = "designMode",
@@ -291,7 +288,7 @@ struct WindowLegacyAliasAccessorsDeclaration {
 }
 
 #[derive(WebApiObject)]
-#[webapi(interface = "Window", enumerable)]
+#[webapi(unbranded, interface = "Window", enumerable)]
 struct WindowAdditionalReplaceableAccessorsDeclaration<'scope> {
     origin_name: v8::Local<'scope, v8::Value>,
     inner_width_name: v8::Local<'scope, v8::Value>,
@@ -421,7 +418,7 @@ struct ConsoleObjectDeclaration {
 }
 
 #[derive(WebApiObject)]
-#[webapi(interface = "Object", scope_lifetime = 'scope)]
+#[webapi(interface = "Window", prototype = "Object")]
 struct WindowBootstrapGlobalSlotsDeclaration<'scope> {
     #[webapi(slot = WINDOW_CONSOLE_SLOT)]
     console: v8::Local<'scope, v8::Object>,
@@ -471,7 +468,12 @@ struct WebAssemblyNamespaceDeclaration {
 
 #[cfg(feature = "wpt-extensions")]
 #[derive(WebApiObject)]
-#[webapi(interface = "Object", prototype = "WebDriver", require_prototype)]
+#[webapi(
+    allow_empty,
+    interface = "Object",
+    prototype = "WebDriver",
+    require_prototype
+)]
 struct WebDriverObjectDeclaration {}
 
 #[cfg(feature = "wpt-extensions")]
@@ -1831,6 +1833,7 @@ pub(crate) fn finish_context_bootstrap(
         ("WebSocketStream", "WebSocketStream"),
         ("RTCPeerConnection", "RTCPeerConnection"),
         ("RTCIceCandidate", "RTCIceCandidate"),
+        ("RTCSessionDescription", "RTCSessionDescription"),
         ("RTCRtpReceiver", "RTCRtpReceiver"),
         ("RTCDataChannel", "RTCDataChannel"),
         ("Blob", "Blob"),
@@ -1974,7 +1977,6 @@ fn install_window_runtime_state<'s>(
         v8::Boolean::new(scope, secure_context_available).into(),
     );
     install_date_locale_runtime_state(scope, global)?;
-    ensure_location_constructor_runtime_state(scope, global)?;
     install_webassembly_runtime_state(scope, global)?;
     install_webidl_collection_iterator_intrinsics(scope, global)?;
 

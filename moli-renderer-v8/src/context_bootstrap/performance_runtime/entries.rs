@@ -208,7 +208,7 @@ impl PerformanceResourceTimingJsonSnapshotDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(name = "PerformanceEntry")]
+#[webapi(name = "PerformanceEntry", receiver = "PerformanceEntry")]
 struct PerformanceEntryPrototypeAccessorsDeclaration {
     #[webapi(
         accessor_property,
@@ -241,7 +241,7 @@ struct PerformanceEntryPrototypeAccessorsDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(name = "PerformanceEntry", enumerable)]
+#[webapi(name = "PerformanceEntry", enumerable, receiver = "PerformanceEntry")]
 struct PerformanceEntryPrototypeMethodsDeclaration {
     #[webapi(
         method,
@@ -265,7 +265,10 @@ struct PerformanceEntryDetailPrototypeAccessorsDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(name = "PerformanceResourceTiming")]
+#[webapi(
+    name = "PerformanceResourceTiming",
+    receiver = "PerformanceResourceTiming"
+)]
 struct PerformanceResourceTimingPrototypeAccessorsDeclaration {
     #[webapi(
         accessor_property,
@@ -410,7 +413,11 @@ struct PerformanceResourceTimingPrototypeAccessorsDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
-#[webapi(name = "PerformanceResourceTiming", enumerable)]
+#[webapi(
+    name = "PerformanceResourceTiming",
+    enumerable,
+    receiver = "PerformanceResourceTiming"
+)]
 struct PerformanceResourceTimingPrototypeMethodsDeclaration {
     #[webapi(
         method,
@@ -563,10 +570,11 @@ fn performance_entry_attribute_getter<'s>(
     slot: &'static str,
     rv: &mut v8::ReturnValue<'_, v8::Value>,
 ) {
-    rv.set(
-        performance_entry_slot_value(scope, object, slot)
-            .unwrap_or_else(|| v8::undefined(scope).into()),
-    );
+    let Some(value) = performance_entry_slot_value(scope, object, slot) else {
+        throw_type_error(scope, "Illegal invocation");
+        return;
+    };
+    rv.set(value);
 }
 
 pub(in crate::context_bootstrap) fn performance_entry_slot_value<'s>(
@@ -702,7 +710,7 @@ pub(super) fn filtered_performance_entries<'s>(
     filtered_entry_list_entries(scope, entries, expected_type, expected_name)
 }
 
-pub(super) fn find_latest_performance_entry_start<'s>(
+pub(super) fn find_latest_performance_mark_start<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     performance: v8::Local<'s, v8::Object>,
     name: &str,
@@ -712,8 +720,10 @@ pub(super) fn find_latest_performance_entry_start<'s>(
     for index in 0..entries.length() {
         let entry = entries.get_index(scope, index)?;
         let entry = v8::Local::<v8::Object>::try_from(entry).ok()?;
-        if performance_entry_slot_string(scope, entry, PERFORMANCE_ENTRY_NAME_SLOT).as_deref()
-            == Some(name)
+        if performance_entry_slot_string(scope, entry, PERFORMANCE_ENTRY_TYPE_SLOT).as_deref()
+            == Some("mark")
+            && performance_entry_slot_string(scope, entry, PERFORMANCE_ENTRY_NAME_SLOT).as_deref()
+                == Some(name)
         {
             found = performance_entry_slot_number(scope, entry, PERFORMANCE_ENTRY_START_TIME_SLOT);
         }
@@ -746,12 +756,35 @@ pub(super) fn create_performance_entry<'s>(
         "resource" => "PerformanceResourceTiming",
         _ => "PerformanceEntry",
     };
+    moli_webapi_declare::initialize_web_api_object(scope, entry, prototype_name)
+        .expect("PerformanceEntry primary interface should initialize");
     if let Ok(prototype) =
         crate::context_bootstrap::ensure_intrinsic_interface_prototype(scope, prototype_name)
     {
         let _ = entry.set_prototype(scope, prototype.into());
     }
     entry
+}
+
+pub(super) fn initialize_performance_entry_slots<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    entry: v8::Local<'s, v8::Object>,
+    entry_type: &str,
+    name: &str,
+    start_time: f64,
+    duration: f64,
+    detail: Option<v8::Local<'s, v8::Value>>,
+) {
+    let detail = detail.unwrap_or_else(|| v8::null(scope).into());
+    PerformanceEntryObjectDeclaration {
+        name,
+        entry_type,
+        start_time,
+        duration,
+        detail,
+    }
+    .initialize(scope, entry)
+    .expect("PerformanceEntry declaration should initialize object");
 }
 
 pub(super) fn push_performance_entry<'s>(

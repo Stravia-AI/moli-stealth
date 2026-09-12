@@ -14,6 +14,7 @@ moli-bounded-json.workspace = true
 moli-cookie-jar.workspace = true
 moli-core.workspace = true
 moli-fetch.workspace = true
+moli-html-input-type.workspace = true
 moli-protocol.workspace = true
 moli-protocol-cdp.workspace = true
 moli-protocol-webdriver-bidi.workspace = true

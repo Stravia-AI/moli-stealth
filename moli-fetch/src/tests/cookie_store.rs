@@ -2,6 +2,7 @@ use moli_cookie_jar::test_support::BrowserCookieStore;
 use moli_cookie_jar::{NetworkCookieRequestContext, new_shared_browser_cookie_store};
 use url::Url;
 
+use crate::blocking::outgoing_request_headers_for_url;
 use crate::{
     BrowserNavigationRequestKind, BrowserRequestMetadata, FetchConfig, Request, RequestAuth,
     RequestAuthScheme, RequestAuthTarget, RequestCredentialsMode, RequestMode, RequestResourceType,
@@ -337,6 +338,44 @@ fn outgoing_request_headers_send_basic_authorization_preemptively_for_auth_reque
             .any(|(name, value)| name == "Authorization"
                 && value == "Basic YWxhZGRpbjpvcGVuc2VzYW1l"),
         "Basic auth continuation must be preemptive so streaming response-stage interception does not pause on the auth challenge response"
+    );
+}
+
+#[test]
+fn url_basic_authorization_is_scoped_to_credentialed_same_origin_requests() {
+    let config = FetchConfig::default();
+    let request = Request::get("https://alice:secret@example.com/secure").unwrap();
+    assert_eq!(request.url.as_str(), "https://example.com/secure");
+    assert!(request.url.username().is_empty());
+    assert_eq!(request.url.password(), None);
+
+    let headers = outgoing_request_headers(&config, &request, None);
+    assert!(headers.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case("authorization") && value == "Basic YWxpY2U6c2VjcmV0"
+    }));
+
+    let redirected = outgoing_request_headers_for_url(
+        &config,
+        &request,
+        &Url::parse("https://other.example/secure").unwrap(),
+        &[],
+        None,
+    );
+    assert!(
+        redirected
+            .iter()
+            .all(|(name, _)| !name.eq_ignore_ascii_case("authorization"))
+    );
+
+    let omitted = outgoing_request_headers(
+        &config,
+        &request.with_credentials_mode(RequestCredentialsMode::Omit),
+        None,
+    );
+    assert!(
+        omitted
+            .iter()
+            .all(|(name, _)| !name.eq_ignore_ascii_case("authorization"))
     );
 }
 

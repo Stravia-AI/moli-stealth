@@ -37,7 +37,7 @@ struct StoragePrototypeMethodsDeclaration {
 }
 
 #[derive(Default, WebApiObject)]
-#[webapi(interface = "Storage")]
+#[webapi(unbranded, interface = "Storage")]
 struct StoragePrototypeMetadataDeclaration {
     #[webapi(to_string_tag, init = string("Storage"))]
     to_string_tag: (),
@@ -132,6 +132,7 @@ fn install_named_storage_runtime_state<'s>(
     if let Some(prototype) = prototype {
         let _ = storage.set_prototype(scope, prototype.into());
     }
+    moli_webapi_declare::initialize_web_api_object(scope, storage, "Storage")?;
     set_private_value(scope, global, slot_name, storage.into());
     Ok(storage)
 }

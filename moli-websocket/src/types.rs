@@ -9,8 +9,9 @@ pub struct ConnectOptions {
     pub http_proxy: Option<String>,
     pub http_no_proxy: Option<String>,
     pub proxy_bearer_token: Option<String>,
-    pub tls_verify_host: bool,
+    pub tls: moli_stealth_net::TlsConfig,
     pub tls_session_cache: Option<moli_stealth_net::TlsSessionCache>,
+    pub connection_budget: Option<moli_stealth_net::ConnectionBudget>,
     pub cookie_header: Option<String>,
     pub pause_after_handshake: bool,
 }
@@ -25,8 +26,9 @@ impl Default for ConnectOptions {
             http_proxy: None,
             http_no_proxy: None,
             proxy_bearer_token: None,
-            tls_verify_host: true,
+            tls: moli_stealth_net::TlsConfig::default(),
             tls_session_cache: None,
+            connection_budget: None,
             cookie_header: None,
             pause_after_handshake: false,
         }

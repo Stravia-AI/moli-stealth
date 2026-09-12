@@ -124,16 +124,8 @@ pub(crate) async fn run_synthetic_websocket_connection(
         }
     }
 
-    let _ = send_event(
-        &event_tx,
-        Event::Close {
-            socket_id,
-            code: 1006,
-            reason: String::new(),
-            was_clean: false,
-        },
-    )
-    .await;
+    // Owner retirement can close the command channel before task cancellation
+    // is observed. The vanished consumer must not receive a synthetic close.
 }
 
 fn response_header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {

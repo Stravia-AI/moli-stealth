@@ -6,9 +6,6 @@ mod keys;
 mod random;
 mod subtle;
 
-const CRYPTO_BRAND_SLOT: &str = "__moliCryptoBrand";
-const CRYPTO_SUBTLE_BRAND_SLOT: &str = "__moliCryptoSubtleBrand";
-
 pub(crate) use helpers::WebCryptoRejection;
 pub(in crate::context_bootstrap) use install::{
     build_window_crypto_for_receiver, ensure_worker_crypto_for_global,
@@ -17,7 +14,7 @@ pub(in crate::context_bootstrap) use install::{
 };
 pub(crate) use keys::{
     CryptoKeyAlgorithmClonePayload, CryptoKeyClonePayload, crypto_key_clone_payload_from_object,
-    crypto_key_object_from_clone_payload, is_crypto_key_object,
+    crypto_key_object_from_clone_payload,
 };
 
 /// Owner-neutral result of one blocking WebCrypto operation.

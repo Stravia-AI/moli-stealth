@@ -49,10 +49,12 @@ sanitize-filename.workspace = true
 
 [dev-dependencies]
 axum = { workspace = true, features = ["ws"] }
+futures-util = { workspace = true, features = ["sink", "std"] }
 moli-cookie-jar = { workspace = true, features = ["test-support"] }
 moli-image.workspace = true
 moli-storage-service.workspace = true
 moli-v8-init.workspace = true
+tokio-tungstenite = { workspace = true, features = ["handshake"] }
 
 [build-dependencies]
 vergen-gitcl.workspace = true

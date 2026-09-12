@@ -84,6 +84,7 @@ moli-webcrypto.workspace = true
 moli-webapi-declare.workspace = true
 moli-webidl.workspace = true
 moli-webidl-callback.workspace = true
+moli-window-features.workspace = true
 moli-websocket.workspace = true
 moli-xpath.workspace = true
 http.workspace = true

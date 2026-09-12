@@ -2736,6 +2736,7 @@ fn detached_global_html_attributes_use_html_element_prototype_accessors() {
     "translate",
     "dir",
     "hidden",
+    "inert",
     "accessKey",
     "draggable",
     "spellcheck",
@@ -2762,6 +2763,7 @@ fn detached_global_html_attributes_use_html_element_prototype_accessors() {
     descriptors.enterKeyHint.set.call(element, "send");
     descriptors.inputMode.set.call(element, "email");
     descriptors.hidden.set.call(element, true);
+    descriptors.inert.set.call(element, true);
     descriptors.autofocus.set.call(element, true);
     descriptors.translate.set.call(element, false);
     descriptors.draggable.set.call(element, true);
@@ -2778,6 +2780,7 @@ fn detached_global_html_attributes_use_html_element_prototype_accessors() {
     assert(descriptors.enterKeyHint.get.call(element) === "send", `${label}.enterKeyHint`);
     assert(descriptors.inputMode.get.call(element) === "email", `${label}.inputMode`);
     assert(descriptors.hidden.get.call(element) === true, `${label}.hidden`);
+    assert(descriptors.inert.get.call(element) === true, `${label}.inert`);
     assert(descriptors.autofocus.get.call(element) === true, `${label}.autofocus`);
     assert(descriptors.translate.get.call(element) === false, `${label}.translate`);
     assert(descriptors.draggable.get.call(element) === true, `${label}.draggable`);
@@ -2791,10 +2794,13 @@ fn detached_global_html_attributes_use_html_element_prototype_accessors() {
     assert(element.getAttribute("tabindex") === "7", `${label}.tabindex attr`);
 
     descriptors.hidden.set.call(element, false);
+    descriptors.inert.set.call(element, false);
     descriptors.autofocus.set.call(element, false);
     assert(descriptors.hidden.get.call(element) === false, `${label}.hidden false`);
+    assert(descriptors.inert.get.call(element) === false, `${label}.inert false`);
     assert(descriptors.autofocus.get.call(element) === false, `${label}.autofocus false`);
     assert(!element.hasAttribute("hidden"), `${label}.hidden removed`);
+    assert(!element.hasAttribute("inert"), `${label}.inert removed`);
     assert(!element.hasAttribute("autofocus"), `${label}.autofocus removed`);
 
     for (const name of names) {
@@ -3269,8 +3275,8 @@ fn detached_document_state_and_collections_use_document_prototype_accessors() {
   const htmlKeys = Object.keys(html).filter((name) => names.includes(name)).join(",");
 
   assert(html.currentScript === null, "html currentScript");
-  assert(html.hidden === false, "html hidden");
-  assert(html.visibilityState === "visible", "html visibility");
+  assert(html.hidden === true, "html hidden");
+  assert(html.visibilityState === "hidden", "html visibility");
   assert(html.prerendering === false, "html prerendering");
   assert(html.scrollingElement === html.documentElement, "html scrollingElement");
   assert(html.forms.length === 1, "html forms");
@@ -3282,9 +3288,11 @@ fn detached_document_state_and_collections_use_document_prototype_accessors() {
   assert(html.plugins.length === 1, "html plugins");
   assert(html.applets.length === 0, "html applets");
   assert(parsed.images.length === 1, "parsed images");
+  assert(parsed.hidden === true, "parsed hidden");
+  assert(parsed.visibilityState === "hidden", "parsed visibility");
   assert(xml.images === undefined, "xml images");
-  assert(xml.hidden === false, "xml hidden");
-  assert(xml.visibilityState === "visible", "xml visibility");
+  assert(xml.hidden === true, "xml hidden");
+  assert(xml.visibilityState === "hidden", "xml visibility");
 
   for (const name of names) {
     html[name];
@@ -5667,6 +5675,14 @@ fn detached_object_param_and_data_accessors_use_owner_prototypes() {
     assert(descriptor.enumerable === true, `${name} enumerable`);
     assert(descriptor.configurable === true, `${name} configurable`);
   };
+  const readonlyAccessor = (prototype, name) => {
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, name);
+    assert(!!descriptor, `${prototype.constructor.name}.${name} descriptor missing`);
+    assert(typeof descriptor.get === "function", `${name} getter`);
+    assert(descriptor.set === undefined, `${name} setter absent`);
+    assert(descriptor.enumerable === true, `${name} enumerable`);
+    assert(descriptor.configurable === true, `${name} configurable`);
+  };
   const absent = (prototype, name) => {
     assert(
       Object.getOwnPropertyDescriptor(prototype, name) === undefined,
@@ -5688,6 +5704,22 @@ fn detached_object_param_and_data_accessors_use_owner_prototypes() {
     absent(HTMLElement.prototype, name);
     assert(!own(object, name), `object.${name} should not be own`);
     assert(!(name in div), `div.${name} should be absent`);
+  }
+  for (const name of ["contentDocument", "contentWindow"]) {
+    readonlyAccessor(HTMLObjectElement.prototype, name);
+    absent(HTMLElement.prototype, name);
+    assert(!own(object, name), `object.${name} should not be own`);
+    assert(!(name in div), `div.${name} should be absent`);
+    assert(object[name] === null, `detached object.${name} should be null`);
+    const getter = Object.getOwnPropertyDescriptor(HTMLObjectElement.prototype, name).get;
+    assert(getter.call(object) === null, `borrowed object.${name} getter`);
+    for (const receiver of [div, document.createElement("iframe"), {}, null,
+                            HTMLObjectElement.prototype,
+                            document.createElementNS("http://www.w3.org/2000/svg", "object")]) {
+      let rejected = false;
+      try { getter.call(receiver); } catch (error) { rejected = error instanceof TypeError; }
+      assert(rejected, `${name} must reject an incompatible receiver`);
+    }
   }
   for (const name of ["value", "type", "valueType"]) {
     accessor(HTMLParamElement.prototype, name);
@@ -8697,5 +8729,39 @@ fn detached_domparser_adopted_nodes_follow_live_tree_for_children_text_and_mutat
     assert_eq!(
         result,
         r#"{"beforeRemoval":{"firstChildIsHeld":true,"childParentIsForeignRoot":true,"childNodesLength":2,"lastChildType":3,"textContent":"xy","containsHeldChild":true},"afterRemoval":{"removedIsHeld":true,"removedParentIsNull":true,"childNodesLength":1,"firstChildType":3,"textContent":"y","liveBodyText":"y"}}"#
+    );
+}
+
+#[test]
+fn domparser_xml_preserves_requested_content_type_for_success_and_error_documents() {
+    let mut vm = new_storage_test_vm("https://domparser-xml-content-type.test/");
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const parser = new DOMParser();
+  return JSON.stringify([
+    "text/xml",
+    "application/xml",
+    "application/xhtml+xml",
+    "image/svg+xml"
+  ].map(contentType => {
+    const valid = parser.parseFromString("<root/>", contentType);
+    const invalid = parser.parseFromString("", contentType);
+    return [
+      valid.contentType,
+      invalid.contentType,
+      invalid.documentElement.localName
+    ];
+  }));
+})()
+"#,
+        )
+        .expect("DOMParser XML content type probe should evaluate");
+
+    assert_eq!(
+        result,
+        r#"[["text/xml","text/xml","html"],["application/xml","application/xml","html"],["application/xhtml+xml","application/xhtml+xml","html"],["image/svg+xml","image/svg+xml","html"]]"#
     );
 }
