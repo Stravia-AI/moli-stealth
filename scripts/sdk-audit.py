@@ -16,11 +16,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", required=True)
     parser.add_argument("--consumer", required=True, type=Path)
+    parser.add_argument("--profile", choices=("debug", "release"), default="release")
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     windows = "windows" in args.target
-    binary = args.consumer / "target" / args.target / "release" / ("moli-sdk-consumer.exe" if windows else "moli-sdk-consumer")
-    report = {"target": args.target, "binary": str(binary)}
+    binary = args.consumer / "target" / args.target / args.profile / ("moli-sdk-consumer.exe" if windows else "moli-sdk-consumer")
+    report = {"target": args.target, "profile": args.profile, "binary": str(binary)}
     if windows:
         report["imports"] = inspect(["llvm-readobj", "--coff-imports", "--file-headers", str(binary)])
         names = re.findall(r"Name:\s+(\S+\.dll)", report["imports"], re.I)

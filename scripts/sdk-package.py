@@ -105,16 +105,14 @@ def coff_has_index_metadata(path: Path) -> bool:
     return False
 
 
-def strip_debug_archive(path: Path, target: str) -> None:
-    if "windows" not in target:
-        run([tool("llvm-strip"), "--strip-debug", str(path)])
-        return
+def transform_coff_archive(path: Path, target: str, renames: dict[str, str] | None = None, affected_members: set[str] | None = None) -> None:
     # Rust 的 COFF staticlib 包含 short import object。它们没有调试节，
     # llvm-strip 却拒绝这种格式；只剥离机器码对象，导入对象原样归档。
     # 用独立目录容纳同名成员，但保留 DLL 导入成员的 basename：
     # MSVC 根据成员名分组 .idata，改名会使导入表在启动时失效。
     with tempfile.TemporaryDirectory(prefix="coff-strip-", dir=path.parent) as temporary:
         temporary = Path(temporary)
+        encoded_renames = {old.encode("ascii"): new.encode("ascii") for old, new in (renames or {}).items()}
         members = []
         native = []
         machine_objects = 0
@@ -176,7 +174,9 @@ def strip_debug_archive(path: Path, target: str) -> None:
                         raise RuntimeError(f"invalid COFF short import object in {path}")
                 else:
                     machine_objects += 1
-                    if not coff_has_index_metadata(member):
+                    if renames is not None:
+                        rename_coff_runtime(member, encoded_renames, affected_members is None or basename in affected_members)
+                    elif not coff_has_index_metadata(member):
                         native.append(member)
                 source.seek(position + size + size % 2)
         if not machine_objects:
@@ -191,6 +191,200 @@ def strip_debug_archive(path: Path, target: str) -> None:
         run([tool("llvm-ar"), "--format=coff", "--rsp-quoting=posix", "qcsD", str(rebuilt), f"@{all_arguments}"])
         verify_machine(rebuilt, target)
         os.replace(rebuilt, path)
+
+
+def strip_debug_archive(path: Path, target: str) -> None:
+    if "windows" in target:
+        transform_coff_archive(path, target)
+    else:
+        run([tool("llvm-strip"), "--strip-debug", str(path)])
+
+
+def rename_coff_runtime(path: Path, mapping: dict[bytes, bytes], rename_symbols: bool = True) -> None:
+    # llvm-objcopy renames symbols, not .drectve string references, and its
+    # writer rebuilds symbol indices without handling .voltbl/.chks64. Keep
+    # every symbol/auxiliary slot and section byte in place instead. Only an
+    # affected object's symbol/string tables are copied, never its debug data.
+    import zlib
+
+    tokens = re.compile(rb"[A-Za-z_?$@.][A-Za-z0-9_?$@.]*")
+    with path.open("r+b") as stream:
+        length = path.stat().st_size
+
+        def read_at(offset: int, size: int) -> bytes:
+            if offset < 0 or size < 0 or offset + size > length:
+                raise RuntimeError(f"truncated COFF structure in {path}")
+            stream.seek(offset)
+            value = stream.read(size)
+            if len(value) != size:
+                raise RuntimeError(f"truncated COFF structure in {path}")
+            return value
+
+        header = read_at(0, min(56, length))
+        big = header[:4] == b"\0\0\xff\xff"
+        if big:
+            if len(header) != 56 or int.from_bytes(header[4:6], "little") != 2:
+                raise RuntimeError(f"unsupported COFF bigobj header in {path}")
+            section_count = int.from_bytes(header[44:48], "little")
+            section_start, symbol_field, symbol_size = 56, 48, 20
+        else:
+            if len(header) < 20 or int.from_bytes(header[16:18], "little"):
+                raise RuntimeError(f"unsupported COFF object header in {path}")
+            section_count = int.from_bytes(header[2:4], "little")
+            section_start, symbol_field, symbol_size = 20, 8, 18
+        symbol_start = int.from_bytes(header[symbol_field:symbol_field + 4], "little")
+        symbol_count = int.from_bytes(header[symbol_field + 4:symbol_field + 8], "little")
+        directives = {}
+        for section_index in range(section_count):
+            offset = section_start + section_index * 40
+            section = read_at(offset, 40)
+            if section[:8] != b".drectve":
+                continue
+            size = int.from_bytes(section[16:20], "little")
+            position = int.from_bytes(section[20:24], "little")
+            data = read_at(position, size)
+            replacement = tokens.sub(lambda match: mapping.get(match[0], match[0]), data)
+            if replacement != data:
+                # Equal-length private names keep all directive offsets valid.
+                if len(replacement) != size:
+                    raise RuntimeError(f"runtime rename changes COFF directive size in {path}")
+                directives[section_index + 1] = (position, replacement)
+        if not rename_symbols and not directives:
+            return
+        if not symbol_start or not symbol_count:
+            raise RuntimeError(f"affected COFF object has no symbol table in {path}")
+        string_start = symbol_start + symbol_count * symbol_size
+        string_size = int.from_bytes(read_at(string_start, 4), "little")
+        if string_size < 4:
+            raise RuntimeError(f"invalid COFF string table in {path}")
+        strings = read_at(string_start, string_size)
+        symbols = read_at(symbol_start, symbol_count * symbol_size)
+        changed = None
+        added = bytearray()
+        index = 0
+        while index < symbol_count:
+            offset = index * symbol_size
+            entry = symbols[offset:offset + symbol_size]
+            auxiliary = entry[-1]
+            if index + auxiliary >= symbol_count:
+                raise RuntimeError(f"invalid COFF auxiliary symbol count in {path}")
+            if entry[:4] == b"\0\0\0\0":
+                name_offset = int.from_bytes(entry[4:8], "little")
+                name_end = strings.find(b"\0", name_offset)
+                if not 4 <= name_offset < string_size or name_end < 0:
+                    raise RuntimeError(f"invalid COFF symbol name in {path}")
+                name = strings[name_offset:name_end]
+            else:
+                name = entry[:8].rstrip(b"\0")
+            if name in mapping:
+                if changed is None:
+                    changed = bytearray(symbols)
+                changed[offset:offset + 8] = b"\0" * 4 + (string_size + len(added)).to_bytes(4, "little")
+                added.extend(mapping[name] + b"\0")
+            section_number = int.from_bytes(entry[12:16 if big else 14], "little", signed=True)
+            if entry[-2] == 3 and auxiliary == 1 and name == b".drectve" and section_number in directives:
+                if changed is None:
+                    changed = bytearray(symbols)
+                checksum = zlib.crc32(directives[section_number][1], 0xffffffff) ^ 0xffffffff
+                auxiliary_offset = offset + symbol_size
+                changed[auxiliary_offset + 8:auxiliary_offset + 12] = checksum.to_bytes(4, "little")
+            index += auxiliary + 1
+        if changed is not None:
+            # Appending avoids assumptions about trailing CodeView data. Old
+            # string offsets (including long section names) remain valid.
+            new_start = length
+            if new_start + len(changed) + string_size + len(added) >= 1 << 32:
+                raise RuntimeError(f"isolated COFF object exceeds 32-bit offsets: {path}")
+            stream.seek(new_start)
+            stream.write(changed)
+            stream.write((string_size + len(added)).to_bytes(4, "little"))
+            stream.write(strings[4:])
+            stream.write(added)
+            stream.seek(symbol_field)
+            stream.write(new_start.to_bytes(4, "little"))
+        for position, data in directives.values():
+            stream.seek(position)
+            stream.write(data)
+
+
+def isolate_rust_runtime(path: Path, target: str, revision: str) -> dict[str, str]:
+    # These are Rust ABI implementation names, not C/system ABI builtins such
+    # as memcpy, __udivti3, _Unwind_* or __CxxFrameHandler3. Isolate mangled
+    # Rust names too: a same-version host has identical std crate identities,
+    # and private personality references force both std objects into the link.
+    # Rust statics also emit COFF __imp_ aliases; these are not system imports.
+    # rust_link_cplusplus is the C++ link helper's C ABI, not Rust's runtime.
+    family = re.compile(r"(?:rust_|__rust_)[A-Za-z0-9_]+|__(?:rg|rdl)_(?:alloc|alloc_zeroed|dealloc|realloc|oom)")
+    mangled = re.compile(r"_R[CNIMXY][A-Za-z0-9_]+(?:\.llvm\.[0-9]+)?|_ZN.*17h[0-9a-f]{16}E(?:\.llvm\.[0-9]+)?")
+    # Diagnostics for symbol-less members must not interleave with records.
+    output = subprocess.check_output(
+        [tool("llvm-nm"), "--format=posix", "--print-file-name", "--extern-only", str(path)],
+        text=True, encoding="utf-8",
+    )
+    definitions = set()
+    candidates = set()
+    existing = set()
+    symbol_members: dict[str, set[str]] = {}
+    for line in output.splitlines():
+        match = re.match(r"^.*\[([^\]]+)\]: (\S+) ([A-Za-z?])(?:\s|$)", line)
+        if not match:
+            if line.strip():
+                raise RuntimeError(f"unrecognized llvm-nm archive record: {line}")
+            continue
+        member, name, kind = match.groups()
+        existing.add(name)
+        base_name = name.removeprefix("__imp_")
+        runtime = family.fullmatch(base_name) is not None
+        private = runtime or mangled.fullmatch(base_name) is not None
+        if private or name.startswith((".weak.", "DW.ref.")):
+            symbol_members.setdefault(name, set()).add(member.replace("\\", "/").rsplit("/", 1)[-1])
+        if not private or base_name == "rust_link_cplusplus":
+            continue
+        candidates.add(name)
+        if kind not in {"U", "w", "v"}:
+            if runtime and not member.endswith(".rcgu.o"):
+                raise RuntimeError(f"Rust runtime name {name} has a non-Rust definition in {member}")
+            definitions.add(name)
+    if not definitions or candidates - definitions:
+        raise RuntimeError(f"Rust runtime closure is absent or incomplete in {path}: {sorted(candidates - definitions)}")
+    # COFF exports .weak.__rust_*.default targets; ELF emits weak
+    # DW.ref.rust_eh_personality COMDAT pointers. Privatize those too, or the
+    # host can coalesce the pointer and silently select its own personality.
+    # llvm-objcopy updates ELF symbol names, including SHT_GROUP signatures.
+    for name in existing:
+        if name.startswith("DW.ref.") and name.removeprefix("DW.ref.") in candidates:
+            definitions.add(name)
+        elif name.startswith(".weak."):
+            base = name.removeprefix(".weak.")
+            while "." in base:
+                base = base.rsplit(".", 1)[0]
+                if base in candidates:
+                    definitions.add(name)
+                    break
+    # Fixed width permits .drectve replacement without changing offsets. Hash
+    # the exact SDK revision and original name; reject every collision rather
+    # than relying on the truncated hash's probability.
+    renames = {name: "moli_" + hashlib.shake_256(f"{revision}:{name}".encode("ascii")).hexdigest((len(name) - 4) // 2)[:len(name) - 5] for name in sorted(definitions)}
+    if len(set(renames.values())) != len(renames) or set(renames.values()) & existing:
+        raise RuntimeError(f"private Rust runtime symbol collision in {path}")
+    print(f"SDK private Rust symbols: {len(renames)}", flush=True)
+    if "windows" in target:
+        affected_members = set().union(*(symbol_members[name] for name in renames))
+        transform_coff_archive(path, target, renames, affected_members)
+    else:
+        # ELF archives can be handled in one invocation: parsing the full
+        # Rust mapping once per member would make this needlessly quadratic.
+        with tempfile.TemporaryDirectory(prefix="rust-symbols-", dir=path.parent) as temporary:
+            temporary = Path(temporary)
+            rename_file = temporary / "renames.txt"
+            with rename_file.open("w", encoding="ascii") as output:
+                for old, new in renames.items():
+                    output.write(f"{old} {new}\n")
+            rewritten = temporary / path.name
+            run([tool("llvm-objcopy"), f"--redefine-syms={rename_file}", str(path), str(rewritten)])
+            verify_machine(rewritten, target)
+            os.replace(rewritten, path)
+    return renames
 
 
 def notices(destination: Path, cargo_metadata: dict, native_sources: list[Path]) -> None:
@@ -284,6 +478,7 @@ def build(args: argparse.Namespace) -> None:
     (work / "build.log").write_text(log, encoding="utf-8")
     rendered = log
     searches: list[Path] = []
+    build_outputs: set[Path] = set()
     if not windows:
         rust_libraries = Path(run(["rustc", "--print", "target-libdir", "--target", target], env=env).strip())
         searches.extend([rust_libraries, rust_libraries / "self-contained"])
@@ -295,6 +490,7 @@ def build(args: argparse.Namespace) -> None:
         if message.get("reason") == "compiler-message":
             rendered += "\n" + (message["message"].get("rendered") or "")
         if message.get("reason") == "build-script-executed":
+            build_outputs.add(Path(message["out_dir"]))
             for value in message.get("linked_paths", []):
                 searches.append(Path(value.split("=", 1)[-1]))
     lists = re.findall(r"native-static-libs:\s*([^\r\n]+)", rendered)
@@ -304,6 +500,8 @@ def build(args: argparse.Namespace) -> None:
     source = target_dir / target / profile_dir / ("moli_sdk_ffi.lib" if windows else "libmoli_sdk_ffi.a")
     libraries = [{"name": "moli_sdk_ffi", "file": f"lib/{source.name}"}]
     shutil.copy2(source, package / libraries[0]["file"])
+    private_symbols = isolate_rust_runtime(package / libraries[0]["file"], target, revision)
+    write_json(symbols / "rust-private-symbols.json", {"implementation_revision": revision, "target": target, "renames": private_symbols})
     system: list[str] = []
     for argument in native:
         if windows:
@@ -344,10 +542,13 @@ def build(args: argparse.Namespace) -> None:
         if args.profile == "release":
             strip_debug_archive(path, target)
     if windows:
-        for pdb in (target_dir / target / profile_dir).rglob("*.pdb"):
-            destination = symbols / "pdb" / pdb.relative_to(target_dir / target / profile_dir)
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(pdb, destination)
+        # Only this implementation's build outputs belong to its symbol
+        # package; a shared Cargo target can also contain unrelated test PDBs.
+        for directory in sorted(build_outputs):
+            for pdb in directory.rglob("*.pdb"):
+                destination = symbols / "pdb" / pdb.relative_to(target_dir)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(pdb, destination)
     metadata_text = subprocess.check_output(["cargo", "metadata", "--locked", "--format-version", "1", "--filter-platform", target], cwd=ROOT, text=True, encoding="utf-8", env=env)
     metadata = json.loads(metadata_text)
     nodes = {node["id"]: node for node in metadata["resolve"]["nodes"]}
@@ -360,6 +561,7 @@ def build(args: argparse.Namespace) -> None:
             pending.extend(nodes[package_id]["dependencies"])
     metadata["packages"] = [package for package in metadata["packages"] if package["id"] in reachable]
     notices(package / "notices", metadata, [Path(path) for path in args.native_notices])
+    shutil.copytree(package / "notices", symbols / "notices")
     manifest = {
         "schema": 1, "target": target, "abi": (ROOT / "moli-sdk/abi.txt").read_text().strip(),
         "crt": "static" if windows else "system", "implementation_revision": revision,

@@ -42,8 +42,11 @@ if ($Mode -eq 'build') {
     $repository = ([uri]($root.Replace('\','/') + '/')).AbsoluteUri
     New-Item -ItemType Directory -Path dist/evidence -Force | Out-Null
     try {
+        rustup toolchain install "1.98.1-$Target" --profile minimal --no-self-update 2>&1 | Tee-Object -FilePath dist/evidence/cross-rust-1.98.1-install.log
+        if ($LASTEXITCODE -ne 0) { throw "Required native Rust 1.98.1 toolchain unavailable: $Target" }
         python sdk-consumer/verify.py --sdk-revision $revision --repository $repository --destination $consumer --target $Target --cache-dir $cache
         python scripts/sdk-audit.py --target $Target --consumer $consumer --output dist/evidence/runtime.json
+        python scripts/sdk-audit.py --target $Target --consumer (Join-Path $consumer 'cross-rust-1.98.1') --profile debug --output dist/evidence/runtime-rust-1.98.1.json
     } finally {
         if (Test-Path $consumer) {
             Get-ChildItem $consumer -File | Where-Object { $_.Extension -in '.log','.json','.jsonl' } | Copy-Item -Destination dist/evidence

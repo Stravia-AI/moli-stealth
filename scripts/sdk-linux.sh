@@ -29,7 +29,7 @@ fi
 # No glibc compatibility package, Zig sysroot, or transplanted build font paths.
 export PATH="/opt/go/bin:/root/.cargo/bin:$PATH"
 curl --proto '=https' --tlsv1.2 --fail --silent --show-error https://sh.rustup.rs -o /tmp/rustup-init.sh
-sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain "$(cat /src/rust-toolchain)"
+sh /tmp/rustup-init.sh -y --profile minimal --default-host "$target" --default-toolchain "$(cat /src/rust-toolchain)-$target"
 git config --global --add safe.directory /src
 cd /src
 if [ "$mode" = build ]; then
@@ -39,20 +39,37 @@ if [ "$mode" = build ]; then
         chmod +x scripts/sdk-host-rustc.py
         export RUSTC_WRAPPER=/src/scripts/sdk-host-rustc.py
     fi
-    # Real v152.2.0 upstream release assets; never substitute GNU objects.
-    # Digests are pinned from the published GitHub release metadata, not fetched at build time.
+    # The SDK uses one static C++ runtime across V8 and the other native
+    # dependencies. Archive, bindings and notices are one pinned variant.
+    export RUSTY_V8_MOLI_LIBSTDCXX=1 CXXSTDLIB=''
     case "$target" in
+        x86_64-unknown-linux-gnu)
+            export RUSTY_V8_ARCHIVE_SHA256=b7ec33e5a75a1f11fb986ec329a4dd0e170c578f2dd54f836d87f1d918f9e712 ;;
+        aarch64-unknown-linux-gnu)
+            export RUSTY_V8_ARCHIVE_SHA256=76c200a647bd5fdbde1eb336e469506b66eb2bcb5ad91ac00b4b9c061b99a7c5 ;;
         x86_64-unknown-linux-musl)
-            export RUSTY_V8_ARCHIVE_SHA256=68f284fb8184b9f9e8d7e23b8f2675dbe464f43f77c0bf152f705bf7ead29558 ;;
+            export RUSTY_V8_ARCHIVE_SHA256=eee8861d551df976c2da013ffc087431b64009b174de8ba066fc4a38c7fe8204 ;;
         aarch64-unknown-linux-musl)
-            export RUSTY_V8_ARCHIVE_SHA256=419a242557833151cf9dde82c12c8272c3c00015bfe7e340e48164a600d34039 ;;
+            export RUSTY_V8_ARCHIVE_SHA256=097e4b6b8603a32ed900e44e5d071fa30783840823b412c64dfdeb6b6d831c4b ;;
+        *)
+            echo "Unsupported Linux SDK target: $target" >&2
+            exit 1 ;;
     esac
-    case "$target" in
-        *-musl)
-            export RUSTY_V8_ARCHIVE="https://github.com/denoland/rusty_v8/releases/download/v152.2.0/librusty_v8_release_${target}.a.gz"
-            export RUSTY_V8_SRC_BINDING_URL="https://github.com/denoland/rusty_v8/releases/download/v152.2.0/src_binding_release_${target}.rs" ;;
-    esac
-    python3 scripts/sdk-package.py --target "$target" --native-notices /usr/share/doc
+    v8_release=https://github.com/Stravia-AI/rusty_v8/releases/download/v152.2.0-moli-sdk-libstdcxx.1
+    export RUSTY_V8_ARCHIVE="$v8_release/librusty_v8_moli_libstdcxx_release_${target}.a.gz"
+    mkdir -p /tmp/moli-v8/notices
+    export RUSTY_V8_SRC_BINDING_PATH="/tmp/moli-v8/src_binding_moli_libstdcxx_release_${target}.rs"
+    curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+        "$v8_release/src_binding_moli_libstdcxx_release_${target}.rs" -o "$RUSTY_V8_SRC_BINDING_PATH"
+    printf '%s  %s\n' 9dbb21c67bf9c97424f8d65e7e49c4a270f495389cd0bb26092439b0ad8a5173 "$RUSTY_V8_SRC_BINDING_PATH" | sha256sum -c
+    curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+        "$v8_release/moli-v8-native-notices-${target}.tar.gz" -o /tmp/moli-v8/notices.tar.gz
+    printf '%s  %s\n' a102daeadeeb68526682be8061da193a7dae6145cdae95f42e524fda62bcf988 /tmp/moli-v8/notices.tar.gz | sha256sum -c
+    tar -xzf /tmp/moli-v8/notices.tar.gz -C /tmp/moli-v8/notices
+    # Include GCC's non-EH helpers too: ARM JIT instruction-cache flushing
+    # requires __clear_cache, which Rust's compiler builtins do not provide.
+    export RUSTFLAGS="${RUSTFLAGS:-} -L native=$(dirname "$(g++ -print-file-name=libstdc++.a)") -L native=$(dirname "$(g++ -print-file-name=libgcc_eh.a)") -L native=$(dirname "$(g++ -print-file-name=libatomic.a)") -l static=stdc++ -l static=gcc_eh -l static=gcc"
+    python3 scripts/sdk-package.py --target "$target" --native-notices /usr/share/doc --native-notices /tmp/moli-v8/notices
 elif [ "$mode" = verify ]; then
     # The bound commit contains only the final digest binding on top of implementation.
     git fetch /src/bound/sdk-bound.bundle refs/heads/sdk-bound:refs/heads/sdk-bound
@@ -63,12 +80,20 @@ elif [ "$mode" = verify ]; then
     fc-cache -f
     mkdir -p /src/dist/evidence
     trap 'for file in /tmp/sdk-consumer/*.log /tmp/sdk-consumer/*.json /tmp/sdk-consumer/*.jsonl; do if [ -f "$file" ]; then cp "$file" /src/dist/evidence/; fi; done; if [ -d /tmp/sdk-consumer/evidence ]; then cp -R /tmp/sdk-consumer/evidence /src/dist/evidence/rendering; fi' EXIT
+    if rustup toolchain install "1.98.1-$target" --profile minimal --no-self-update > /src/dist/evidence/cross-rust-1.98.1-install.log 2>&1; then
+        cat /src/dist/evidence/cross-rust-1.98.1-install.log
+    else
+        cat /src/dist/evidence/cross-rust-1.98.1-install.log >&2
+        echo "Required native Rust 1.98.1 toolchain unavailable: $target" >&2
+        exit 1
+    fi
     fc-match 'DejaVu Sans' > /src/dist/evidence/font-match.txt
     fc-match 'Noto Sans CJK SC' >> /src/dist/evidence/font-match.txt
     python3 scripts/sdk-bind.py seed --target "$target" --artifacts /src/artifacts --cache /tmp/sdk-cache
     python3 sdk-consumer/verify.py --sdk-revision "$revision" --repository file:///src \
         --destination /tmp/sdk-consumer --target "$target" --cache-dir /tmp/sdk-cache
     python3 scripts/sdk-audit.py --target "$target" --consumer /tmp/sdk-consumer --output /src/dist/evidence/runtime.json
+    python3 scripts/sdk-audit.py --target "$target" --consumer /tmp/sdk-consumer/cross-rust-1.98.1 --profile debug --output /src/dist/evidence/runtime-rust-1.98.1.json
     python3 sdk-consumer/font-check.py --consumer /tmp/sdk-consumer --target "$target"
 else
     echo "Unknown SDK container mode: $mode" >&2

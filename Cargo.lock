@@ -425,7 +425,7 @@ dependencies = [
 [[package]]
 name = "btls"
 version = "0.5.6"
-source = "git+https://github.com/Stravia-AI/btls.git?rev=5ee7faa63188777eb0c1d4a28ef1f465d7bb02b9#5ee7faa63188777eb0c1d4a28ef1f465d7bb02b9"
+source = "git+https://github.com/Stravia-AI/btls.git?rev=c0aeb7fe5c1281611bde29868becdb7d4393ee6f#c0aeb7fe5c1281611bde29868becdb7d4393ee6f"
 dependencies = [
  "bitflags",
  "btls-sys",
@@ -437,7 +437,7 @@ dependencies = [
 [[package]]
 name = "btls-sys"
 version = "0.5.6"
-source = "git+https://github.com/Stravia-AI/btls.git?rev=5ee7faa63188777eb0c1d4a28ef1f465d7bb02b9#5ee7faa63188777eb0c1d4a28ef1f465d7bb02b9"
+source = "git+https://github.com/Stravia-AI/btls.git?rev=c0aeb7fe5c1281611bde29868becdb7d4393ee6f#c0aeb7fe5c1281611bde29868becdb7d4393ee6f"
 dependencies = [
  "bindgen 0.72.1",
  "cmake",
@@ -1062,7 +1062,7 @@ dependencies = [
 [[package]]
 name = "deno_v8"
 version = "0.3.0"
-source = "git+https://github.com/Stravia-AI/deno.git?rev=da2cf6a9b7acd6a65c5d8a72c7abb7bb5d8bd9ac#da2cf6a9b7acd6a65c5d8a72c7abb7bb5d8bd9ac"
+source = "git+https://github.com/Stravia-AI/deno.git?rev=6e218631e42bf065869703d3b1cef10acbe5c769#6e218631e42bf065869703d3b1cef10acbe5c769"
 dependencies = [
  "v8",
  "v8x",
@@ -4699,7 +4699,7 @@ dependencies = [
 [[package]]
 name = "serde_v8"
 version = "0.320.0"
-source = "git+https://github.com/Stravia-AI/deno.git?rev=da2cf6a9b7acd6a65c5d8a72c7abb7bb5d8bd9ac#da2cf6a9b7acd6a65c5d8a72c7abb7bb5d8bd9ac"
+source = "git+https://github.com/Stravia-AI/deno.git?rev=6e218631e42bf065869703d3b1cef10acbe5c769#6e218631e42bf065869703d3b1cef10acbe5c769"
 dependencies = [
  "deno_error",
  "deno_v8",
@@ -5477,7 +5477,7 @@ dependencies = [
 [[package]]
 name = "tokio-btls"
 version = "0.5.6"
-source = "git+https://github.com/Stravia-AI/btls.git?rev=5ee7faa63188777eb0c1d4a28ef1f465d7bb02b9#5ee7faa63188777eb0c1d4a28ef1f465d7bb02b9"
+source = "git+https://github.com/Stravia-AI/btls.git?rev=c0aeb7fe5c1281611bde29868becdb7d4393ee6f#c0aeb7fe5c1281611bde29868becdb7d4393ee6f"
 dependencies = [
  "btls",
  "tokio",
@@ -5874,7 +5874,7 @@ checksum = "ddd74a9687298c6858e9b88ec8935ec45d22e8fd5e6394fa1bd4e99a87789c76"
 [[package]]
 name = "v8"
 version = "152.2.0"
-source = "git+https://github.com/Stravia-AI/rusty_v8.git?rev=ef7a55c0c71ae904b1f963aa33d6d0076168a1b5#ef7a55c0c71ae904b1f963aa33d6d0076168a1b5"
+source = "git+https://github.com/Stravia-AI/rusty_v8.git?rev=277195ed3ad13df707e01f1914999cca223bf908#277195ed3ad13df707e01f1914999cca223bf908"
 dependencies = [
  "bindgen 0.72.1",
  "bitflags",

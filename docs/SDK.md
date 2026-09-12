@@ -31,7 +31,7 @@ rustflags = ["-C", "target-feature=+crt-static"]
 
 依赖仓库的 Cargo 配置不会自动配置宿主。也可在宿主构建环境设置 `RUSTFLAGS="-C target-feature=+crt-static"`。SDK 构建脚本拒绝 Windows 未启用 `crt-static`，不会修改宿主其他依赖的 CRT。Windows 需要匹配架构的 MSVC C++ 工具和 Windows SDK；GNU/musl 宿主仍需目标 Rust 标准库和目标链接器。SDK 不提供 macOS 产物；既有 CLI 的 macOS workflow 保留不变。
 
-当前构建和验收固定 Rust 1.96.1；其他宿主工具链版本未作为兼容性承诺。Git 依赖仓库中的 `rust-toolchain` 也不会替外部宿主固定工具链，宿主应自行配置。具体实现编译器信息同时记录在产物 manifest 中。
+实现构建固定 Rust 1.96.1；跨版本验收另用原生 Rust 1.98.1 宿主，以空 target 目录离线编译并实际运行同一实现。验收同时核对归档 manifest 中的生产端 release/host 和消费端 `rustc -vV`，不会把同版本消费误记为跨版本证明。Windows x64 本地实现已通过两个宿主的完整工作负载和 11 项消费测试；其他目标仍需各自的原生验收，不承诺任意 Rust 版本兼容。Git 依赖仓库中的 `rust-toolchain` 不会替外部宿主固定工具链。
 
 公共异步调用、浏览器/页面、HTTP 流、Cookie 及关闭方式见 `moli-sdk/src/lib.rs` 的 Rust 文档和 `sdk-consumer/src/main.rs` 的实际消费代码。实现拥有运行时与所有者线程，宿主不创建 Moli runtime。丢弃 Future 请求取消；显式异步关闭等待回收，Drop 只提交非阻塞清理。仅 HTTP 调用不启动浏览器，但仍获取完整包；不承诺链接器一定裁掉全部 V8。
 
@@ -86,7 +86,11 @@ Windows 同样使用 `--target x86_64-pc-windows-msvc` 或 `aarch64-pc-windows-m
 
 设置 `MOLI_SDK_ARTIFACT_DIR` 表示开发者明确信任该目录及其 manifest，允许它不是当前绑定 Release 的实现；manifest 自带摘要证明文件一致性，**不证明来源可信**。ABI 身份必须仍与 SDK 源码完全一致。ABI 改变时更新两侧并重新构建，不提供跳过 ABI 开关。manifest 至少记录 schema、target、CRT、ABI、实现 revision、构建 profile、逐文件 SHA-256、静态库顺序和系统库列表。
 
-每个实现包有独立 `-symbols.tar.gz`，其绑定摘要与 `manifest.json` 中的实现包 SHA-256 将它关联到准确实现。宿主默认构建不下载 symbols。符号包保存未剥离的静态归档和 Windows 构建产生的 PDB；正常包移除可安全剥离的 debug sections，不弱化或忽略未定义符号。Windows 的 short import object 原样保留；带 `.voltbl` 或 `.chks64` 索引元数据的 MSVC 成员也原样保留，包括其自带调试记录，因为 `llvm-strip` 不会随节和符号重排更新这些元数据。正常包不包含配套 PDB。需要重链接调试时，把符号包中对应的未剥离归档作为显式本地包的库，并重新生成完整 manifest，或直接运行 `--local --profile dev`；不可把库换入正常缓存后绕过摘要校验。优化实现的局部变量和单步行为受优化影响，符号不等于无优化构建。
+每个实现包有独立 `-symbols.tar.gz`，其绑定摘要与 `manifest.json` 中的实现包 SHA-256 将它关联到准确实现。宿主默认构建不下载 symbols。符号包保存未剥离的静态归档和本次实现依赖构建输出中的 Windows PDB，不扫描共享 target 中无关的 CLI、测试或示例 PDB；两类分发包均保留许可证清单。正常包移除可安全剥离的 debug sections，不弱化或忽略未定义符号。Windows 的 short import object 原样保留；带 `.voltbl` 或 `.chks64` 索引元数据的 MSVC 成员也原样保留，包括其自带调试记录，因为 `llvm-strip` 不会随节和符号重排更新这些元数据。正常包不包含配套 PDB。需要重链接调试时，把符号包中对应的未剥离归档作为显式本地包的库，并重新生成完整 manifest，或直接运行 `--local --profile dev`；不可把库换入正常缓存后绕过摘要校验。优化实现的局部变量和单步行为受优化影响，符号不等于无优化构建。
+
+打包前将实现的 Rust 符号闭包私有化，覆盖运行时入口、mangled 符号、COFF 数据别名和异常 personality 弱引用；保留公共 C ABI 与系统 ABI。仅重命名 `rust_eh_personality` 不够：相同 Rust 版本的宿主可能因此同时抽取两个同名 std 对象。正常包与符号包从同一份私有化归档分离；符号包中的 `rust-private-symbols.json` 保存原名映射。COFF 保持符号索引、重定位和导入成员身份，ELF 更新 COMDAT 签名。不得用弱化符号或允许重复定义替代该隔离。
+
+Windows x64 本地 debug 实现已通过真实 LLDB 消费调试：命中 `moli_sdk_ffi::moli_sdk_open` 的闭包源码断点、单步进入下一行，并继续完成全部工作负载，以退出码 0 结束。这验证了该未优化实现的源码调试路径，不代表其他目标或优化实现已经通过同样检查。
 
 ## 六个平台与运行数据
 
@@ -103,16 +107,13 @@ Windows 同样使用 `--target x86_64-pc-windows-msvc` 或 `aarch64-pc-windows-m
 
 V8、带符号前缀的 BoringSSL、Rust 实现以及 Fontconfig/字体处理链的非系统原生库静态提供。`PKG_CONFIG_ALL_STATIC=1` 使锁定的 `yeslogic-fontconfig-sys 6.0.1` 走静态 pkg-config 元数据；禁止 `RUST_FONTCONFIG_DLOPEN`。打包器读取 rustc 的 `native-static-libs` 和 Cargo 原生搜索目录，打包未被 staticlib 纳入的非系统库（包括需要的 C++ runtime），缺少静态归档时失败。每个归档检查真实 ELF/COFF machine，Windows 同时检查动态 CRT 指令。
 
-当前锁定 rusty_v8 是 `ef7a55c0c71ae904b1f963aa33d6d0076168a1b5`（152.2.0），默认 `use_custom_libcxx`；btls 是 `5ee7faa63188777eb0c1d4a28ef1f465d7bb02b9`，原生构建保留其前缀逻辑，Go 最低要求由 BoringSSL 的 `go.mod`（1.24）决定。工作流使用 Go 1.27.0。Alpine 直接用原生 musl C/C++ 编译器和 Alpine 静态库，不复用参考 StraviaPlatform 的 Zig sysroot，也不复制其 stdexcept 符号弱化补丁。若实际静态 C++ 链接产生冲突，必须修复准确的依赖构建契约后重新验证，不能忽略符号或添加 glibc 兼容包。
+当前锁定 rusty_v8 是 `277195ed3ad13df707e01f1914999cca223bf908`（152.2.0）；Deno/serde_v8 锁定 `6e218631e42bf065869703d3b1cef10acbe5c769`，其适配层引用同一 V8 revision，避免两份 V8 带来的 Rust 类型与原生链接冲突。普通构建仍保留默认 `use_custom_libcxx`；仅 Linux SDK 生产显式选择 `RUSTY_V8_MOLI_LIBSTDCXX=1` 变体，并静态提供 stdc++、gcc_eh、gcc 和 atomic。ARM JIT 的指令缓存刷新需要 `libgcc.a` 中的 `__clear_cache`，不能只链接异常处理运行库。
 
-上游 [rusty_v8 v152.2.0 Release 元数据](https://api.github.com/repos/denoland/rusty_v8/releases/tags/v152.2.0) 实际包含两种 musl 静态归档及 `src_binding_release_<target>.rs`。`sdk-linux.sh` 显式指定该 Release 的 musl URL，并把下列已发布摘要作为构建输入固定下来，不在构建时动态相信远程摘要：
+btls 锁定 `c0aeb7fe5c1281611bde29868becdb7d4393ee6f`，修复 BoringSSL AR 长名称解析，避免含目录的 COFF 成员覆盖导致 ARM 前缀清单缺项。Go 最低要求由 BoringSSL 的 `go.mod`（1.24）决定，工作流使用 Go 1.27.0。Alpine 不复用参考 StraviaPlatform 的 Zig sysroot，也不复制其 stdexcept 符号弱化补丁；不得忽略符号或添加 glibc 兼容包。
 
-| 实际 V8 asset | SHA-256 |
-| --- | --- |
-| `librusty_v8_release_x86_64-unknown-linux-musl.a.gz` | `68f284fb8184b9f9e8d7e23b8f2675dbe464f43f77c0bf152f705bf7ead29558` |
-| `librusty_v8_release_aarch64-unknown-linux-musl.a.gz` | `419a242557833151cf9dde82c12c8272c3c00015bfe7e340e48164a600d34039` |
+`sdk-linux.sh` 将依赖 Release 地址固定到 `Stravia-AI/rusty_v8` 的 `v152.2.0-moli-sdk-libstdcxx.1`，不跟随 latest，也不把普通 libc++ 归档混入 SDK。每个目标使用 `librusty_v8_moli_libstdcxx_release_<target>.a.gz`、匹配的 `src_binding_moli_libstdcxx_release_<target>.rs` 和 `moli-v8-native-notices-<target>.tar.gz`。摘要作为脚本中的固定构建输入维护，不在构建时动态相信远程元数据。原生 notices 随 SDK 主包和符号包一同提供，包含 V8/第三方、Rust/编译器及 GCC 运行库许可文本。
 
-锁定的 [V8 构建脚本](https://github.com/Stravia-AI/rusty_v8/blob/ef7a55c0c71ae904b1f963aa33d6d0076168a1b5/build.rs) 校验 `RUSTY_V8_ARCHIVE_SHA256` 并编译本地扩展桥接。这里使用的是上游真实 musl 归档，不是用 GNU 库冒充 musl，也不依赖这个精简 vendor checkout 不具备的完整 V8 源码构建树。更改 V8 版本后必须同步审计这些固定输入。
+锁定的 [V8 构建脚本](https://github.com/Stravia-AI/rusty_v8/blob/277195ed3ad13df707e01f1914999cca223bf908/build.rs) 校验 `RUSTY_V8_ARCHIVE_SHA256`；SDK 生产脚本还校验下载的 bindings 和 notices，再编译本地扩展桥接。完整 V8 子模块树用于原生生产；预编译消费即使检出了这棵树，也只使用公共头接口。内部 Wasm 桥接及生成头仅由显式源码构建模式启用，不由文件是否存在决定。源码或版本变化后必须同步审计并重新验证固定输入；V8 依赖的原生消费通过不等于完整 SDK 六平台验收通过。
 
 ### 字体、Fontconfig 和证书
 
@@ -149,7 +150,7 @@ Windows 使用已安装的系统字体；Windows 消费任务不额外安装字�
 
 Alpine 构建阶段通过 `sdk-host-rustc.py` 仅让 host 构建工具动态链接 musl，使 bindgen 可以加载系统 `libclang`。显式 `--target` 的实现编译不受该设置影响，仍按静态产物契约打包；这不是引入 glibc 或放宽目标运行依赖。
 
-Windows 实现构建使用 Visual Studio 2022 工具链；x64 CI 固定 `windows-2022`，不继承已切换到 Visual Studio 2026 的滚动镜像，并安装经固定 SHA-256 校验的 NASM 2.16.03。ARM64 使用 Ninja 和 `clang-cl` 编译 BoringSSL 汇编；AWS-LC 保留其自带 ARM 汇编集成的 Visual Studio 2022 生成器。两者均链接静态 MSVC CRT。新工具链须重新完成符号隔离、链接和运行验收后再升级。
+Windows 实现构建使用 Visual Studio 2022 工具链；x64 CI 固定 `windows-2022`，不继承已切换到 Visual Studio 2026 的滚动镜像，并安装经固定 SHA-256 校验的 NASM 2.16.03。ARM64 使用 Ninja 和 `clang-cl` 编译 BoringSSL 汇编；AWS-LC 保留其自带 ARM 汇编集成的 Visual Studio 2022 生成器。两者均链接静态 MSVC CRT。生产端 Cargo/libgit2 检出完整 V8 子模块需要 `core.longpaths=true`，工作流在一次性 Windows runner 上设置；这不是 SDK 宿主的安装要求。新工具链须重新完成符号隔离、链接和运行验收后再升级。
 
 本地维护者采用前述本地覆盖流程，随后执行仓库要求的 `cargo fmt --all`、`cargo clippy --workspace --all-targets --all-features -- -D warnings` 和 `cargo nextest run --no-fail-fast`。独立 `sdk-consumer` 不属于源码工作区，须另外格式化并通过仓库外真实消费入口验证。
 
@@ -184,7 +185,7 @@ GNU/Alpine 消费任务还运行 `font-check.py`：在两个独立 Fontconfig �
 
    该命令重新计算真实文件摘要，验证包内完整清单、配对符号、共同 ABI/实现身份和六 target 完备性，然后写入 `moli-sdk/artifacts.json`。不接受缺失平台或假摘要。
 4. 将绑定作为后续 SDK 提交 `S`。`I` 与 `S` 可不同，避免“归档摘要必须包含未来自身 commit”的循环。工作流产出一个本地 `sdk-bound` commit 和增量 Git bundle，未推送它；恢复 bundle 的仓库需已含 `I`。
-5. 独立复制 `sdk-consumer` 到仓库外，通过 `verify.py --sdk-revision S --repository <精确Git仓库> --destination <新外部目录> --target ... --cache-dir ...` 运行。它记录首轮、缓存、显式离线、仅宿主修改、profile 切换、依赖编译单元以及真实公共行为。使用 `benchmark.py` 对同机器同工具链下源码集成和 SDK 集成进行匹配工作负载比较；不能以删减业务行为证明收益。
+5. 独立复制 `sdk-consumer` 到仓库外，通过 `verify.py --sdk-revision S --repository <精确Git仓库> --destination <新外部目录> --target ... --cache-dir ...` 运行。设置 `RUSTUP_TOOLCHAIN=1.96.1-<target>`，并预先安装该原生目标的 `1.98.1-<target>` Rust 工具链；脚本不会把跨版本检查降为 `cargo check`。完整入口要求优化的 release 实现，即使显式使用本地覆盖，也不能传入 `--profile dev` 包替代下载夹具所需的真实优化实现。它记录首轮、缓存、显式离线、仅宿主修改、profile 切换、依赖编译单元以及真实公共行为，并独立保存跨版本 target、编译器身份和运行证据。使用 `benchmark.py` 对同机器同工具链下源码集成和 SDK 集成进行匹配工作负载比较；不能以删减业务行为证明收益。
 6. 六平台任一失败时不得宣告完整 SDK。Actions 缓存消费通过后，Release 上传和最终 Git revision 的推送仍需相应授权。真正发布须上传**相同字节与名称**，并完成默认首次网络下载、缓存/离线和消费验收；本 workflow 不执行这一步。
 
 ### 常见失败

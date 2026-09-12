@@ -71,7 +71,11 @@ jobs:
       - name: Build on native Windows
         if: runner.os == 'Windows'
         shell: pwsh
-        run: ./scripts/sdk-windows.ps1 -Mode build -Target '${{ matrix.target }}'
+        run: |
+          # V8 完整子模块中的 libc++ 路径超过 Windows MAX_PATH；Cargo 的 libgit2 同样需要此设置。
+          git config --global core.longpaths true
+          if ($LASTEXITCODE -ne 0) { throw 'Could not enable Git long paths for the native SDK build' }
+          ./scripts/sdk-windows.ps1 -Mode build -Target '${{ matrix.target }}'
       - name: Build in native baseline Linux container
         if: runner.os == 'Linux'
         shell: bash
@@ -214,5 +218,6 @@ jobs:
           SDK_REVISION: ${{ needs.bind.outputs.sdk_revision }}
         run: |
           echo "Six native external consumer jobs passed for SDK revision $SDK_REVISION." >> "$GITHUB_STEP_SUMMARY"
+          echo 'Each target retained the Rust 1.96.1 consumer checks and freshly linked and ran the same bound SDK with a native Rust 1.98.1 debug host in an independent target directory. Both consumer executables passed the native dependency audit; this validates these fixed versions, not arbitrary Rust versions.' >> "$GITHUB_STEP_SUMMARY"
           echo 'Archives and local bound Git bundle are Actions artifacts only. No Release, push or crate publication was performed.' >> "$GITHUB_STEP_SUMMARY"
           echo 'Default network download from the intended Release remains a separate authorized publication check; these jobs use verified preseeded cache.' >> "$GITHUB_STEP_SUMMARY"
