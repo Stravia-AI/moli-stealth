@@ -120,22 +120,25 @@ pub async fn verify() {
             .unwrap();
     let script = format!(
         r#"document.body.innerHTML = '<div id="actual" style="font-family: &quot;Noto Sans CJK SC&quot;; font-size:192px; font-weight:400; line-height:224px; width:576px; height:224px; white-space:nowrap">中文国</div><div id="reference" style="width:576px;height:224px"></div>';
-        document.getElementById('reference').innerHTML = {reference};
-        JSON.stringify(Object.fromEntries(['actual','reference'].map(id => {{ const r=document.getElementById(id).getBoundingClientRect(); return [id,{{x:r.x,y:r.y,width:r.width,height:r.height}}]; }})))"#
+        document.getElementById('reference').innerHTML = {reference};"#
     );
-    let result = page
-        .evaluate(
-            &script,
-            EvaluateOptions {
-                context: Some(world),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
+    page.evaluate(
+        &script,
+        EvaluateOptions {
+            context: Some(world),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    // 修改 DOM 与读取裁剪坐标分开，先完成布局，避免采集尚未布局的新节点。
+    let layout = page.layout_metrics().await.unwrap();
+    let result = page.evaluate(
+        "JSON.stringify(Object.fromEntries(['actual','reference'].map(id => { const r=document.getElementById(id).getBoundingClientRect(); return [id,{x:r.x,y:r.y,width:r.width,height:r.height}]; })))",
+        EvaluateOptions { context: Some(world), ..Default::default() },
+    ).await.unwrap();
     let reference_geometry: serde_json::Value =
         serde_json::from_str(result["value"].as_str().unwrap()).unwrap();
-    let layout = page.layout_metrics().await.unwrap();
     let reference_screenshot = page.screenshot_png().await.unwrap();
     // Save before asserting so a rejected font leaves useful diagnostic evidence.
     if let Some(directory) = std::env::var_os("MOLI_SDK_EVIDENCE_DIR") {
